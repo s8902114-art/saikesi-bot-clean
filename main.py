@@ -32,6 +32,9 @@ SYMBOLS = [
 ]
 # ══════════════════════════
 
+# 記錄上次發送的訊號，防止重複通知
+last_signal = {}  # key: (symbol, timeframe), value: "long" | "short" | None
+
 # Flask 狀態頁面
 app = Flask(__name__)
 
@@ -102,14 +105,26 @@ def check_signal(exchange, symbol, timeframe):
     shortC3 = qqeTurnRed
 
     name = symbol.split("/")[0]
+    key  = (symbol, timeframe)
+    prev_signal = last_signal.get(key)
 
     if bullTrend and longC1 and longC2 and longC3:
-        send_tg(f"🟢 賽克斯做多訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
-        print(f"[{name}][{timeframe}] 做多訊號已發送")
+        if prev_signal != "long":
+            send_tg(f"🟢 賽克斯做多訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
+            print(f"[{name}][{timeframe}] 做多訊號已發送")
+            last_signal[key] = "long"
+        else:
+            print(f"[{name}][{timeframe}] 做多訊號（重複，略過）")
     elif bearTrend and shortC1 and shortC2 and shortC3:
-        send_tg(f"🔴 賽克斯做空訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
-        print(f"[{name}][{timeframe}] 做空訊號已發送")
+        if prev_signal != "short":
+            send_tg(f"🔴 賽克斯做空訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
+            print(f"[{name}][{timeframe}] 做空訊號已發送")
+            last_signal[key] = "short"
+        else:
+            print(f"[{name}][{timeframe}] 做空訊號（重複，略過）")
     else:
+        if prev_signal is not None:
+            last_signal[key] = None
         print(f"[{name}][{timeframe}] 無訊號")
 
 def check_all():
