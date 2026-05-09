@@ -7,7 +7,7 @@ from time import sleep
 # 填入你的設定
 # ══════════════════════════
 TG_TOKEN = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
-TG_CHAT_ID = "150066168"
+TG_CHAT_ID = "8799334828"
 
 # 要監控的幣種和時框架
 SYMBOL = "SOL/USDT"
