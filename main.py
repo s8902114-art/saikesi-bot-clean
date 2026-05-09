@@ -1,6 +1,9 @@
+import os
 import requests
 import pandas as pd
 import ccxt
+from flask import Flask
+from threading import Thread
 from time import sleep
 
 # ══════════════════════════
@@ -29,6 +32,18 @@ SYMBOLS = [
 ]
 # ══════════════════════════
 
+# Flask 狀態頁面
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot 運行中"
+
+def run_web():
+    app.run(host="0.0.0.0", port=3000)
+
+# ══════════════════════════
+
 def send_tg(msg):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     try:
@@ -52,7 +67,6 @@ def check_signal(exchange, symbol, timeframe):
 
     df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","vol"])
 
-    # EMA
     df["ema12"]  = df["close"].ewm(span=12,  adjust=False).mean()
     df["ema144"] = df["close"].ewm(span=144, adjust=False).mean()
     df["ema169"] = df["close"].ewm(span=169, adjust=False).mean()
@@ -64,7 +78,6 @@ def check_signal(exchange, symbol, timeframe):
     df["largeTop"] = df[["ema576","ema676"]].max(axis=1)
     df["largeBot"] = df[["ema576","ema676"]].min(axis=1)
 
-    # QQE MOD
     df["rsi"]   = calc_rsi(df["close"], 14)
     df["rsiMa"] = df["rsi"].ewm(span=5, adjust=False).mean()
 
@@ -93,11 +106,9 @@ def check_signal(exchange, symbol, timeframe):
     if bullTrend and longC1 and longC2 and longC3:
         send_tg(f"🟢 賽克斯做多訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
         print(f"[{name}][{timeframe}] 做多訊號已發送")
-
     elif bearTrend and shortC1 and shortC2 and shortC3:
         send_tg(f"🔴 賽克斯做空訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
         print(f"[{name}][{timeframe}] 做空訊號已發送")
-
     else:
         print(f"[{name}][{timeframe}] 無訊號")
 
@@ -109,13 +120,17 @@ def check_all():
             sleep(0.3)
     print("── 本輪檢查完畢，等待下次... ──\n")
 
-# 啟動
+# 啟動 Flask（背景執行）
+Thread(target=run_web, daemon=True).start()
+
+# 啟動通知
 send_tg(
     "✅ 賽克斯訊號機器人已啟動\n"
     "交易所：OKX 永續合約\n"
     "時框：15m、30m、1h、4h\n"
     "監控幣種：" + "、".join(s.split("/")[0] for s in SYMBOLS)
 )
+
 while True:
     try:
         check_all()
