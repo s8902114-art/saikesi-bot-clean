@@ -9,22 +9,22 @@ from time import sleep
 TG_TOKEN   = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
 TG_CHAT_ID = "8799334828"
 
-# 要監控的幣種清單
-SYMBOLS = [
-    "BTC/USDT",
-    "ETH/USDT",
-    "XRP/USDT",
-    "LTC/USDT",
-    "ADA/USDT",
-    "SUI/USDT",
-    "DOGE/USDT",
-    "LINK/USDT",
-    "XAUUSDT",
-    "ZEC/USDT",
-    "HBAR/USDT",
-]
-
 TIMEFRAME = "1h"
+
+# 幣種 → 交易所（預設幣安，特殊幣種指定）
+SYMBOLS = {
+    "BTC/USDT":  "binance",
+    "ETH/USDT":  "binance",
+    "XRP/USDT":  "binance",
+    "LTC/USDT":  "binance",
+    "ADA/USDT":  "binance",
+    "SUI/USDT":  "binance",
+    "DOGE/USDT": "binance",
+    "LINK/USDT": "binance",
+    "XAUUSDT":   "binance",
+    "ZEC/USDT":  "binance",
+    "H/USDT":    "bybit",
+}
 # ══════════════════════════
 
 def send_tg(msg):
@@ -98,14 +98,17 @@ def check_signal(exchange, symbol):
         print(f"[{symbol}] 無訊號")
 
 def check_all():
-    exchange = ccxt.binance()
-    for symbol in SYMBOLS:
-        check_signal(exchange, symbol)
+    exchanges = {
+        "binance": ccxt.binance(),
+        "bybit":   ccxt.bybit(),
+    }
+    for symbol, ex_name in SYMBOLS.items():
+        check_signal(exchanges[ex_name], symbol)
         sleep(0.5)
     print("── 本輪檢查完畢，等待下次... ──\n")
 
 # 啟動
-send_tg("✅ 賽克斯訊號機器人已啟動\n監控幣種：" + "、".join(SYMBOLS))
+send_tg("✅ 賽克斯訊號機器人已啟動\n監控幣種：" + "、".join(SYMBOLS.keys()))
 while True:
     try:
         check_all()
