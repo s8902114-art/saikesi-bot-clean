@@ -9,7 +9,8 @@ from time import sleep
 TG_TOKEN   = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
 TG_CHAT_ID = "8799334828"
 
-TIMEFRAME = "1h"
+# 監控時框
+TIMEFRAMES = ["15m", "30m", "1h", "4h"]
 
 # 全部使用 OKX 永續合約（USDT.P）
 SYMBOLS = [
@@ -42,11 +43,11 @@ def calc_rsi(series, period=14):
     rs    = gain / loss
     return 100 - (100 / (1 + rs))
 
-def check_signal(exchange, symbol):
+def check_signal(exchange, symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=700)
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=700)
     except Exception as e:
-        print(f"[{symbol}] 取得資料失敗：{e}")
+        print(f"[{symbol}][{timeframe}] 取得資料失敗：{e}")
         return
 
     df = pd.DataFrame(ohlcv, columns=["time","open","high","low","close","vol"])
@@ -87,30 +88,38 @@ def check_signal(exchange, symbol):
     shortC2 = last["close"] < last["ema12"]
     shortC3 = qqeTurnRed
 
+    name = symbol.split("/")[0]
+
     if bullTrend and longC1 and longC2 and longC3:
-        send_tg(f"🟢 賽克斯做多訊號\n幣種：{symbol}\n時框：{TIMEFRAME}\n請確認進場條件")
-        print(f"[{symbol}] 做多訊號已發送")
+        send_tg(f"🟢 賽克斯做多訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
+        print(f"[{name}][{timeframe}] 做多訊號已發送")
 
     elif bearTrend and shortC1 and shortC2 and shortC3:
-        send_tg(f"🔴 賽克斯做空訊號\n幣種：{symbol}\n時框：{TIMEFRAME}\n請確認進場條件")
-        print(f"[{symbol}] 做空訊號已發送")
+        send_tg(f"🔴 賽克斯做空訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件")
+        print(f"[{name}][{timeframe}] 做空訊號已發送")
 
     else:
-        print(f"[{symbol}] 無訊號")
+        print(f"[{name}][{timeframe}] 無訊號")
 
 def check_all():
     exchange = ccxt.okx()
     for symbol in SYMBOLS:
-        check_signal(exchange, symbol)
-        sleep(0.5)
+        for timeframe in TIMEFRAMES:
+            check_signal(exchange, symbol, timeframe)
+            sleep(0.3)
     print("── 本輪檢查完畢，等待下次... ──\n")
 
 # 啟動
-send_tg("✅ 賽克斯訊號機器人已啟動\n交易所：OKX 永續合約\n監控幣種：" + "、".join(s.split("/")[0] for s in SYMBOLS))
+send_tg(
+    "✅ 賽克斯訊號機器人已啟動\n"
+    "交易所：OKX 永續合約\n"
+    "時框：15m、30m、1h、4h\n"
+    "監控幣種：" + "、".join(s.split("/")[0] for s in SYMBOLS)
+)
 while True:
     try:
         check_all()
     except Exception as e:
         print(f"錯誤：{e}")
         send_tg(f"⚠️ 腳本錯誤：{e}")
-    sleep(3600)
+    sleep(900)  # 每 15 分鐘檢查一次（配合最短時框 15m）
