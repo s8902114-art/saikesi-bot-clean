@@ -11,22 +11,21 @@ TG_CHAT_ID = "8799334828"
 
 TIMEFRAME = "1h"
 
-# 幣種 → 交易所
-# XAU/USDT 只有幣安有，H/USDT 只有 Bybit 有，其餘全用 OKX
-SYMBOLS = {
-    "BTC/USDT":  "okx",
-    "ETH/USDT":  "okx",
-    "XRP/USDT":  "okx",
-    "LTC/USDT":  "okx",
-    "ADA/USDT":  "okx",
-    "HYPE/USDT": "okx",
-    "SUI/USDT":  "okx",
-    "DOGE/USDT": "okx",
-    "LINK/USDT": "okx",
-    "XAUUSDT":   "binance",
-    "ZEC/USDT":  "okx",
-    "H/USDT":    "bybit",
-}
+# 全部使用 OKX 永續合約（USDT.P）
+SYMBOLS = [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "XRP/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ADA/USDT:USDT",
+    "HYPE/USDT:USDT",
+    "SUI/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "LINK/USDT:USDT",
+    "XAU/USDT:USDT",
+    "ZEC/USDT:USDT",
+    "H/USDT:USDT",
+]
 # ══════════════════════════
 
 def send_tg(msg):
@@ -100,18 +99,14 @@ def check_signal(exchange, symbol):
         print(f"[{symbol}] 無訊號")
 
 def check_all():
-    exchanges = {
-        "okx":     ccxt.okx(),
-        "binance": ccxt.binance(),
-        "bybit":   ccxt.bybit(),
-    }
-    for symbol, ex_name in SYMBOLS.items():
-        check_signal(exchanges[ex_name], symbol)
+    exchange = ccxt.okx()
+    for symbol in SYMBOLS:
+        check_signal(exchange, symbol)
         sleep(0.5)
     print("── 本輪檢查完畢，等待下次... ──\n")
 
 # 啟動
-send_tg("✅ 賽克斯訊號機器人已啟動\n監控幣種：" + "、".join(SYMBOLS.keys()))
+send_tg("✅ 賽克斯訊號機器人已啟動\n交易所：OKX 永續合約\n監控幣種：" + "、".join(s.split("/")[0] for s in SYMBOLS))
 while True:
     try:
         check_all()
