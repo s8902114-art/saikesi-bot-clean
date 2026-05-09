@@ -43,6 +43,30 @@ externalPort = 3002
 localPort = 8085
 externalPort = 3003
 
+[[ports]]
+localPort = 8086
+externalPort = 4200
+
+[[ports]]
+localPort = 8087
+externalPort = 5000
+
+[[ports]]
+localPort = 8088
+externalPort = 5173
+
+[[ports]]
+localPort = 8089
+externalPort = 6000
+
+[[ports]]
+localPort = 8090
+externalPort = 6800
+
+[[ports]]
+localPort = 8091
+externalPort = 8000
+
 [nix]
 channel = "stable-25_05"
 packages = ["glibcLocales"]
