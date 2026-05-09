@@ -11,18 +11,20 @@ TG_CHAT_ID = "8799334828"
 
 TIMEFRAME = "1h"
 
-# 幣種 → 交易所（預設幣安，特殊幣種指定）
+# 幣種 → 交易所
+# XAU/USDT 只有幣安有，H/USDT 只有 Bybit 有，其餘全用 OKX
 SYMBOLS = {
-    "BTC/USDT":  "binance",
-    "ETH/USDT":  "binance",
-    "XRP/USDT":  "binance",
-    "LTC/USDT":  "binance",
-    "ADA/USDT":  "binance",
-    "SUI/USDT":  "binance",
-    "DOGE/USDT": "binance",
-    "LINK/USDT": "binance",
+    "BTC/USDT":  "okx",
+    "ETH/USDT":  "okx",
+    "XRP/USDT":  "okx",
+    "LTC/USDT":  "okx",
+    "ADA/USDT":  "okx",
+    "HYPE/USDT": "okx",
+    "SUI/USDT":  "okx",
+    "DOGE/USDT": "okx",
+    "LINK/USDT": "okx",
     "XAUUSDT":   "binance",
-    "ZEC/USDT":  "binance",
+    "ZEC/USDT":  "okx",
     "H/USDT":    "bybit",
 }
 # ══════════════════════════
@@ -99,6 +101,7 @@ def check_signal(exchange, symbol):
 
 def check_all():
     exchanges = {
+        "okx":     ccxt.okx(),
         "binance": ccxt.binance(),
         "bybit":   ccxt.bybit(),
     }
