@@ -20,6 +20,10 @@ author = "agent"
 task = "workflow.run"
 args = "賽克斯訊號機器人"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Auto Push to GitHub"
+
 [[workflows.workflow]]
 name = "賽克斯訊號機器人"
 author = "agent"
@@ -30,6 +34,17 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "python main.py"
+
+[[workflows.workflow]]
+name = "Auto Push to GitHub"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python auto_push.py"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [agent]
 stack = "PNPM_WORKSPACE"
