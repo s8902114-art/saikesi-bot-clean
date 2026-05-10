@@ -19,9 +19,38 @@ SYMBOLS = [
     "ZEC/USDT:USDT",
     "H/USDT:USDT",
 ]
-TIMEFRAMES = ["15m", "30m", "1h", "4h"]
-LIMIT      = 500   # 每個幣取幾根 K 線
+TIMEFRAMES  = ["15m", "30m", "1h", "4h"]
+TARGET_BARS = 1500   # 目標 K 線數量（分批抓）
+LOOKBACK_SL = 5      # 止損取訊號前 N 根的最高/最低點
 # ══════════════════════════
+
+def fetch_ohlcv_paginated(exchange, symbol, timeframe, target=1500):
+    """分批往前抓歷史 K 線（OKX 單次上限 300）"""
+    # 先抓最新一批
+    all_ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=300)
+    if not all_ohlcv:
+        return []
+
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000  # 每根時間長度（毫秒）
+
+    while len(all_ohlcv) < target:
+        earliest_ts = all_ohlcv[0][0]
+        new_since   = earliest_ts - 300 * tf_ms         # 往前推 300 根
+        try:
+            batch = exchange.fetch_ohlcv(symbol, timeframe, since=new_since, limit=300)
+        except Exception as e:
+            print(f"  抓取失敗：{e}")
+            break
+        if not batch:
+            break
+        # 只保留比現有資料更早的 K 線
+        batch = [c for c in batch if c[0] < earliest_ts]
+        if not batch:
+            break
+        all_ohlcv = batch + all_ohlcv
+        sleep(0.2)
+
+    return all_ohlcv[-target:]
 
 def calc_rsi(series, period=14):
     delta = series.diff()
@@ -49,7 +78,9 @@ def prepare_df(ohlcv):
 
 def backtest(df, symbol, timeframe):
     results = []
-    for i in range(1, len(df) - 1):
+    start = max(LOOKBACK_SL, 700)   # ema676 暖機後才開始
+
+    for i in range(start, len(df) - 1):
         last = df.iloc[i]
         prev = df.iloc[i - 1]
 
@@ -70,45 +101,38 @@ def backtest(df, symbol, timeframe):
         shortC2 = last["close"] < last["ema12"]
         shortC3 = qqeTurnRed
 
-        # 做多訊號
+        # ── 做多 ──
         if bullTrend and longC1 and longC2 and longC3:
             entry = last["close"]
-            sl    = last["smallBot"]          # 止損：小帶下緣
+            sl    = df.iloc[i - LOOKBACK_SL : i + 1]["low"].min()
             risk  = entry - sl
             if risk <= 0:
                 continue
-            tp = entry + risk                 # 1:1 止盈
-
-            # 往後找結果
+            tp = entry + risk
             for j in range(i + 1, len(df)):
-                future = df.iloc[j]
-                if future["low"] <= sl:
-                    results.append({"symbol": symbol, "tf": timeframe,
-                                    "dir": "多", "result": "敗"})
+                fut = df.iloc[j]
+                if fut["low"] <= sl:
+                    results.append({"symbol": symbol, "tf": timeframe, "dir": "多", "result": "敗"})
                     break
-                if future["high"] >= tp:
-                    results.append({"symbol": symbol, "tf": timeframe,
-                                    "dir": "多", "result": "勝"})
+                if fut["high"] >= tp:
+                    results.append({"symbol": symbol, "tf": timeframe, "dir": "多", "result": "勝"})
                     break
 
-        # 做空訊號
+        # ── 做空 ──
         elif bearTrend and shortC1 and shortC2 and shortC3:
             entry = last["close"]
-            sl    = last["smallTop"]          # 止損：小帶上緣
+            sl    = df.iloc[i - LOOKBACK_SL : i + 1]["high"].max()
             risk  = sl - entry
             if risk <= 0:
                 continue
-            tp = entry - risk                 # 1:1 止盈
-
+            tp = entry - risk
             for j in range(i + 1, len(df)):
-                future = df.iloc[j]
-                if future["high"] >= sl:
-                    results.append({"symbol": symbol, "tf": timeframe,
-                                    "dir": "空", "result": "敗"})
+                fut = df.iloc[j]
+                if fut["high"] >= sl:
+                    results.append({"symbol": symbol, "tf": timeframe, "dir": "空", "result": "敗"})
                     break
-                if future["low"] <= tp:
-                    results.append({"symbol": symbol, "tf": timeframe,
-                                    "dir": "空", "result": "勝"})
+                if fut["low"] <= tp:
+                    results.append({"symbol": symbol, "tf": timeframe, "dir": "空", "result": "勝"})
                     break
 
     return results
@@ -116,54 +140,53 @@ def backtest(df, symbol, timeframe):
 # ══════════════════════════
 # 主程式
 # ══════════════════════════
-print("開始回測，請稍候...\n")
+print(f"開始回測（分批抓 {TARGET_BARS} 根 K 線，止損取前 {LOOKBACK_SL} 根高低點）...\n")
 exchange    = ccxt.okx()
 all_results = []
 
 for symbol in SYMBOLS:
     name = symbol.split("/")[0]
     for tf in TIMEFRAMES:
-        try:
-            ohlcv = exchange.fetch_ohlcv(symbol, tf, limit=LIMIT)
-            df    = prepare_df(ohlcv)
-            res   = backtest(df, name, tf)
-            all_results.extend(res)
-            wins  = sum(1 for r in res if r["result"] == "勝")
-            total = len(res)
-            wr    = f"{wins/total*100:.1f}%" if total else "無訊號"
-            print(f"[{name:6s}][{tf:3s}]  訊號次數：{total:3d}  勝率：{wr}")
-        except Exception as e:
-            print(f"[{name}][{tf}] 錯誤：{e}")
-        sleep(0.3)
+        ohlcv = fetch_ohlcv_paginated(exchange, symbol, tf, TARGET_BARS)
+        if len(ohlcv) < 750:
+            print(f"[{name:6s}][{tf:3s}]  資料不足（只有 {len(ohlcv)} 根）")
+            continue
+        df  = prepare_df(ohlcv)
+        res = backtest(df, name, tf)
+        all_results.extend(res)
+        wins  = sum(1 for r in res if r["result"] == "勝")
+        total = len(res)
+        wr    = f"{wins/total*100:.1f}%" if total else "無訊號"
+        print(f"[{name:6s}][{tf:3s}]  K線：{len(ohlcv):4d}  訊號：{total:3d}  勝率：{wr}")
 
-# 整體統計
-print("\n" + "═"*40)
+# ── 整體統計 ──
+print("\n" + "═"*50)
 print("整體統計")
-print("═"*40)
+print("═"*50)
 total_all = len(all_results)
 wins_all  = sum(1 for r in all_results if r["result"] == "勝")
 if total_all:
-    print(f"總訊號次數：{total_all}")
-    print(f"總勝場次數：{wins_all}")
-    print(f"總敗場次數：{total_all - wins_all}")
-    print(f"整體勝率：  {wins_all/total_all*100:.1f}%")
+    print(f"總訊號：{total_all}  勝：{wins_all}  敗：{total_all-wins_all}  整體勝率：{wins_all/total_all*100:.1f}%")
 
-    # 依時框分組
-    print("\n依時框統計：")
+    print("\n依時框：")
     for tf in TIMEFRAMES:
-        sub   = [r for r in all_results if r["tf"] == tf]
-        w     = sum(1 for r in sub if r["result"] == "勝")
-        t     = len(sub)
-        wr    = f"{w/t*100:.1f}%" if t else "無訊號"
-        print(f"  {tf:3s}  訊號：{t:3d}  勝率：{wr}")
+        sub = [r for r in all_results if r["tf"] == tf]
+        w = sum(1 for r in sub if r["result"] == "勝")
+        t = len(sub)
+        print(f"  {tf:3s}  訊號：{t:3d}  勝率：{w/t*100:.1f}%" if t else f"  {tf:3s}  無訊號")
 
-    # 依方向分組
-    print("\n依方向統計：")
+    print("\n依方向：")
     for d in ["多", "空"]:
         sub = [r for r in all_results if r["dir"] == d]
-        w   = sum(1 for r in sub if r["result"] == "勝")
-        t   = len(sub)
-        wr  = f"{w/t*100:.1f}%" if t else "無訊號"
-        print(f"  做{d}  訊號：{t:3d}  勝率：{wr}")
+        w = sum(1 for r in sub if r["result"] == "勝")
+        t = len(sub)
+        print(f"  做{d}  訊號：{t:3d}  勝率：{w/t*100:.1f}%" if t else f"  做{d}  無訊號")
+
+    print("\n依幣種：")
+    for nm in list(dict.fromkeys(r["symbol"] for r in all_results)):
+        sub = [r for r in all_results if r["symbol"] == nm]
+        w = sum(1 for r in sub if r["result"] == "勝")
+        t = len(sub)
+        print(f"  {nm:6s}  訊號：{t:3d}  勝率：{w/t*100:.1f}%" if t else f"  {nm:6s}  無訊號")
 else:
-    print("無任何訊號產生")
+    print("無任何訊號，資料可能不足")
