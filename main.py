@@ -6,7 +6,7 @@ from flask import Flask
 from threading import Thread
 from time import sleep
 
-# ══════════════════════════
+# #══════════════════════════
 # 填入你的設定
 # ══════════════════════════
 TG_TOKEN = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
