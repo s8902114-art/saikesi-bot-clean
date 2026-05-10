@@ -68,11 +68,37 @@ def calc_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
+def fetch_ohlcv_paginated(exchange, symbol, timeframe, target=1500):
+    """分批往前抓歷史 K 線（OKX 單次上限 300）"""
+    all_ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=300)
+    if not all_ohlcv:
+        return []
+    tf_ms = exchange.parse_timeframe(timeframe) * 1000
+    while len(all_ohlcv) < target:
+        earliest_ts = all_ohlcv[0][0]
+        new_since   = earliest_ts - 300 * tf_ms
+        try:
+            batch = exchange.fetch_ohlcv(symbol, timeframe, since=new_since, limit=300)
+        except:
+            break
+        if not batch:
+            break
+        batch = [c for c in batch if c[0] < earliest_ts]
+        if not batch:
+            break
+        all_ohlcv = batch + all_ohlcv
+        sleep(0.2)
+    return all_ohlcv[-target:]
+
+
 def check_signal(exchange, symbol, timeframe):
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=700)
+        ohlcv = fetch_ohlcv_paginated(exchange, symbol, timeframe, target=1500)
     except Exception as e:
         print(f"[{symbol}][{timeframe}] 取得資料失敗：{e}")
+        return
+    if len(ohlcv) < 700:
+        print(f"[{symbol}][{timeframe}] 資料不足（{len(ohlcv)} 根），略過")
         return
 
     df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "vol"])
