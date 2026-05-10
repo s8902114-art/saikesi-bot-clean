@@ -145,21 +145,37 @@ def check_signal(exchange, symbol, timeframe):
     key = (symbol, timeframe)
     prev_signal = last_signal.get(key)
 
+    entry_price = last["close"]
+    long_sl     = df.iloc[-6:-1]["low"].min()   # 前 5 根最低點
+    short_sl    = df.iloc[-6:-1]["high"].max()  # 前 5 根最高點
+    long_tp     = round(entry_price + (entry_price - long_sl), 4)
+    short_tp    = round(entry_price - (short_sl - entry_price), 4)
+
     if bullTrend and longC1 and longC2 and longC3:
         if prev_signal != "long":
             send_tg(
-                f"🟢 賽克斯做多訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件"
+                f"🟢 賽克斯做多訊號\n"
+                f"幣種：{name}\n"
+                f"時框：{timeframe}\n"
+                f"入場價：{entry_price}\n"
+                f"止損：{round(long_sl, 4)}（前5根最低）\n"
+                f"止盈(1:1)：{long_tp}"
             )
-            print(f"[{name}][{timeframe}] 做多訊號已發送")
+            print(f"[{name}][{timeframe}] 做多訊號已發送 入場:{entry_price} SL:{round(long_sl,4)}")
             last_signal[key] = "long"
         else:
             print(f"[{name}][{timeframe}] 做多訊號（重複，略過）")
     elif bearTrend and shortC1 and shortC2 and shortC3:
         if prev_signal != "short":
             send_tg(
-                f"🔴 賽克斯做空訊號\n幣種：{name}\n時框：{timeframe}\n請確認進場條件"
+                f"🔴 賽克斯做空訊號\n"
+                f"幣種：{name}\n"
+                f"時框：{timeframe}\n"
+                f"入場價：{entry_price}\n"
+                f"止損：{round(short_sl, 4)}（前5根最高）\n"
+                f"止盈(1:1)：{short_tp}"
             )
-            print(f"[{name}][{timeframe}] 做空訊號已發送")
+            print(f"[{name}][{timeframe}] 做空訊號已發送 入場:{entry_price} SL:{round(short_sl,4)}")
             last_signal[key] = "short"
         else:
             print(f"[{name}][{timeframe}] 做空訊號（重複，略過）")
