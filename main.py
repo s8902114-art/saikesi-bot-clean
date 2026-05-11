@@ -475,3 +475,5 @@ while True:
         print(f"錯誤：{e}")
         send_tg(f"⚠️ 錯誤：{e}")
         sleep(60)
+
+

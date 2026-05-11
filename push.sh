@@ -1,22 +1,32 @@
 #!/bin/bash
 REPO="https://${GITHUB_TOKEN}@github.com/s8902114-art/saikesi-bot-.git"
 
-# 等待 git 鎖定解除（Replit 會自動跑 git checkpoint，可能衝突）
+# 設定 git 身份（commit 必要）
+git config user.email "bot@saikesi.local"
+git config user.name "Saikesi Bot"
+
+# 等待 git 鎖定解除
 for i in 1 2 3 4 5; do
     if [ ! -f .git/index.lock ] && [ ! -f .git/config.lock ]; then
         break
     fi
-    echo "[push] 等待 git 鎖定解除（第 $i 次）..."
+    echo "[push] 等待 git 鎖定（第 $i 次）..."
     sleep 3
 done
 
-git add main.py backtest.py auto_push.py push.sh requirements.txt Procfile runtime.txt
+# 嘗試 stage 並 commit 新變更
+git add main.py backtest.py auto_push.py push.sh requirements.txt Procfile runtime.txt 2>&1
 
-# 如果沒有變更就不 commit
 if git diff --cached --quiet; then
-    echo "[push] 無變更，略過"
-    exit 0
+    echo "[push] 無新變更，直接推送現有 commit..."
+else
+    git commit -m "更新：$(date '+%Y-%m-%d %H:%M')" 2>&1
 fi
 
-git commit -m "更新：$(date '+%Y-%m-%d %H:%M')"
-git push "$REPO" main && echo "[push] 推送完成" || echo "[push] 推送失敗"
+# 強制推送（本地為準，覆蓋 GitHub 上的衝突）
+PUSH_OUT=$(git push "$REPO" main --force 2>&1)
+if [ $? -eq 0 ]; then
+    echo "[push] ✅ 推送完成"
+else
+    echo "[push] ❌ 失敗：$PUSH_OUT"
+fi
