@@ -357,6 +357,22 @@ def check_signal(exchange, symbol, timeframe):
         send_tg(f"⛔ 訊號被過濾\n幣種：{name}  時框：{timeframe}\n方向：{'做多' if is_long else '做空'}\n原因：{reason_str}")
         return
 
+    # ── 多週期確認（15m / 30m 需符合 1h 趨勢）──
+    if timeframe in ("15m", "30m"):
+        try:
+            ohlcv_1h = fetch_ohlcv_paginated(exchange, symbol, "1h", target=700)
+            if len(ohlcv_1h) >= 200:
+                df1h = pd.DataFrame(ohlcv_1h, columns=["time","open","high","low","close","vol"])
+                ema144_1h = df1h["close"].ewm(span=144, adjust=False).mean().iloc[-1]
+                ema576_1h = df1h["close"].ewm(span=576, adjust=False).mean().iloc[-1]
+                trend_ok = (ema144_1h > ema576_1h) if is_long else (ema144_1h < ema576_1h)
+                if not trend_ok:
+                    print(f"[{name}][{timeframe}] ⛔ 1h趨勢不一致，略過")
+                    send_tg(f"⛔ 訊號被過濾\n幣種：{name}  時框：{timeframe}\n方向：{'做多' if is_long else '做空'}\n原因：1h趨勢不一致")
+                    return
+        except Exception as e:
+            print(f"[{name}][{timeframe}] 1h趨勢確認失敗（略過過濾）: {e}")
+
     # ── 止損止盈計算 ──
     entry   = last["close"]
     atr     = calc_atr(df.iloc[:ci])
