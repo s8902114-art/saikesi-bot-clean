@@ -1,7 +1,7 @@
 #!/bin/bash
-REPO="https://${GITHUB_TOKEN}@github.com/s8902114-art/saikesi-bot-.git"
+REPO="https://${GITHUB_TOKEN}@github.com/s8902114-art/saikesi-bot-clean.git"
 
-# 設定 git 身份（commit 必要）
+# 設定 git 身份
 git config user.email "bot@saikesi.local"
 git config user.name "Saikesi Bot"
 
@@ -14,7 +14,7 @@ for i in 1 2 3 4 5; do
     sleep 3
 done
 
-# 嘗試 stage 並 commit 新變更
+# Stage 並 commit 新變更
 git add main.py backtest.py auto_push.py push.sh requirements.txt Procfile runtime.txt 2>&1
 
 if git diff --cached --quiet; then
@@ -23,10 +23,10 @@ else
     git commit -m "更新：$(date '+%Y-%m-%d %H:%M')" 2>&1
 fi
 
-# 強制推送（本地為準，覆蓋 GitHub 上的衝突）
+# 強制推送到新乾淨 repo
 PUSH_OUT=$(git push "$REPO" main --force 2>&1)
 if [ $? -eq 0 ]; then
-    echo "[push] ✅ 推送完成"
+    echo "[push] ✅ 推送完成 → saikesi-bot-clean"
 else
     echo "[push] ❌ 失敗：$PUSH_OUT"
 fi
