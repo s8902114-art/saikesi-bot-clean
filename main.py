@@ -529,7 +529,9 @@ def check_signal(exchange, symbol, timeframe):
 
     if is_long:
         if prev_sig != "long":
-            send_tg(
+            cb_key = f"{name}_{timeframe}_{int(datetime.now(timezone.utc).timestamp())}"
+            pending_orders[cb_key] = {"symbol": symbol, "direction": "long"}
+            send_tg_with_buttons(
                 f"🟢 賽克斯做多訊號\n"
                 f"幣種：{name}  |  時框：{timeframe}\n"
                 f"入場價：{entry}\n"
@@ -540,7 +542,8 @@ def check_signal(exchange, symbol, timeframe):
                 f"📌 止盈1達到後，剩餘止損移至：{be_sl}\n"
                 f"━━━━━━━━━━━━\n"
                 f"Funding：{funding_str}\n"
-                f"CVD+OI：{cvd_reason}"
+                f"CVD+OI：{cvd_reason}",
+                cb_key
             )
             print(f"[{name}][{timeframe}] 🟢 做多 入場:{entry} SL:{sl} TP1:{tp1} TP2:{tp2} BE:{be_sl}")
             last_signal[key] = "long"
@@ -549,7 +552,9 @@ def check_signal(exchange, symbol, timeframe):
 
     else:
         if prev_sig != "short":
-            send_tg(
+            cb_key = f"{name}_{timeframe}_{int(datetime.now(timezone.utc).timestamp())}"
+            pending_orders[cb_key] = {"symbol": symbol, "direction": "short"}
+            send_tg_with_buttons(
                 f"🔴 賽克斯做空訊號\n"
                 f"幣種：{name}  |  時框：{timeframe}\n"
                 f"入場價：{entry}\n"
@@ -560,7 +565,8 @@ def check_signal(exchange, symbol, timeframe):
                 f"📌 止盈1達到後，剩餘止損移至：{be_sl}\n"
                 f"━━━━━━━━━━━━\n"
                 f"Funding：{funding_str}\n"
-                f"CVD+OI：{cvd_reason}"
+                f"CVD+OI：{cvd_reason}",
+                cb_key
             )
             print(f"[{name}][{timeframe}] 🔴 做空 入場:{entry} SL:{sl} TP1:{tp1} TP2:{tp2} BE:{be_sl}")
             last_signal[key] = "short"
