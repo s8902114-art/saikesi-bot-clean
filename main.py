@@ -505,26 +505,30 @@ def check_signal(exchange, symbol, timeframe):
         except Exception as e:
             print(f"[{name}][{timeframe}] 1h趨勢確認失敗（略過過濾）: {e}")
 
-    # ── 止損止盈計算 ──
-    entry   = last["close"]
-    atr     = calc_atr(df.iloc[:ci])
+    # ── 止損止盈計算（進場價用 OKX 即時報價）──
+    atr = calc_atr(df.iloc[:ci])
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        entry  = round(ticker["last"], 6)
+    except Exception:
+        entry  = round(last["close"], 6)   # 抓不到即時價則退回 K 線收盤
 
     if direction == "long":
-        sl_raw  = find_structure_sl(df.iloc[:ci+1], "long", lookback=30)
-        sl      = round(sl_raw - atr * 0.1, 6)          # 結構低點再寬 0.1 ATR 緩衝
-        risk    = entry - sl
-        tp1     = round(entry + risk, 6)                  # 1:1  (50% 倉位)
-        tp2     = round(entry + risk * 2, 6)              # 1:2  (剩50%)
-        be_sl   = round(entry * (1 + TAKER_FEE * 2), 6)  # 止盈1後移動止損到成本+手續費
+        sl_raw = find_structure_sl(df.iloc[:ci+1], "long", lookback=30)
+        sl     = round(sl_raw - atr * 0.1, 6)       # 結構低點再寬 0.1 ATR 緩衝
+        risk   = entry - sl
+        tp1    = round(entry + risk, 6)              # 1:1  (50% 倉位)
+        tp2    = round(entry + risk * 2, 6)          # 1:2  (剩50%)
+        be_sl  = round(entry * (1 + TAKER_FEE * 2), 6)
     else:
-        sl_raw  = find_structure_sl(df.iloc[:ci+1], "short", lookback=30)
-        sl      = round(sl_raw + atr * 0.1, 6)
-        risk    = sl - entry
-        tp1     = round(entry - risk, 6)
-        tp2     = round(entry - risk * 2, 6)
-        be_sl   = round(entry * (1 - TAKER_FEE * 2), 6)
+        sl_raw = find_structure_sl(df.iloc[:ci+1], "short", lookback=30)
+        sl     = round(sl_raw + atr * 0.1, 6)
+        risk   = sl - entry
+        tp1    = round(entry - risk, 6)
+        tp2    = round(entry - risk * 2, 6)
+        be_sl  = round(entry * (1 - TAKER_FEE * 2), 6)
 
-    rr      = round(risk / entry * 100, 2)  # 止損距離 %
+    rr = round(risk / entry * 100, 2)  # 止損距離 %
     funding_str = f"{funding:.4%}" if funding is not None else "N/A"
 
     if is_long:
