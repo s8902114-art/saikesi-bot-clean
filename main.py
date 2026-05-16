@@ -196,7 +196,8 @@ def poll_tg_callbacks():
                     if order:
                         answer_callback(cq_id, "下單中...")
                         Thread(target=place_okx_order,
-                               args=(order["symbol"], order["direction"]),
+                               args=(order["symbol"], order["direction"],
+                                     order["sl"], order["tp1"], order["tp2"]),
                                daemon=True).start()
                     else:
                         answer_callback(cq_id, "訊號已過期")
