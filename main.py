@@ -603,6 +603,7 @@ def check_timeframes(exchange, due_tfs):
 # 啟動
 # =====================
 Thread(target=run_web, daemon=True).start()
+Thread(target=poll_tg_callbacks, daemon=True).start()
 
 exchange = ccxt.okx()
 exchange.load_markets()
@@ -617,7 +618,8 @@ send_tg(
     "止盈：分批（50%@1:1，50%@1:2）\n"
     "止盈1後止損移至：成本+手續費\n"
     "過濾：Funding Rate + CVD+OI吸收背離\n"
-    f"監控：{len(SYMBOLS)} 個幣（市值前100 x OKX x Coinalyze）"
+    f"監控：{len(SYMBOLS)} 個幣（市值前100 x OKX x Coinalyze）\n"
+    "🔔 訊號發出後可按按鈕確認下單（OKX 期貨，5x槓桿，10%餘額）"
 )
 
 while True:
