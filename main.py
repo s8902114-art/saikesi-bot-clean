@@ -84,13 +84,13 @@ def answer_callback(callback_query_id, text=""):
 # =====================
 # OKX 下單
 # =====================
-def place_okx_order(symbol, direction):
+def place_okx_order(symbol, direction, sl, tp1, tp2):
     try:
         ex = ccxt.okx({
-            "apiKey":     OKX_API_KEY,
-            "secret":     OKX_SECRET_KEY,
-            "password":   OKX_PASSPHRASE,
-            "options":    {"defaultType": "swap"},
+            "apiKey":   OKX_API_KEY,
+            "secret":   OKX_SECRET_KEY,
+            "password": OKX_PASSPHRASE,
+            "options":  {"defaultType": "swap"},
         })
         ex.load_markets()
 
@@ -104,33 +104,64 @@ def place_okx_order(symbol, direction):
         # 設定槓桿
         ex.set_leverage(ORDER_LEVERAGE, symbol)
 
-        # 計算下單張數（以 USDT 計算名義價值）
+        # 計算下單張數
         ticker = ex.fetch_ticker(symbol)
         price  = ticker["last"]
         notional = usdt * ORDER_PCT * ORDER_LEVERAGE
         market = ex.market(symbol)
         contract_size = market.get("contractSize", 1)
-        amount = notional / price / contract_size
-        amount = round(amount, market.get("precision", {}).get("amount", 3))
+        prec = market.get("precision", {}).get("amount", 3)
+        amount = round(notional / price / contract_size, prec)
+        half   = round(amount / 2, prec)
         if amount <= 0:
             send_tg("⚠️ 下單失敗：計算張數為 0，請確認帳戶餘額")
             return
 
-        side = "buy" if direction == "long" else "sell"
-        order = ex.create_market_order(symbol, side, amount)
-        order_id = order.get("id", "N/A")
-        filled   = order.get("average") or price
+        is_long  = (direction == "long")
+        entry_side = "buy"  if is_long else "sell"
+        exit_side  = "sell" if is_long else "buy"
 
-        send_tg(
-            f"✅ 下單成功\n"
-            f"幣種：{symbol}\n"
-            f"方向：{'做多' if direction == 'long' else '做空'}\n"
-            f"槓桿：{ORDER_LEVERAGE}x  |  張數：{amount}\n"
-            f"成交均價：{filled}\n"
-            f"USDT 使用：{round(usdt * ORDER_PCT, 2)}\n"
-            f"訂單ID：{order_id}"
-        )
-        print(f"[OKX] 下單成功 {symbol} {side} {amount}張 @ {filled}")
+        # ── 1. 市價進場 ──
+        entry_order = ex.create_market_order(symbol, entry_side, amount)
+        order_id    = entry_order.get("id", "N/A")
+        filled      = entry_order.get("average") or price
+
+        results = [f"✅ 進場成功\n幣種：{symbol}  方向：{'做多' if is_long else '做空'}\n"
+                   f"槓桿：{ORDER_LEVERAGE}x  |  張數：{amount}\n"
+                   f"成交均價：{filled}  |  ID：{order_id}"]
+
+        # ── 2. 止損單（整口，觸發市價平倉）──
+        try:
+            sl_order = ex.create_order(
+                symbol, "stop_market", exit_side, amount, None,
+                {"stopPrice": sl, "reduceOnly": True}
+            )
+            results.append(f"🛑 止損單掛出：{sl}（ID：{sl_order.get('id','N/A')}）")
+        except Exception as e:
+            results.append(f"⚠️ 止損單失敗：{e}")
+
+        # ── 3. 止盈1 限價單（50% 倉位）──
+        try:
+            tp1_order = ex.create_limit_order(
+                symbol, exit_side, half, tp1,
+                {"reduceOnly": True}
+            )
+            results.append(f"🎯 止盈1限價掛出：{tp1}  x{half}張（ID：{tp1_order.get('id','N/A')}）")
+        except Exception as e:
+            results.append(f"⚠️ 止盈1單失敗：{e}")
+
+        # ── 4. 止盈2 限價單（剩餘 50%）──
+        try:
+            tp2_order = ex.create_limit_order(
+                symbol, exit_side, half, tp2,
+                {"reduceOnly": True}
+            )
+            results.append(f"🎯 止盈2限價掛出：{tp2}  x{half}張（ID：{tp2_order.get('id','N/A')}）")
+        except Exception as e:
+            results.append(f"⚠️ 止盈2單失敗：{e}")
+
+        send_tg("\n".join(results))
+        print(f"[OKX] 進場+SL+TP1+TP2 完成 {symbol} {entry_side} {amount}張")
 
     except Exception as e:
         send_tg(f"⚠️ 下單失敗：{e}")
