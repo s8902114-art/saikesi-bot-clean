@@ -562,7 +562,8 @@ def check_signal(exchange, symbol, timeframe):
     if is_long:
         if prev_sig != "long":
             cb_key = f"{name}_{timeframe}_{int(datetime.now(timezone.utc).timestamp())}"
-            pending_orders[cb_key] = {"symbol": symbol, "direction": "long"}
+            pending_orders[cb_key] = {"symbol": symbol, "direction": "long",
+                                      "sl": sl, "tp1": tp1, "tp2": tp2}
             send_tg_with_buttons(
                 f"🟢 賽克斯做多訊號\n"
                 f"幣種：{name}  |  時框：{timeframe}\n"
@@ -585,7 +586,8 @@ def check_signal(exchange, symbol, timeframe):
     else:
         if prev_sig != "short":
             cb_key = f"{name}_{timeframe}_{int(datetime.now(timezone.utc).timestamp())}"
-            pending_orders[cb_key] = {"symbol": symbol, "direction": "short"}
+            pending_orders[cb_key] = {"symbol": symbol, "direction": "short",
+                                      "sl": sl, "tp1": tp1, "tp2": tp2}
             send_tg_with_buttons(
                 f"🔴 賽克斯做空訊號\n"
                 f"幣種：{name}  |  時框：{timeframe}\n"
