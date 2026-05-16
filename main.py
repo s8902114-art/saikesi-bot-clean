@@ -505,13 +505,9 @@ def check_signal(exchange, symbol, timeframe):
         except Exception as e:
             print(f"[{name}][{timeframe}] 1h趨勢確認失敗（略過過濾）: {e}")
 
-    # ── 止損止盈計算（進場價用 OKX 即時報價）──
-    atr = calc_atr(df.iloc[:ci])
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        entry  = round(ticker["last"], 6)
-    except Exception:
-        entry  = round(last["close"], 6)   # 抓不到即時價則退回 K 線收盤
+    # ── 止損止盈計算（進場價用 K 線收盤價）──
+    atr   = calc_atr(df.iloc[:ci])
+    entry = round(last["close"], 6)
 
     if direction == "long":
         sl_raw = find_structure_sl(df.iloc[:ci+1], "long", lookback=30)
