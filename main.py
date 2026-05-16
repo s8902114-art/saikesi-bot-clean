@@ -15,6 +15,16 @@ TG_TOKEN      = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
 TG_CHAT_ID    = "8799334828"
 COINALYZE_KEY = "82087740-b30d-479f-8846-5ffb51540b19"
 
+OKX_API_KEY    = os.environ.get("OKX_API_KEY", "")
+OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY", "")
+OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
+
+ORDER_LEVERAGE   = 5       # 槓桿倍數
+ORDER_PCT        = 0.10    # 用帳戶餘額的 10%
+
+# 暫存待確認訂單  callback_data -> {symbol, direction, entry, sl, tp1, tp2, be_sl}
+pending_orders = {}
+
 TIMEFRAMES = ["15m", "30m", "1h", "4h"]
 TF_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400}
 TF_MAP     = {"15m": "15min", "30m": "30min", "1h": "1hour", "4h": "4hour"}
