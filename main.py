@@ -58,6 +58,128 @@ def send_tg(msg):
     except Exception:
         pass
 
+def send_tg_with_buttons(msg, callback_data):
+    try:
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ 確認下單", "callback_data": f"confirm_{callback_data}"},
+                {"text": "❌ 跳過",     "callback_data": f"skip_{callback_data}"}
+            ]]
+        }
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT_ID, "text": msg,
+                  "reply_markup": keyboard}, timeout=10)
+    except Exception as e:
+        print(f"[TG按鈕] 發送失敗: {e}")
+
+def answer_callback(callback_query_id, text=""):
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/answerCallbackQuery",
+            json={"callback_query_id": callback_query_id, "text": text}, timeout=10)
+    except Exception:
+        pass
+
+# =====================
+# OKX 下單
+# =====================
+def place_okx_order(symbol, direction):
+    try:
+        ex = ccxt.okx({
+            "apiKey":     OKX_API_KEY,
+            "secret":     OKX_SECRET_KEY,
+            "password":   OKX_PASSPHRASE,
+            "options":    {"defaultType": "swap"},
+        })
+        ex.load_markets()
+
+        # 取得 USDT 餘額
+        balance = ex.fetch_balance()
+        usdt = balance["USDT"]["free"] if "USDT" in balance else 0
+        if usdt <= 0:
+            send_tg("⚠️ 下單失敗：帳戶 USDT 餘額不足")
+            return
+
+        # 設定槓桿
+        ex.set_leverage(ORDER_LEVERAGE, symbol)
+
+        # 計算下單張數（以 USDT 計算名義價值）
+        ticker = ex.fetch_ticker(symbol)
+        price  = ticker["last"]
+        notional = usdt * ORDER_PCT * ORDER_LEVERAGE
+        market = ex.market(symbol)
+        contract_size = market.get("contractSize", 1)
+        amount = notional / price / contract_size
+        amount = round(amount, market.get("precision", {}).get("amount", 3))
+        if amount <= 0:
+            send_tg("⚠️ 下單失敗：計算張數為 0，請確認帳戶餘額")
+            return
+
+        side = "buy" if direction == "long" else "sell"
+        order = ex.create_market_order(symbol, side, amount)
+        order_id = order.get("id", "N/A")
+        filled   = order.get("average") or price
+
+        send_tg(
+            f"✅ 下單成功\n"
+            f"幣種：{symbol}\n"
+            f"方向：{'做多' if direction == 'long' else '做空'}\n"
+            f"槓桿：{ORDER_LEVERAGE}x  |  張數：{amount}\n"
+            f"成交均價：{filled}\n"
+            f"USDT 使用：{round(usdt * ORDER_PCT, 2)}\n"
+            f"訂單ID：{order_id}"
+        )
+        print(f"[OKX] 下單成功 {symbol} {side} {amount}張 @ {filled}")
+
+    except Exception as e:
+        send_tg(f"⚠️ 下單失敗：{e}")
+        print(f"[OKX] 下單失敗: {e}")
+
+# =====================
+# Telegram 回調輪詢
+# =====================
+_tg_offset = 0
+
+def poll_tg_callbacks():
+    global _tg_offset
+    while True:
+        try:
+            r = requests.get(
+                f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates",
+                params={"offset": _tg_offset, "timeout": 30,
+                        "allowed_updates": ["callback_query"]},
+                timeout=40)
+            data = r.json()
+            for update in data.get("result", []):
+                _tg_offset = update["update_id"] + 1
+                cq = update.get("callback_query")
+                if not cq:
+                    continue
+                cb_data  = cq.get("data", "")
+                cq_id    = cq["id"]
+
+                if cb_data.startswith("confirm_"):
+                    key = cb_data[len("confirm_"):]
+                    order = pending_orders.pop(key, None)
+                    if order:
+                        answer_callback(cq_id, "下單中...")
+                        Thread(target=place_okx_order,
+                               args=(order["symbol"], order["direction"]),
+                               daemon=True).start()
+                    else:
+                        answer_callback(cq_id, "訊號已過期")
+
+                elif cb_data.startswith("skip_"):
+                    key = cb_data[len("skip_"):]
+                    pending_orders.pop(key, None)
+                    answer_callback(cq_id, "已跳過")
+                    send_tg("❌ 已跳過此訊號")
+
+        except Exception as e:
+            print(f"[TG輪詢] 錯誤: {e}")
+            sleep(5)
+
 # =====================
 # 市值前100 幣單管理
 # =====================
