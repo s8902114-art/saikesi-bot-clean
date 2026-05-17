@@ -13,9 +13,9 @@ from datetime import datetime, timezone, timedelta
 # =====================
 # 設定區
 # =====================
-TG_TOKEN      = os.environ.get("TG_TOKEN", "")
-TG_CHAT_ID    = os.environ.get("TG_CHAT_ID", "")
-COINALYZE_KEY = os.environ.get("COINALYZE_KEY", "")
+TG_TOKEN      = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
+TG_CHAT_ID    = "8799334828"
+COINALYZE_KEY = "82087740-b30d-479f-8846-5ffb51540b19"
 OKX_API_KEY    = os.environ.get("OKX_API_KEY", "")
 OKX_SECRET_KEY = os.environ.get("OKX_SECRET_KEY", "")
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
