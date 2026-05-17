@@ -9,7 +9,6 @@ from threading import Thread
 from time import sleep
 from datetime import datetime, timezone, timedelta
 
-load_dotenv()
 
 # =====================
 # 設定區
