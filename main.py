@@ -1,3 +1,4 @@
+# 賽克斯訊號機器人 v4 — 推送時間：2026-05-17
 import os
 import json
 import requests
