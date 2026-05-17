@@ -573,6 +573,7 @@ exchange.load_markets()
 update_symbols(exchange, force=False)
 Thread(target=weekly_symbol_updater, args=(exchange,), daemon=True).start()
 
+print("[啟動] 發送 TG 啟動通知...")
 send_tg(
     "✅ 賽克斯機器人 v6（多空獨立優化）已啟動\n"
     "━━━━━━━━━━━━━━━━━\n"
