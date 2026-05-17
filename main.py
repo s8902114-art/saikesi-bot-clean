@@ -4,7 +4,6 @@ import json
 import requests
 import pandas as pd
 import ccxt
-from dotenv import load_dotenv
 from flask import Flask
 from threading import Thread
 from time import sleep
