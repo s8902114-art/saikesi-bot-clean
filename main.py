@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 賽克斯訊號機器人 v4 — Production-Grade QQE MOD Signal Bot
-TG 按鈕確認下單 | K棒收盤觸發 | 40+ 幣種 | 四時框 15m/30m/1H/4H
+Discord 按鈕確認下單 | K棒收盤觸發 | 40+ 幣種 | 四時框 15m/30m/1H/4H
 """
 import sys, io
 if hasattr(sys.stdout, "reconfigure"):
@@ -25,28 +25,34 @@ import ccxt
 import numpy as np
 import pandas as pd
 import requests
-from flask import Flask
+from flask import Flask, request, jsonify
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  USER CONFIGURATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-COINALYZE_API_KEY = "82087740-b30d-479f-8846-5ffb51540b19"
-TG_BOT_TOKEN      = "7642408367:AAG_6HS6BLeHtST2cKjNjaU6Ajpmbe_cj8w"
-TG_CHAT_ID        = "8799334828"
+COINALYZE_API_KEY  = "82087740-b30d-479f-8846-5ffb51540b19"
+
+# Discord 設定
+DISCORD_TOKEN      = os.environ.get("DISCORD_TOKEN", "MTUwNTk3MjU1ODg3OTUyNjkzMg.GBZAKE.oKHQLWmLrVg0eAF4Ak9Ikfsg51bIIthOnlFZII")
+DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "1505971611042320616")
+
+# Telegram 保留（可不設定，設了會同時發）
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID   = os.environ.get("TG_CHAT_ID", "")
 
 OKX_API_KEY    = os.environ.get("OKX_API_KEY", "")
 OKX_SECRET     = os.environ.get("OKX_SECRET_KEY", "")
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
 OKX_DEMO       = False
 
-MAX_LEVERAGE     = 100    # 最高槓桿上限（可由 /setmaxlev 修改）
-MARGIN_PCT       = 10.0   # 每倉保證金佔可用餘額 %（可由 /setrisk 修改）
-SIGNAL_COOLDOWN  = 1800   # 防重複：同幣同時框同方向 30 分鐘內不重發
-_LIVE_MODE       = False  # 可由 /setlive /setpaper 切換
-_PAUSED          = True   # 可由 /pause /resume 切換（暫停發送訊號）
+MAX_LEVERAGE     = 100
+MARGIN_PCT       = 10.0
+SIGNAL_COOLDOWN  = 1800
+_LIVE_MODE       = False
+_PAUSED          = True
 _BOT_START_TS    = time.time()
-_bot_ref         = None   # TradingBotV3 實例（供 /status 查詢未平倉數）
+_bot_ref         = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FIXED STRATEGY CONSTANTS
@@ -54,8 +60,8 @@ _bot_ref         = None   # TradingBotV3 實例（供 /status 查詢未平倉數
 
 OKX_BASE  = "https://www.okx.com"
 CONA_BASE = "https://api.coinalyze.net/v1"
+DC_BASE   = "https://discord.com/api/v10"
 
-# inst_id → label（永續合約）
 SYMBOLS: Dict[str, str] = {
     "BTC-USDT-SWAP":    "BTC/USDT",
     "ETH-USDT-SWAP":    "ETH/USDT",
@@ -99,10 +105,8 @@ SYMBOLS: Dict[str, str] = {
     "SKY-USDT-SWAP":    "SKY/USDT",
 }
 
-# label → swap inst_id（自動由 SYMBOLS 反推）
 OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 
-# Coinalyze 現貨 CVD（有資料的幣）
 CONA_SPOT: Dict[str, str] = {
     "BTC/USDT":   "BTCUSDT.A",
     "ETH/USDT":   "ETHUSDT.A",
@@ -136,7 +140,6 @@ CONA_SPOT: Dict[str, str] = {
     "ONDO/USDT":  "ONDOUSDT.A",
 }
 
-# Coinalyze 合約 CVD + OI（有資料的幣）
 CONA_PERP: Dict[str, str] = {
     "BTC/USDT":   "BTCUSDT_PERP.A",
     "ETH/USDT":   "ETHUSDT_PERP.A",
@@ -182,7 +185,6 @@ DEFAULT_TF_PLAN = [
     ("4H",  900, ["long", "short"]),
 ]
 
-# QQE MOD — 固定參數
 QQE_RSI       = 6
 QQE_SF        = 5
 QQE_FACTOR_P  = 3.0
@@ -200,7 +202,6 @@ MAX_CONSEC_LOSS   = 3
 PAUSE_HOURS       = 24
 
 BEST_PARAMS: Dict[str, Dict] = {
-    # 日內（15m/30m）: TP1=1.725 TP2多=1.8 TP2空=3.2
     "15m_long":  {"tp1_mult": 1.725, "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
                   "sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed"},
     "15m_short": {"tp1_mult": 2.0,   "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
@@ -209,7 +210,6 @@ BEST_PARAMS: Dict[str, Dict] = {
                   "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed"},
     "30m_short": {"tp1_mult": 2.0,   "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
                   "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing"},
-    # 波段（1H/4H）: TP1=1.725 TP2多=2.5 TP2空=4.0
     "1H_long":   {"tp1_mult": 1.725, "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
                   "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed"},
     "1H_short":  {"tp1_mult": 2.0,   "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
@@ -257,7 +257,139 @@ _BOT_START_TS = time.time()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TELEGRAM
+#  DISCORD 通知
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _dc_headers() -> Dict:
+    return {
+        "Authorization": f"Bot {DISCORD_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+def dc(text: str):
+    """發送純文字訊息到 Discord 頻道"""
+    if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
+        return
+    try:
+        requests.post(
+            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+            headers=_dc_headers(),
+            json={"content": text},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"  [DC] {e}")
+
+def dc_embed(embed: Dict, components: List = None):
+    """發送 Embed 訊息（含可選按鈕）"""
+    if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
+        return None
+    payload = {"embeds": [embed]}
+    if components:
+        payload["components"] = components
+    try:
+        r = requests.post(
+            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+            headers=_dc_headers(),
+            json=payload,
+            timeout=10,
+        )
+        return r.json().get("id")  # 回傳 message_id（用於更新訊息）
+    except Exception as e:
+        print(f"  [DC embed] {e}")
+        return None
+
+def dc_edit(message_id: str, content: str):
+    """更新已發送的 Discord 訊息"""
+    if not DISCORD_TOKEN or not message_id:
+        return
+    try:
+        requests.patch(
+            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}",
+            headers=_dc_headers(),
+            json={"content": content, "components": []},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"  [DC edit] {e}")
+
+def dc_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool) -> str:
+    """發送訊號 Embed 到 Discord，帶確認/跳過按鈕，回傳 cb_key"""
+    side_emoji = "🟢" if sig["side"] == "long" else "🔴"
+    dir_s      = "做多" if sig["side"] == "long" else "做空"
+    swing_tag  = "📐 波段" if sig["is_swing"] else "⚡ 日內"
+    cvd_tag    = "CVD ✅" if cvd_active else "CVD ⚠️"
+    color      = 0x00c851 if sig["side"] == "long" else 0xff4444
+
+    ts_utc = datetime.fromisoformat(sig["time"].replace("Z", "+00:00"))
+    ts_tw  = ts_utc + timedelta(hours=8)
+    ts_str = ts_tw.strftime("%m/%d %H:%M")
+    coin   = symbol.split("/")[0]
+
+    cb_key = f"{coin}_{tf}_{sig['side']}_{int(time.time())}"
+    pending_orders[cb_key] = {
+        "symbol":    OKX_SWAP.get(symbol, symbol),
+        "direction": sig["side"],
+        "entry":     sig["entry"],
+        "sl":        sig["sl"],
+        "tp1":       sig["tp1"],
+        "tp2":       sig["tp2"],
+    }
+
+    embed = {
+        "title": f"{side_emoji} {coin} [{tf} {dir_s}]  {swing_tag}  {cvd_tag}",
+        "color": color,
+        "fields": [
+            {"name": "時間 (TST)", "value": ts_str, "inline": True},
+            {"name": "ATR", "value": str(sig["atr"]), "inline": True},
+            {"name": "出場模式", "value": sig["exit_mode"], "inline": True},
+            {"name": "入場", "value": f"`{sig['entry']}`", "inline": True},
+            {"name": "止損 🛑", "value": f"`{sig['sl']}`  (風險 {sig['risk_pct']:.2f}%)", "inline": True},
+            {"name": "\u200b", "value": "\u200b", "inline": True},
+            {"name": f"TP1 🎯 (50%)  1:{sig['rr1']:.2f}", "value": f"`{sig['tp1']}`", "inline": True},
+            {"name": f"TP2 🎯 (50%)  1:{sig['rr2']:.2f}", "value": f"`{sig['tp2']}`", "inline": True},
+            {"name": "TP1後止損移至", "value": f"`{sig['entry']}`", "inline": True},
+        ],
+        "footer": {"text": f"key: {cb_key}"},
+    }
+
+    # Discord 按鈕 (Action Row)
+    components = [{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 3,  # 綠色
+                "label": "✅ 確認下單",
+                "custom_id": f"confirm_{cb_key}",
+            },
+            {
+                "type": 2,
+                "style": 4,  # 紅色
+                "label": "❌ 跳過",
+                "custom_id": f"skip_{cb_key}",
+            },
+        ]
+    }]
+
+    msg_id = dc_embed(embed, components)
+    if msg_id:
+        pending_orders[cb_key]["msg_id"] = msg_id
+    return cb_key
+
+def dc_exit(symbol: str, tf: str, side: str, msg: str):
+    emoji = "✅" if "TP" in msg else "🛑" if "SL" in msg else "⏸"
+    coin  = symbol.split("/")[0]
+    dc(f"{emoji} **{coin} [{tf} {side.upper()}] 出場**\n{msg}")
+
+def dc_pause(symbol: str, tf: str, side: str, resume: datetime):
+    coin = symbol.split("/")[0]
+    dc(f"⏸ **{coin} [{tf} {side.upper()}] 連虧{MAX_CONSEC_LOSS}單暫停**\n"
+       f"恢復：{(resume + timedelta(hours=8)).strftime('%m/%d %H:%M')} (TST)")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TELEGRAM（保留為備用，設了 TG_BOT_TOKEN 才會發）
 # ══════════════════════════════════════════════════════════════════════════════
 
 def tg(text: str):
@@ -274,82 +406,8 @@ def tg(text: str):
         print(f"  [TG] {e}")
 
 
-def tg_with_buttons(text: str, cb_key: str):
-    if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        return
-    kb = {"inline_keyboard": [[
-        {"text": "✅ 確認下單", "callback_data": f"confirm_{cb_key}"},
-        {"text": "❌ 跳過",     "callback_data": f"skip_{cb_key}"},
-    ]]}
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": text,
-                  "parse_mode": "HTML", "reply_markup": kb,
-                  "disable_web_page_preview": True},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"  [TG] {e}")
-
-
-def answer_callback(cq_id: str, text: str = ""):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_BOT_TOKEN}/answerCallbackQuery",
-            json={"callback_query_id": cq_id, "text": text}, timeout=10)
-    except Exception:
-        pass
-
-
-def tg_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool):
-    side_emoji = "🟢" if sig["side"] == "long" else "🔴"
-    dir_s      = "做多" if sig["side"] == "long" else "做空"
-    swing_tag  = "📐 波段" if sig["is_swing"] else "⚡ 日內"
-    cvd_tag    = "CVD✅" if cvd_active else "CVD⚠️"
-    # 台灣時間（UTC+8）顯示
-    ts_utc  = datetime.fromisoformat(sig["time"].replace("Z", "+00:00"))
-    ts_tw   = ts_utc + timedelta(hours=8)
-    ts_str  = ts_tw.strftime("%m/%d %H:%M")
-    coin    = symbol.split("/")[0]
-    text = (
-        f"{side_emoji} <b>{coin} [{tf} {dir_s}]</b>  {swing_tag}  {cvd_tag}\n"
-        f"時間：{ts_str} (TST)\n"
-        f"入場：<code>{sig['entry']}</code>\n"
-        f"━━━━━━━━━━━━\n"
-        f"🛑 止損：<code>{sig['sl']}</code>  (風險 {sig['risk_pct']:.2f}%)\n"
-        f"🎯 TP1（50%）：<code>{sig['tp1']}</code>  ← 1:{sig['rr1']:.2f}\n"
-        f"🎯 TP2（50%）：<code>{sig['tp2']}</code>  ← 1:{sig['rr2']:.2f}\n"
-        f"📌 TP1後止損移至：<code>{sig['entry']}</code>\n"
-        f"━━━━━━━━━━━━\n"
-        f"ATR：{sig['atr']}  出場：{sig['exit_mode']}"
-    )
-    cb_key = f"{coin}_{tf}_{sig['side']}_{int(time.time())}"
-    pending_orders[cb_key] = {
-        "symbol":    OKX_SWAP.get(symbol, symbol),
-        "direction": sig["side"],
-        "entry":     sig["entry"],
-        "sl":        sig["sl"],
-        "tp1":       sig["tp1"],
-        "tp2":       sig["tp2"],
-    }
-    tg_with_buttons(text, cb_key)
-
-
-def tg_exit(symbol: str, tf: str, side: str, msg: str):
-    emoji = "✅" if "TP" in msg else "🛑" if "SL" in msg else "⏸"
-    coin  = symbol.split("/")[0]
-    tg(f"{emoji} <b>{coin} [{tf} {side.upper()}] 出場</b>\n{msg}")
-
-
-def tg_pause(symbol: str, tf: str, side: str, resume: datetime):
-    coin = symbol.split("/")[0]
-    tg(f"⏸ <b>{coin} [{tf} {side.upper()}] 連虧{MAX_CONSEC_LOSS}單暫停</b>\n"
-       f"恢復：{(resume + timedelta(hours=8)).strftime('%m/%d %H:%M')} (TST)")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  OKX REST HELPERS（公開行情）
+#  OKX REST HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _okx_ts() -> str:
@@ -392,7 +450,7 @@ def fetch_ohlcv(inst_id: str, bar: str, limit: int = WARMUP) -> pd.DataFrame:
         df[c] = df[c].astype(float)
     df["ts"] = pd.to_datetime(df["ts"].astype(np.int64), unit="ms", utc=True)
     df.set_index("ts", inplace=True)
-    return df.iloc[:-1]  # 去掉未收盤的最後一根
+    return df.iloc[:-1]
 
 def fetch_funding_now(swap_id: str) -> float:
     rows = _okx_pub("/api/v5/public/funding-rate", {"instId": swap_id})
@@ -456,7 +514,7 @@ def fetch_oi(cona_sym: str, cona_iv: str, from_ms: int, to_ms: int) -> pd.Series
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  OKX 下單（ccxt，TG按鈕確認後執行）
+#  OKX 下單
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _make_okx_ex():
@@ -470,9 +528,7 @@ def _make_okx_ex():
         ex.set_sandbox_mode(True)
     return ex
 
-
 def _fetch_okx_balance():
-    """抓取 OKX 帳戶餘額，回傳 (可用, 總額) 或 (None, None)"""
     if not OKX_API_KEY:
         return None, None
     try:
@@ -484,55 +540,40 @@ def _fetch_okx_balance():
     except Exception:
         return None, None
 
-
 def place_okx_order(symbol: str, direction: str, entry: float,
                     sl: float, tp1: float, tp2: float):
     global _LIVE_MODE, MAX_LEVERAGE
     if not _LIVE_MODE:
-        tg("📝 Paper 模式：收到下單請求，未實際下單\n"
-           "請先發送 /setlive 切換為實盤模式"); return
+        dc("📝 Paper 模式：收到下單請求，未實際下單\n請先發送 `/setlive` 切換為實盤模式")
+        return
     try:
         ex = _make_okx_ex()
         ex.load_markets()
-
-        # ── 1. 帳戶可用餘額 ──
         bal   = ex.fetch_balance()
-        avail = float(bal["USDT"]["free"])  if "USDT" in bal else 0.0
+        avail = float(bal["USDT"]["free"]) if "USDT" in bal else 0.0
         if avail <= 0:
-            tg("⚠️ USDT 可用餘額不足"); return
-
-        # ── 2. 每倉保證金 = 可用 × MARGIN_PCT% ──
+            dc("⚠️ USDT 可用餘額不足"); return
         margin = avail * MARGIN_PCT / 100
-
-        # ── 3. 止損距離% & 建議槓桿 ──
         price       = ex.fetch_ticker(symbol)["last"]
         sl_dist_pct = abs(price - sl) / price * 100
         if sl_dist_pct <= 0:
-            tg("⚠️ 止損距離為 0，無法計算槓桿"); return
+            dc("⚠️ 止損距離為 0，無法計算槓桿"); return
         sug_lev = max(1, min(int(100 / sl_dist_pct), MAX_LEVERAGE))
-
-        # ── 4. 倉位價值 & 張數 ──
         mkt    = ex.market(symbol)
         prec   = int(mkt.get("precision", {}).get("amount", 0) or 0)
         ct_sz  = float(mkt.get("contractSize", 1) or 1)
         pos_val = margin * sug_lev
         raw     = pos_val / (price * ct_sz)
-        amt  = max(1, int(raw))          if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
-        half = max(1, int(amt // 2))     if prec == 0 else round(amt / 2, prec)
-
-        # ── 5. 設定槓桿 ──
+        amt  = max(1, int(raw))      if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
+        half = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
         ex.set_leverage(sug_lev, symbol)
-
-        # ── 6. TG 倉位摘要 ──
-        tg(
+        dc(
             f"💰 可用餘額：{avail:.1f} U\n"
             f"📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n"
             f"📊 倉位價值：{pos_val:.1f} U\n"
             f"⚡ 建議槓桿：{sug_lev}x\n"
             f"☠️ 最大虧損：{margin:.1f} U（逐倉保證金）"
         )
-
-        # ── 7. 下單 ──
         is_l   = direction == "long"
         es, xs = ("buy", "sell") if is_l else ("sell", "buy")
         eo = ex.create_market_order(symbol, es, amt)
@@ -552,73 +593,127 @@ def place_okx_order(symbol: str, direction: str, entry: float,
                 res.append(f"🎯 {lbl} {px} x{n} ID:{o.get('id')}")
             except Exception as e:
                 res.append(f"⚠️ {lbl}失敗:{e}")
-        tg("\n".join(res))
+        dc("\n".join(res))
     except Exception as e:
-        tg(f"⚠️ 下單失敗:{e}")
+        dc(f"⚠️ 下單失敗:{e}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TG 按鈕回調輪詢
+#  FLASK + Discord Interactions Endpoint
+#  Discord 按鈕點擊走 Interactions，需要設定 Interactions Endpoint URL
+#  格式：https://your-replit-url/discord-interactions
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _handle_tg_command(text: str):
+_app = Flask(__name__)
+
+@_app.route("/")
+def _health():
+    return f"賽克斯機器人 v4 | {len(SYMBOLS)} 個幣 | running"
+
+@_app.route("/discord-interactions", methods=["POST"])
+def discord_interactions():
+    """Discord Interactions Endpoint — 接收按鈕點擊"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "no data"}), 400
+
+    # Discord PING 驗證
+    if data.get("type") == 1:
+        return jsonify({"type": 1})
+
+    # 按鈕互動（type=3）
+    if data.get("type") == 3:
+        custom_id = data.get("data", {}).get("custom_id", "")
+
+        if custom_id.startswith("confirm_"):
+            key   = custom_id[8:]
+            order = pending_orders.pop(key, None)
+            if order:
+                Thread(
+                    target=place_okx_order,
+                    args=(order["symbol"], order["direction"],
+                          order.get("entry", 0),
+                          order["sl"], order["tp1"], order["tp2"]),
+                    daemon=True,
+                ).start()
+                # 更新原訊息（移除按鈕）
+                msg_id = order.get("msg_id")
+                if msg_id:
+                    Thread(target=dc_edit, args=(msg_id, "✅ 已確認下單，執行中..."), daemon=True).start()
+                return jsonify({"type": 6})  # DEFERRED_UPDATE_MESSAGE
+            else:
+                return jsonify({
+                    "type": 4,
+                    "data": {"content": "⚠️ 訊號已過期", "flags": 64}
+                })
+
+        elif custom_id.startswith("skip_"):
+            key = custom_id[5:]
+            order = pending_orders.pop(key, None)
+            msg_id = order.get("msg_id") if order else None
+            if msg_id:
+                Thread(target=dc_edit, args=(msg_id, "❌ 已跳過此訊號"), daemon=True).start()
+            return jsonify({"type": 6})
+
+    return jsonify({"type": 1})
+
+
+def _handle_dc_command(text: str):
+    """處理 Discord 指令（透過頻道訊息輪詢）"""
     global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref
     text = text.strip()
 
-    if text.startswith("/setrisk"):
+    if text.startswith("!setrisk"):
         parts = text.split()
         if len(parts) >= 2:
             try:
                 val = float(parts[1])
                 if val <= 0 or val > 100:
-                    tg("⚠️ 請輸入 0.1 ~ 100 之間的數字"); return
+                    dc("⚠️ 請輸入 0.1 ~ 100 之間的數字"); return
                 MARGIN_PCT = val
-                tg(f"✅ 每倉保證金比例已設為 <b>{val}%</b>\n"
-                   f"每單保證金 = 可用餘額 × {val}%")
+                dc(f"✅ 每倉保證金比例已設為 **{val}%**\n每單保證金 = 可用餘額 × {val}%")
             except ValueError:
-                tg("⚠️ 格式錯誤，例：/setrisk 5")
+                dc("⚠️ 格式錯誤，例：`!setrisk 5`")
         else:
-            tg(f"目前每倉保證金：可用餘額 × <b>{MARGIN_PCT}%</b>\n"
-               f"修改請發：/setrisk [數字]（例：/setrisk 5）")
+            dc(f"目前每倉保證金：可用餘額 × **{MARGIN_PCT}%**\n修改請輸入：`!setrisk [數字]`")
 
-    elif text.startswith("/setmaxlev"):
+    elif text.startswith("!setmaxlev"):
         parts = text.split()
         if len(parts) >= 2:
             try:
                 val = int(float(parts[1]))
                 if val < 1 or val > 125:
-                    tg("⚠️ 槓桿上限請輸入 1 ~ 125 之間的整數"); return
+                    dc("⚠️ 槓桿上限請輸入 1 ~ 125 之間的整數"); return
                 MAX_LEVERAGE = val
-                tg(f"✅ 最高槓桿上限已設為 <b>{val}x</b>\n"
-                   f"建議槓桿 = min(100 ÷ 止損距離%, {val}x)")
+                dc(f"✅ 最高槓桿上限已設為 **{val}x**")
             except ValueError:
-                tg("⚠️ 格式錯誤，例：/setmaxlev 50")
+                dc("⚠️ 格式錯誤，例：`!setmaxlev 50`")
         else:
-            tg(f"目前最高槓桿上限：<b>{MAX_LEVERAGE}x</b>\n修改請發：/setmaxlev [數字]")
+            dc(f"目前最高槓桿上限：**{MAX_LEVERAGE}x**\n修改請輸入：`!setmaxlev [數字]`")
 
-    elif text.startswith("/pause"):
+    elif text.startswith("!pause"):
+        global _PAUSED
         _PAUSED = True
-        tg("⏸ <b>訊號已暫停</b>\n機器人繼續運行但不發送任何訊號\n發送 /resume 恢復")
+        dc("⏸ **訊號已暫停**\n輸入 `!resume` 恢復")
 
-    elif text.startswith("/resume"):
+    elif text.startswith("!resume"):
         _PAUSED = False
-        tg("▶️ <b>訊號已恢復</b>\n機器人正常發送訊號")
+        dc("▶️ **訊號已恢復**")
 
-    elif text.startswith("/setlive"):
+    elif text.startswith("!setlive"):
         if not OKX_API_KEY:
-            tg("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
+            dc("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
         _LIVE_MODE = True
-        tg("🔴 <b>已切換為實盤模式</b>\n點擊 ✅ 確認下單後將直接送出真實委託單")
+        dc("🔴 **已切換為實盤模式**\n點擊 ✅ 確認下單後將直接送出真實委託單")
 
-    elif text.startswith("/setpaper"):
+    elif text.startswith("!setpaper"):
         _LIVE_MODE = False
-        tg("📝 <b>已切換為模擬（Paper）模式</b>\n點擊 ✅ 確認下單不會送出真實委託單")
+        dc("📝 **已切換為模擬（Paper）模式**")
 
-    elif text.startswith("/status"):
+    elif text.startswith("!status"):
         elapsed = int(time.time() - _BOT_START_TS)
         h, m    = elapsed // 3600, (elapsed % 3600) // 60
         mode    = "🔴 實盤" if _LIVE_MODE else "📝 Paper"
-        # 帳戶餘額（即時抓取）
         avail, total = _fetch_okx_balance()
         if avail is not None:
             margin_str = f"{avail * MARGIN_PCT / 100:.1f} U（可用×{MARGIN_PCT}%）"
@@ -626,14 +721,13 @@ def _handle_tg_command(text: str):
         else:
             margin_str = "N/A（需設定 OKX_API_KEY）"
             bal_str    = "N/A"
-        # 未平倉數量（paper追蹤）
         open_cnt = 0
         if _bot_ref is not None:
             open_cnt = sum(1 for p in _bot_ref.positions.values() if p and p.open)
         paused_str = "⏸ 暫停中" if _PAUSED else "▶️ 運行中"
-        tg(
-            f"⚙️ <b>目前狀態</b>\n"
-            f"━━━━━━━━━━━━\n"
+        dc(
+            f"⚙️ **目前狀態**\n"
+            f"────────────────\n"
             f"訊號：{paused_str}\n"
             f"模式：{mode}\n"
             f"餘額：{bal_str}\n"
@@ -645,85 +739,48 @@ def _handle_tg_command(text: str):
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}"
         )
 
-    elif text.startswith("/help"):
-        tg(
-            "📖 <b>指令列表</b>\n"
-            "━━━━━━━━━━━━\n"
-            "/pause — 暫停發送訊號（機器人繼續運行）\n"
-            "/resume — 恢復發送訊號\n"
-            "/setrisk [數字] — 設定每倉保證金佔可用餘額%\n"
-            "  例：/setrisk 5 → 每倉保證金 = 可用×5%\n"
-            "/setmaxlev [數字] — 設定最高槓桿上限（例：/setmaxlev 50）\n"
-            "/setlive — 切換為實盤下單\n"
-            "/setpaper — 切換為模擬（不下單）\n"
-            "/status — 顯示模式／餘額／保證金／槓桿／未平倉／運行時間\n"
-            "/help — 顯示此說明\n"
-            "━━━━━━━━━━━━\n"
-            "倉位計算邏輯：\n"
-            "  每倉保證金 = 可用餘額 × setrisk%\n"
-            "  建議槓桿 = min(100 ÷ 止損距離%, 上限)\n"
-            "  倉位價值 = 保證金 × 建議槓桿\n"
-            "  最大虧損 = 每倉保證金（逐倉模式）"
+    elif text.startswith("!help"):
+        dc(
+            "📖 **指令列表**\n"
+            "────────────────\n"
+            "`!pause` — 暫停發送訊號\n"
+            "`!resume` — 恢復發送訊號\n"
+            "`!setrisk [數字]` — 設定每倉保證金%（例：`!setrisk 5`）\n"
+            "`!setmaxlev [數字]` — 設定最高槓桿上限（例：`!setmaxlev 50`）\n"
+            "`!setlive` — 切換為實盤下單\n"
+            "`!setpaper` — 切換為模擬（不下單）\n"
+            "`!status` — 顯示目前狀態\n"
+            "`!help` — 顯示此說明"
         )
 
 
-def poll_tg_callbacks():
-    global _tg_offset
+_dc_last_msg_id = "0"
+
+def poll_dc_commands():
+    """輪詢 Discord 頻道訊息，處理 ! 指令"""
+    global _dc_last_msg_id
     while True:
         try:
             r = requests.get(
-                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates",
-                params={"offset": _tg_offset, "timeout": 30,
-                        "allowed_updates": ["callback_query", "message"]},
-                timeout=40,
-            ).json()
-            for upd in r.get("result", []):
-                _tg_offset = upd["update_id"] + 1
-
-                # ── 按鈕回調 ──
-                cq = upd.get("callback_query")
-                if cq:
-                    cbd, cq_id = cq.get("data", ""), cq["id"]
-                    if cbd.startswith("confirm_"):
-                        key   = cbd[8:]
-                        order = pending_orders.pop(key, None)
-                        if order:
-                            answer_callback(cq_id, "下單中...")
-                            Thread(
-                                target=place_okx_order,
-                                args=(order["symbol"], order["direction"],
-                                      order.get("entry", 0),
-                                      order["sl"], order["tp1"], order["tp2"]),
-                                daemon=True,
-                            ).start()
-                        else:
-                            answer_callback(cq_id, "訊號已過期")
-                    elif cbd.startswith("skip_"):
-                        pending_orders.pop(cbd[5:], None)
-                        answer_callback(cq_id, "已跳過")
-                        tg("❌ 已跳過")
-                    continue
-
-                # ── 文字指令 ──
-                msg = upd.get("message", {})
-                text = msg.get("text", "")
-                if text.startswith("/"):
-                    _handle_tg_command(text)
-
+                f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+                headers=_dc_headers(),
+                params={"after": _dc_last_msg_id, "limit": 10},
+                timeout=15,
+            )
+            msgs = r.json()
+            if isinstance(msgs, list) and msgs:
+                for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
+                    _dc_last_msg_id = msg["id"]
+                    content = msg.get("content", "")
+                    # 忽略 Bot 自己的訊息
+                    if msg.get("author", {}).get("bot"):
+                        continue
+                    if content.startswith("!"):
+                        _handle_dc_command(content)
         except Exception as e:
-            print(f"[TG輪詢] {e}")
-            sleep(5)
+            print(f"[DC輪詢] {e}")
+        sleep(3)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  FLASK 健康檢查
-# ══════════════════════════════════════════════════════════════════════════════
-
-_app = Flask(__name__)
-
-@_app.route("/")
-def _health():
-    return f"賽克斯機器人 v4 | {len(SYMBOLS)} 個幣 | running"
 
 def run_web():
     port = int(os.environ.get("PORT", 3000))
@@ -734,18 +791,16 @@ def run_web():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  K棒收盤觸發（台灣時間 UTC+8 顯示）
+#  K棒收盤觸發
 # ══════════════════════════════════════════════════════════════════════════════
 
 def wait_for_next_candle() -> List[str]:
-    """等待最近一個 K 棒收盤，回傳剛收盤的時框列表。"""
     now = datetime.now(timezone.utc).timestamp()
     next_closes = {
         tf: (int(now / BAR_SECONDS[tf]) + 1) * BAR_SECONDS[tf] + 5
         for tf in TIMEFRAMES
     }
     earliest = min(next_closes.values())
-    # 等待
     while True:
         w = earliest - datetime.now(timezone.utc).timestamp() - 0.5
         if w <= 0:
@@ -753,7 +808,6 @@ def wait_for_next_candle() -> List[str]:
         sleep(min(w, 30))
     while datetime.now(timezone.utc).timestamp() < earliest:
         sleep(0.05)
-    # 回傳在 ±15 秒內收盤的時框
     return [tf for tf, ts in next_closes.items() if abs(ts - earliest) <= 15]
 
 
@@ -777,14 +831,12 @@ def precompute_base(df: pd.DataFrame) -> pd.DataFrame:
     df["channel_ok"] = (df["e144"] - df["e576"]).abs() >= df["atr"] * 2
     return df
 
-
 def _ws(a: np.ndarray, p: int) -> np.ndarray:
     r = np.zeros(len(a))
     r[p] = a[1:p + 1].sum()
     for i in range(p + 1, len(a)):
         r[i] = r[i - 1] - r[i - 1] / p + a[i]
     return r
-
 
 def adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
     hi, lo, cl = df["high"].values, df["low"].values, df["close"].values
@@ -805,7 +857,6 @@ def adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
         dx = np.where(p_ + m_ > 0, 100 * np.abs(p_ - m_) / (p_ + m_), 0)
     return pd.Series(_ws(dx, period), index=df.index)
 
-
 def add_swing(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["adx"] = adx_series(df, 14)
@@ -819,7 +870,6 @@ def add_swing(df: pd.DataFrame) -> pd.DataFrame:
     df["slope4h"]  = df4["slope4h"].reindex(df.index, method="ffill").fillna(False)
     df["is_swing"] = df["trend4h"] & df["slope4h"] & (df["adx"] > ADX_THR)
     return df
-
 
 def calc_qqe(close: pd.Series, rsi_period: int, sf: int,
              factor: float, threshold: float = 3.0):
@@ -850,7 +900,6 @@ def calc_qqe(close: pd.Series, rsi_period: int, sf: int,
     bull.iloc[0] = bear.iloc[0] = False
     return bull, bear, tr
 
-
 def add_dual_qqe(df: pd.DataFrame) -> pd.DataFrame:
     bull1, bear1, tr1 = calc_qqe(df["close"], QQE_RSI, QQE_SF, QQE_FACTOR_P, QQE_THRESHOLD)
     _,     _,     tr2 = calc_qqe(df["close"], QQE_RSI, QQE_SF, QQE_FACTOR_S, QQE_THRESHOLD)
@@ -860,7 +909,6 @@ def add_dual_qqe(df: pd.DataFrame) -> pd.DataFrame:
     df["qtr"]   = np.where((tr1 == 1) & (tr2 == 1),   1,
                   np.where((tr1 == -1) & (tr2 == -1), -1, 0)).astype(np.int8)
     return df
-
 
 def is_bear_market(df_1h: pd.DataFrame, min_bars: int = BEAR_MIN_BARS) -> bool:
     e144 = df_1h["e144"].values
@@ -980,11 +1028,11 @@ def check_signal(df: pd.DataFrame, params: Dict, side: str,
     entry = cl[i]
     if risk <= 0 or (risk / entry) > MAX_SL: return None
 
-    is_swing = bool(swing[i])
-    tp2_mult = float(params["tp2_swing_mult"] if is_swing else params["tp2_intraday_mult"])
-    tp1_mult = float(params["tp1_mult"])
+    is_swing  = bool(swing[i])
+    tp2_mult  = float(params["tp2_swing_mult"] if is_swing else params["tp2_intraday_mult"])
+    tp1_mult  = float(params["tp1_mult"])
     exit_mode = str(params["exit_mode"])
-    sign     = 1 if side == "long" else -1
+    sign      = 1 if side == "long" else -1
 
     return {
         "side":       side,
@@ -1103,7 +1151,7 @@ class TradingBotV3:
             parts = key.split("_")
             sym   = parts[0] + "-USDT-SWAP"
             label = SYMBOLS.get(sym, sym)
-            tg_pause(label, tf, parts[-1], resume)
+            dc_pause(label, tf, parts[-1], resume)
 
     def _record_win(self, key):
         self.consec_loss[key] = 0
@@ -1142,12 +1190,11 @@ class TradingBotV3:
 
         pos = self.positions[key]
 
-        # 更新持倉狀態
         if pos and pos.open:
             msg = pos.update(df)
             if msg:
                 self._print_exit(label, tf, side, msg)
-                tg_exit(label, tf, side, msg)
+                dc_exit(label, tf, side, msg)
                 if "SL" in msg or "Breakeven" in msg:
                     self._record_loss(key, tf)
                 else:
@@ -1163,7 +1210,6 @@ class TradingBotV3:
         if not sig:
             return
 
-        # 防重複：同幣同時框同方向 30 分鐘內不重複發訊號
         now_ts = time.time()
         if now_ts - self.last_signal_time.get(key, 0) < SIGNAL_COOLDOWN:
             return
@@ -1172,8 +1218,9 @@ class TradingBotV3:
         if _PAUSED:
             print(f"  [PAUSED] 跳過訊號：{label} {tf} {sig['side']}")
             return
+
         self._print_signal(sig, label, tf)
-        tg_signal(sig, label, tf, sig.get("cvd_active", False))
+        dc_signal(sig, label, tf, sig.get("cvd_active", False))
         self.positions[key] = PaperPosition(sig, label, tf)
         self._record_win(key)
 
@@ -1190,7 +1237,6 @@ class TradingBotV3:
         df = add_swing(df)
         df = add_dual_qqe(df)
 
-        # 抓 CVD + OI（沒資料的幣自動跳過）
         if COINALYZE_API_KEY:
             cona_iv       = BAR_TO_CONA.get(tf, "1hour")
             now_ms        = int(df.index[-1].timestamp() * 1000)
@@ -1235,8 +1281,7 @@ class TradingBotV3:
         print(f"  幣種: {len(SYMBOLS)} 個  |  Mode: {'🔴 LIVE' if self.live else '📝 Paper'}  |  MaxLev: {MAX_LEVERAGE}x")
         print(f"  QQE Primary  RSI={QQE_RSI} SF={QQE_SF} F={QQE_FACTOR_P} Thr={QQE_THRESHOLD}")
         print(f"  QQE Secondary RSI={QQE_RSI} SF={QQE_SF} F={QQE_FACTOR_S}")
-        print(f"  CVD: {'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}")
-        print(f"  TG : {'✅' if TG_BOT_TOKEN else '⚠️ off'}  按鈕確認下單")
+        print(f"  通知：Discord ✅  |  TG：{'✅' if TG_BOT_TOKEN else '⛔ 未設定'}")
         print(f"  熊市閘門: EMA144<EMA576 連續{BEAR_MIN_BARS}+根 1H = 允許做空")
         print("=" * 64)
         for tf, _, tf_sides in self.tf_plan:
@@ -1255,16 +1300,15 @@ class TradingBotV3:
         print(f"  觸發方式：K棒收盤觸發  |  時區顯示：台灣時間 (UTC+8)")
         print("  Press Ctrl+C to stop\n")
 
-        tg(
-            f"✅ 賽克斯機器人 v4 已啟動\n"
-            f"━━━━━━━━━━━━━━━━━\n"
+        dc(
+            f"✅ **賽克斯機器人 v4 已啟動**\n"
+            f"────────────────\n"
             f"監控：{len(SYMBOLS)} 個幣\n"
             f"時框：{' / '.join(TIMEFRAMES)}\n"
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}\n"
-            f"模式：{'🔴 實盤' if _LIVE_MODE else '📝 Paper（發 /setlive 切換實盤）'}\n"
-            f"最高槓桿上限：{MAX_LEVERAGE}x（自動依止損距離計算）\n"
-            f"倉位：可用餘額÷10 × 建議槓桿\n"
-            f"📖 發送 /help 查看所有指令"
+            f"模式：{'🔴 實盤' if _LIVE_MODE else '📝 Paper（輸入 `!setlive` 切換實盤）'}\n"
+            f"最高槓桿上限：{MAX_LEVERAGE}x\n"
+            f"📖 輸入 `!help` 查看所有指令"
         )
 
         while True:
@@ -1275,11 +1319,11 @@ class TradingBotV3:
                 self.scan_once(due_tfs=due)
             except KeyboardInterrupt:
                 print("\nStopped.")
-                tg("🛑 賽克斯機器人已停止。")
+                dc("🛑 賽克斯機器人已停止。")
                 break
             except Exception as e:
                 print(f"\n  [ERR] {e}")
-                tg(f"⚠️ {e}")
+                dc(f"⚠️ {e}")
                 sleep(60)
 
 
@@ -1293,12 +1337,9 @@ def main():
                     help="Timeframe: 15m/30m/1H/4H/all (default: all)")
     ap.add_argument("--side", default="both",
                     choices=["long", "short", "both"])
-    ap.add_argument("--live", action="store_true",
-                    help="Enable real OKX order execution")
-    ap.add_argument("--once", action="store_true",
-                    help="Single scan then exit")
-    ap.add_argument("--dir",  default=".",
-                    help="Directory with param JSON files")
+    ap.add_argument("--live", action="store_true")
+    ap.add_argument("--once", action="store_true")
+    ap.add_argument("--dir",  default=".")
     args = ap.parse_args()
 
     sides = ["long", "short"] if args.side == "both" else [args.side]
@@ -1316,9 +1357,9 @@ def main():
         print("WARNING: --live 需要 OKX_API_KEY，改用 paper 模式。")
         args.live = False
 
-    # 啟動 Flask + TG 輪詢
+    # 啟動 Flask + Discord 指令輪詢
     Thread(target=run_web, daemon=True).start()
-    Thread(target=poll_tg_callbacks, daemon=True).start()
+    Thread(target=poll_dc_commands, daemon=True).start()
 
     bot = TradingBotV3(tf_plan=tf_plan, sides=sides,
                        live=args.live, base_dir=args.dir)
