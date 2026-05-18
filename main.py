@@ -717,7 +717,7 @@ def _handle_dc_command(text: str):
         )
 
     elif text.startswith("!autostatus"):
-        lines = [f"{"✅" if v else "⛔"} {k}" for k, v in AUTO_TRADE.items()]
+        lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
         dc("**自動下單狀態**
 " + "
 ".join(lines))
@@ -739,8 +739,10 @@ def _handle_dc_command(text: str):
             dc("格式：`!auto 1H on` 或 `!auto all off`")
 
     elif text.startswith("!autostatus"):
-        lines = [f"{'✅' if v else '⛔'} {k}" for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**\n" + "\n".join(lines))
+        lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
+        dc("**自動下單狀態**
+" + "
+".join(lines))
 
     elif text.startswith("!help"):
         dc(
