@@ -58,7 +58,7 @@ _bot_ref         = None
 # ══════════════════════════════════════════════════════════════════════════════
 #  FIXED STRATEGY CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
-#
+
 OKX_BASE  = "https://www.okx.com"
 CONA_BASE = "https://api.coinalyze.net/v1"
 DC_BASE   = "https://discord.com/api/v10"
@@ -718,7 +718,7 @@ def _handle_dc_command(text: str):
 
     elif text.startswith("!autostatus"):
         lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**\n" + "\n".join(lines))
+        dc("**自動下單狀態**
 " + "
 ".join(lines))
 
@@ -740,7 +740,7 @@ def _handle_dc_command(text: str):
 
     elif text.startswith("!autostatus"):
         lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**\n" + "\n".join(lines))
+        dc("**自動下單狀態**
 " + "
 ".join(lines))
 
