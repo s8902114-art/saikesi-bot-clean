@@ -517,6 +517,56 @@ def place_okx_order(symbol: str, direction: str, sl: float, tp1: float, tp2: flo
 #  TG 按鈕回調輪詢
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _handle_tg_command(text: str):
+    global _LIVE_MODE, ORDER_RISK_PCT, _BOT_START_TS
+    text = text.strip()
+    if text.startswith("/setrisk"):
+        parts = text.split()
+        if len(parts) >= 2:
+            try:
+                val = float(parts[1])
+                if val <= 0 or val > 100:
+                    tg("⚠️ 風險比例請輸入 0.1 ~ 100 之間的數字"); return
+                ORDER_RISK_PCT = val
+                tg(f"✅ 風險比例已設為 <b>{val}%</b>\n每單最大虧損 = 帳戶餘額 × {val}%")
+            except ValueError:
+                tg("⚠️ 格式錯誤，例：/setrisk 2")
+        else:
+            tg(f"目前風險比例：<b>{ORDER_RISK_PCT}%</b>\n修改請發：/setrisk [數字]")
+    elif text.startswith("/setlive"):
+        if not OKX_API_KEY:
+            tg("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
+        _LIVE_MODE = True
+        tg("🔴 <b>已切換為實盤模式</b>\n點擊 ✅ 確認下單後將直接送出真實委託單")
+    elif text.startswith("/setpaper"):
+        _LIVE_MODE = False
+        tg("📝 <b>已切換為模擬（Paper）模式</b>\n點擊 ✅ 確認下單不會送出真實委託單")
+    elif text.startswith("/status"):
+        elapsed = int(time.time() - _BOT_START_TS)
+        h, m = elapsed // 3600, (elapsed % 3600) // 60
+        mode  = "🔴 實盤" if _LIVE_MODE else "📝 Paper"
+        tg(
+            f"⚙️ <b>目前設定</b>\n"
+            f"━━━━━━━━━━━━\n"
+            f"模式：{mode}\n"
+            f"風險：{ORDER_RISK_PCT}%／單\n"
+            f"槓桿：{ORDER_LEVERAGE}x\n"
+            f"已運行：{h}h {m}m\n"
+            f"監控：{len(SYMBOLS)} 幣 | {len(TIMEFRAMES)} 時框\n"
+            f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}"
+        )
+    elif text.startswith("/help"):
+        tg(
+            "📖 <b>指令列表</b>\n"
+            "━━━━━━━━━━━━\n"
+            "/setrisk [數字] — 設定風險%（例：/setrisk 2）\n"
+            "/setlive — 切換為實盤下單\n"
+            "/setpaper — 切換為模擬（不下單）\n"
+            "/status — 顯示目前設定與運行時間\n"
+            "/help — 顯示此說明"
+        )
+
+
 def poll_tg_callbacks():
     global _tg_offset
     while True:
@@ -524,32 +574,41 @@ def poll_tg_callbacks():
             r = requests.get(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/getUpdates",
                 params={"offset": _tg_offset, "timeout": 30,
-                        "allowed_updates": ["callback_query"]},
+                        "allowed_updates": ["callback_query", "message"]},
                 timeout=40,
             ).json()
             for upd in r.get("result", []):
                 _tg_offset = upd["update_id"] + 1
+
+                # ── 按鈕回調 ──
                 cq = upd.get("callback_query")
-                if not cq:
+                if cq:
+                    cbd, cq_id = cq.get("data", ""), cq["id"]
+                    if cbd.startswith("confirm_"):
+                        key   = cbd[8:]
+                        order = pending_orders.pop(key, None)
+                        if order:
+                            answer_callback(cq_id, "下單中...")
+                            Thread(
+                                target=place_okx_order,
+                                args=(order["symbol"], order["direction"],
+                                      order["sl"], order["tp1"], order["tp2"]),
+                                daemon=True,
+                            ).start()
+                        else:
+                            answer_callback(cq_id, "訊號已過期")
+                    elif cbd.startswith("skip_"):
+                        pending_orders.pop(cbd[5:], None)
+                        answer_callback(cq_id, "已跳過")
+                        tg("❌ 已跳過")
                     continue
-                cbd, cq_id = cq.get("data", ""), cq["id"]
-                if cbd.startswith("confirm_"):
-                    key   = cbd[8:]
-                    order = pending_orders.pop(key, None)
-                    if order:
-                        answer_callback(cq_id, "下單中...")
-                        Thread(
-                            target=place_okx_order,
-                            args=(order["symbol"], order["direction"],
-                                  order["sl"], order["tp1"], order["tp2"]),
-                            daemon=True,
-                        ).start()
-                    else:
-                        answer_callback(cq_id, "訊號已過期")
-                elif cbd.startswith("skip_"):
-                    pending_orders.pop(cbd[5:], None)
-                    answer_callback(cq_id, "已跳過")
-                    tg("❌ 已跳過")
+
+                # ── 文字指令 ──
+                msg = upd.get("message", {})
+                text = msg.get("text", "")
+                if text.startswith("/"):
+                    _handle_tg_command(text)
+
         except Exception as e:
             print(f"[TG輪詢] {e}")
             sleep(5)
@@ -1096,8 +1155,9 @@ class TradingBotV3:
             f"監控：{len(SYMBOLS)} 個幣\n"
             f"時框：{' / '.join(TIMEFRAMES)}\n"
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}\n"
-            f"模式：{'🔴 實盤' if self.live else '📝 Paper'}\n"
-            f"🔔 按按鈕確認下單（{ORDER_LEVERAGE}x槓桿，{int(ORDER_PCT*100)}%餘額）"
+            f"模式：{'🔴 實盤' if _LIVE_MODE else '📝 Paper（/setlive 切換實盤）'}\n"
+            f"風險：{ORDER_RISK_PCT}%／單  槓桿：{ORDER_LEVERAGE}x\n"
+            f"📖 發送 /help 查看所有指令"
         )
 
         while True:
