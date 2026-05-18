@@ -50,7 +50,7 @@ MAX_LEVERAGE     = 100
 MARGIN_PCT       = 10.0
 SIGNAL_COOLDOWN  = 1800
 _LIVE_MODE       = False
-_PAUSED          = True
+_PAUSED          = False
 _BOT_START_TS    = time.time()
 _bot_ref         = None
 
@@ -267,7 +267,6 @@ def _dc_headers() -> Dict:
     }
 
 def dc(text: str):
-    """發送純文字訊息到 Discord 頻道"""
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         return
     try:
@@ -281,7 +280,6 @@ def dc(text: str):
         print(f"  [DC] {e}")
 
 def dc_embed(embed: Dict, components: List = None):
-    """發送 Embed 訊息（含可選按鈕）"""
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         return None
     payload = {"embeds": [embed]}
@@ -294,13 +292,12 @@ def dc_embed(embed: Dict, components: List = None):
             json=payload,
             timeout=10,
         )
-        return r.json().get("id")  # 回傳 message_id（用於更新訊息）
+        return r.json().get("id")
     except Exception as e:
         print(f"  [DC embed] {e}")
         return None
 
 def dc_edit(message_id: str, content: str):
-    """更新已發送的 Discord 訊息"""
     if not DISCORD_TOKEN or not message_id:
         return
     try:
@@ -314,18 +311,15 @@ def dc_edit(message_id: str, content: str):
         print(f"  [DC edit] {e}")
 
 def dc_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool) -> str:
-    """發送訊號 Embed 到 Discord，帶確認/跳過按鈕，回傳 cb_key"""
     side_emoji = "🟢" if sig["side"] == "long" else "🔴"
     dir_s      = "做多" if sig["side"] == "long" else "做空"
     swing_tag  = "📐 波段" if sig["is_swing"] else "⚡ 日內"
     cvd_tag    = "CVD ✅" if cvd_active else "CVD ⚠️"
     color      = 0x00c851 if sig["side"] == "long" else 0xff4444
-
     ts_utc = datetime.fromisoformat(sig["time"].replace("Z", "+00:00"))
     ts_tw  = ts_utc + timedelta(hours=8)
     ts_str = ts_tw.strftime("%m/%d %H:%M")
     coin   = symbol.split("/")[0]
-
     cb_key = f"{coin}_{tf}_{sig['side']}_{int(time.time())}"
     pending_orders[cb_key] = {
         "symbol":    OKX_SWAP.get(symbol, symbol),
@@ -335,7 +329,6 @@ def dc_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool) -> str:
         "tp1":       sig["tp1"],
         "tp2":       sig["tp2"],
     }
-
     embed = {
         "title": f"{side_emoji} {coin} [{tf} {dir_s}]  {swing_tag}  {cvd_tag}",
         "color": color,
@@ -352,26 +345,13 @@ def dc_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool) -> str:
         ],
         "footer": {"text": f"key: {cb_key}"},
     }
-
-    # Discord 按鈕 (Action Row)
     components = [{
         "type": 1,
         "components": [
-            {
-                "type": 2,
-                "style": 3,  # 綠色
-                "label": "✅ 確認下單",
-                "custom_id": f"confirm_{cb_key}",
-            },
-            {
-                "type": 2,
-                "style": 4,  # 紅色
-                "label": "❌ 跳過",
-                "custom_id": f"skip_{cb_key}",
-            },
+            {"type": 2, "style": 3, "label": "✅ 確認下單", "custom_id": f"confirm_{cb_key}"},
+            {"type": 2, "style": 4, "label": "❌ 跳過",     "custom_id": f"skip_{cb_key}"},
         ]
     }]
-
     msg_id = dc_embed(embed, components)
     if msg_id:
         pending_orders[cb_key]["msg_id"] = msg_id
@@ -389,7 +369,7 @@ def dc_pause(symbol: str, tf: str, side: str, resume: datetime):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TELEGRAM（保留為備用，設了 TG_BOT_TOKEN 才會發）
+#  TELEGRAM（備用）
 # ══════════════════════════════════════════════════════════════════════════════
 
 def tg(text: str):
@@ -544,7 +524,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
                     sl: float, tp1: float, tp2: float):
     global _LIVE_MODE, MAX_LEVERAGE
     if not _LIVE_MODE:
-        dc("📝 Paper 模式：收到下單請求，未實際下單\n請先發送 `/setlive` 切換為實盤模式")
+        dc("📝 Paper 模式：收到下單請求，未實際下單\n請先發送 `!setlive` 切換為實盤模式")
         return
     try:
         ex = _make_okx_ex()
@@ -599,9 +579,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  FLASK + Discord Interactions Endpoint
-#  Discord 按鈕點擊走 Interactions，需要設定 Interactions Endpoint URL
-#  格式：https://your-replit-url/discord-interactions
+#  FLASK
 # ══════════════════════════════════════════════════════════════════════════════
 
 _app = Flask(__name__)
@@ -612,19 +590,13 @@ def _health():
 
 @_app.route("/discord-interactions", methods=["POST"])
 def discord_interactions():
-    """Discord Interactions Endpoint — 接收按鈕點擊"""
     data = request.get_json()
     if not data:
         return jsonify({"error": "no data"}), 400
-
-    # Discord PING 驗證
     if data.get("type") == 1:
         return jsonify({"type": 1})
-
-    # 按鈕互動（type=3）
     if data.get("type") == 3:
         custom_id = data.get("data", {}).get("custom_id", "")
-
         if custom_id.startswith("confirm_"):
             key   = custom_id[8:]
             order = pending_orders.pop(key, None)
@@ -636,17 +608,12 @@ def discord_interactions():
                           order["sl"], order["tp1"], order["tp2"]),
                     daemon=True,
                 ).start()
-                # 更新原訊息（移除按鈕）
                 msg_id = order.get("msg_id")
                 if msg_id:
                     Thread(target=dc_edit, args=(msg_id, "✅ 已確認下單，執行中..."), daemon=True).start()
-                return jsonify({"type": 6})  # DEFERRED_UPDATE_MESSAGE
+                return jsonify({"type": 6})
             else:
-                return jsonify({
-                    "type": 4,
-                    "data": {"content": "⚠️ 訊號已過期", "flags": 64}
-                })
-
+                return jsonify({"type": 4, "data": {"content": "⚠️ 訊號已過期", "flags": 64}})
         elif custom_id.startswith("skip_"):
             key = custom_id[5:]
             order = pending_orders.pop(key, None)
@@ -654,13 +621,11 @@ def discord_interactions():
             if msg_id:
                 Thread(target=dc_edit, args=(msg_id, "❌ 已跳過此訊號"), daemon=True).start()
             return jsonify({"type": 6})
-
     return jsonify({"type": 1})
 
 
 def _handle_dc_command(text: str):
-    """處理 Discord 指令（透過頻道訊息輪詢）"""
-    global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref
+    global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref, _PAUSED
     text = text.strip()
 
     if text.startswith("!setrisk"):
@@ -671,11 +636,11 @@ def _handle_dc_command(text: str):
                 if val <= 0 or val > 100:
                     dc("⚠️ 請輸入 0.1 ~ 100 之間的數字"); return
                 MARGIN_PCT = val
-                dc(f"✅ 每倉保證金比例已設為 **{val}%**\n每單保證金 = 可用餘額 × {val}%")
+                dc(f"✅ 每倉保證金比例已設為 **{val}%**")
             except ValueError:
                 dc("⚠️ 格式錯誤，例：`!setrisk 5`")
         else:
-            dc(f"目前每倉保證金：可用餘額 × **{MARGIN_PCT}%**\n修改請輸入：`!setrisk [數字]`")
+            dc(f"目前每倉保證金：可用餘額 × **{MARGIN_PCT}%**")
 
     elif text.startswith("!setmaxlev"):
         parts = text.split()
@@ -683,16 +648,15 @@ def _handle_dc_command(text: str):
             try:
                 val = int(float(parts[1]))
                 if val < 1 or val > 125:
-                    dc("⚠️ 槓桿上限請輸入 1 ~ 125 之間的整數"); return
+                    dc("⚠️ 槓桿上限請輸入 1 ~ 125"); return
                 MAX_LEVERAGE = val
                 dc(f"✅ 最高槓桿上限已設為 **{val}x**")
             except ValueError:
                 dc("⚠️ 格式錯誤，例：`!setmaxlev 50`")
         else:
-            dc(f"目前最高槓桿上限：**{MAX_LEVERAGE}x**\n修改請輸入：`!setmaxlev [數字]`")
+            dc(f"目前最高槓桿上限：**{MAX_LEVERAGE}x**")
 
     elif text.startswith("!pause"):
-        global _PAUSED
         _PAUSED = True
         dc("⏸ **訊號已暫停**\n輸入 `!resume` 恢復")
 
@@ -704,7 +668,7 @@ def _handle_dc_command(text: str):
         if not OKX_API_KEY:
             dc("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
         _LIVE_MODE = True
-        dc("🔴 **已切換為實盤模式**\n點擊 ✅ 確認下單後將直接送出真實委託單")
+        dc("🔴 **已切換為實盤模式**")
 
     elif text.startswith("!setpaper"):
         _LIVE_MODE = False
@@ -745,8 +709,8 @@ def _handle_dc_command(text: str):
             "────────────────\n"
             "`!pause` — 暫停發送訊號\n"
             "`!resume` — 恢復發送訊號\n"
-            "`!setrisk [數字]` — 設定每倉保證金%（例：`!setrisk 5`）\n"
-            "`!setmaxlev [數字]` — 設定最高槓桿上限（例：`!setmaxlev 50`）\n"
+            "`!setrisk [數字]` — 設定每倉保證金%\n"
+            "`!setmaxlev [數字]` — 設定最高槓桿上限\n"
             "`!setlive` — 切換為實盤下單\n"
             "`!setpaper` — 切換為模擬（不下單）\n"
             "`!status` — 顯示目前狀態\n"
@@ -757,23 +721,23 @@ def _handle_dc_command(text: str):
 _dc_last_msg_id = "0"
 
 def poll_dc_commands():
-            """輪詢 Discord 頻道訊息，處理 ! 指令"""
-            global _dc_last_msg_id
-            # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
-            try:
-                r = requests.get(
-                    f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
-                    headers=_dc_headers(),
-                    params={"limit": 1},
-                    timeout=15,
-                )
-                msgs = r.json()
-                if isinstance(msgs, list) and msgs:
-                    _dc_last_msg_id = msgs[0]["id"]
-            except Exception:
-                pass
-            while True:
-try:
+    """輪詢 Discord 頻道訊息，處理 ! 指令"""
+    global _dc_last_msg_id
+    # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
+    try:
+        r = requests.get(
+            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+            headers=_dc_headers(),
+            params={"limit": 1},
+            timeout=15,
+        )
+        msgs = r.json()
+        if isinstance(msgs, list) and msgs:
+            _dc_last_msg_id = msgs[0]["id"]
+    except Exception:
+        pass
+    while True:
+        try:
             r = requests.get(
                 f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
                 headers=_dc_headers(),
@@ -785,7 +749,6 @@ try:
                 for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
                     _dc_last_msg_id = msg["id"]
                     content = msg.get("content", "")
-                    # 忽略 Bot 自己的訊息
                     if msg.get("author", {}).get("bot"):
                         continue
                     if content.startswith("!"):
@@ -1370,7 +1333,6 @@ def main():
         print("WARNING: --live 需要 OKX_API_KEY，改用 paper 模式。")
         args.live = False
 
-    # 啟動 Flask + Discord 指令輪詢
     Thread(target=run_web, daemon=True).start()
     Thread(target=poll_dc_commands, daemon=True).start()
 
