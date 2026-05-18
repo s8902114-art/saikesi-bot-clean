@@ -468,10 +468,11 @@ def place_okx_order(symbol: str, direction: str, sl: float, tp1: float, tp2: flo
         ex.set_leverage(ORDER_LEVERAGE, symbol)
         price  = ex.fetch_ticker(symbol)["last"]
         mkt    = ex.market(symbol)
-        prec   = mkt.get("precision", {}).get("amount", 3)
-        ct_sz  = mkt.get("contractSize", 1)
-        amt    = round(usdt * ORDER_PCT * ORDER_LEVERAGE / price / ct_sz, prec)
-        half   = round(amt / 2, prec)
+        prec   = int(mkt.get("precision", {}).get("amount", 0) or 0)
+        ct_sz  = float(mkt.get("contractSize", 1) or 1)
+        raw    = usdt * ORDER_PCT * ORDER_LEVERAGE / price / ct_sz
+        amt    = int(raw)          if prec == 0 else round(raw, prec)
+        half   = int(amt // 2)     if prec == 0 else round(amt / 2, prec)
         if amt <= 0:
             tg("⚠️ 張數為 0"); return
         is_l   = direction == "long"
