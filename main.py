@@ -627,7 +627,6 @@ def _handle_tg_command(text: str):
             f"模式：{mode}\n"
             f"餘額：{bal_str}\n"
             f"每倉保證金：{margin_str}\n"
-            f"每倉保證金：{margin_str}\n"
             f"最高槓桿上限：{MAX_LEVERAGE}x\n"
             f"未平倉（Paper）：{open_cnt} 筆\n"
             f"已運行：{h}h {m}m\n"
