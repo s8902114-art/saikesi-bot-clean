@@ -457,6 +457,10 @@ def fetch_oi(cona_sym: str, cona_iv: str, from_ms: int, to_ms: int) -> pd.Series
 # ══════════════════════════════════════════════════════════════════════════════
 
 def place_okx_order(symbol: str, direction: str, sl: float, tp1: float, tp2: float):
+    global _LIVE_MODE, ORDER_RISK_PCT
+    if not _LIVE_MODE:
+        tg("📝 Paper 模式：收到下單請求，未實際下單\n"
+           "請先發送 /setlive 切換為實盤模式"); return
     try:
         ex = ccxt.okx({
             "apiKey":   OKX_API_KEY,
@@ -472,13 +476,17 @@ def place_okx_order(symbol: str, direction: str, sl: float, tp1: float, tp2: flo
         if usdt <= 0:
             tg("⚠️ USDT 餘額不足"); return
         ex.set_leverage(ORDER_LEVERAGE, symbol)
-        price  = ex.fetch_ticker(symbol)["last"]
-        mkt    = ex.market(symbol)
-        prec   = int(mkt.get("precision", {}).get("amount", 0) or 0)
-        ct_sz  = float(mkt.get("contractSize", 1) or 1)
-        raw    = usdt * ORDER_PCT * ORDER_LEVERAGE / price / ct_sz
-        amt    = int(raw)          if prec == 0 else round(raw, prec)
-        half   = int(amt // 2)     if prec == 0 else round(amt / 2, prec)
+        price   = ex.fetch_ticker(symbol)["last"]
+        mkt     = ex.market(symbol)
+        prec    = int(mkt.get("precision", {}).get("amount", 0) or 0)
+        ct_sz   = float(mkt.get("contractSize", 1) or 1)
+        sl_dist = abs(price - sl)
+        if sl_dist <= 0:
+            tg("⚠️ 止損距離為 0，無法計算張數"); return
+        risk_usdt = usdt * ORDER_RISK_PCT / 100
+        raw   = risk_usdt / (sl_dist * ct_sz)
+        amt   = max(1, int(raw))   if prec == 0 else max(round(1 / ct_sz, prec), round(raw, prec))
+        half  = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
         if amt <= 0:
             tg("⚠️ 張數為 0"); return
         is_l   = direction == "long"
