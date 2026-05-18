@@ -58,7 +58,7 @@ _bot_ref         = None
 # ══════════════════════════════════════════════════════════════════════════════
 #  FIXED STRATEGY CONSTANTS
 # ══════════════════════════════════════════════════════════════════════════════
-
+#
 OKX_BASE  = "https://www.okx.com"
 CONA_BASE = "https://api.coinalyze.net/v1"
 DC_BASE   = "https://discord.com/api/v10"
