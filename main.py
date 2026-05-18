@@ -52,6 +52,7 @@ SIGNAL_COOLDOWN  = 1800
 _LIVE_MODE       = False
 _PAUSED          = False
 _BOT_START_TS    = time.time()
+AUTO_TRADE = {"15m": False, "30m": False, "1H": False, "4H": False}
 _bot_ref         = None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -715,6 +716,26 @@ def _handle_dc_command(text: str):
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}"
         )
 
+    elif text.startswith("!auto"):
+        parts = text.split()
+        if len(parts) >= 3:
+            tf_arg = parts[1].upper()
+            onoff  = parts[2].lower() == "on"
+            if tf_arg == "ALL":
+                for k in AUTO_TRADE: AUTO_TRADE[k] = onoff
+                dc(f"{'✅' if onoff else '⛔'} **全部時框自動下單已{'開啟' if onoff else '關閉'}**")
+            elif tf_arg in AUTO_TRADE:
+                AUTO_TRADE[tf_arg] = onoff
+                dc(f"{'✅' if onoff else '⛔'} **{tf_arg} 自動下單已{'開啟' if onoff else '關閉'}**")
+            else:
+                dc("⚠️ 時框請輸入 15m / 30m / 1H / 4H / ALL")
+        else:
+            dc("格式：`!auto 1H on` 或 `!auto all off`")
+
+    elif text.startswith("!autostatus"):
+        lines = [f"{'✅' if v else '⛔'} {k}" for k, v in AUTO_TRADE.items()]
+        dc("**自動下單狀態**\n" + "\n".join(lines))
+
     elif text.startswith("!help"):
         dc(
             "📖 **指令列表**\n"
@@ -1209,6 +1230,8 @@ class TradingBotV3:
 
         self._print_signal(sig, label, tf)
         dc_signal(sig, label, tf, sig.get("cvd_active", False))
+        if _LIVE_MODE and AUTO_TRADE.get(tf, False):
+            Thread(target=place_okx_order, args=(OKX_SWAP.get(label, label), sig["side"], sig["entry"], sig["sl"], sig["tp1"], sig["tp2"]), daemon=True).start()
         self.positions[key] = PaperPosition(sig, label, tf)
         self._record_win(key)
 
