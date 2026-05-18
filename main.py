@@ -596,6 +596,14 @@ def _handle_tg_command(text: str):
         else:
             tg(f"目前最高槓桿上限：<b>{MAX_LEVERAGE}x</b>\n修改請發：/setmaxlev [數字]")
 
+    elif text.startswith("/pause"):
+        _PAUSED = True
+        tg("⏸ <b>訊號已暫停</b>\n機器人繼續運行但不發送任何訊號\n發送 /resume 恢復")
+
+    elif text.startswith("/resume"):
+        _PAUSED = False
+        tg("▶️ <b>訊號已恢復</b>\n機器人正常發送訊號")
+
     elif text.startswith("/setlive"):
         if not OKX_API_KEY:
             tg("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
@@ -1157,6 +1165,9 @@ class TradingBotV3:
             return
         self.last_signal_time[key] = now_ts
 
+        if _PAUSED:
+            print(f"  [PAUSED] 跳過訊號：{label} {tf} {sig['side']}")
+            return
         self._print_signal(sig, label, tf)
         tg_signal(sig, label, tf, sig.get("cvd_active", False))
         self.positions[key] = PaperPosition(sig, label, tf)
