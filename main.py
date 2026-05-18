@@ -457,44 +457,85 @@ def fetch_oi(cona_sym: str, cona_iv: str, from_ms: int, to_ms: int) -> pd.Series
 #  OKX 下單（ccxt，TG按鈕確認後執行）
 # ══════════════════════════════════════════════════════════════════════════════
 
-def place_okx_order(symbol: str, direction: str, sl: float, tp1: float, tp2: float):
-    global _LIVE_MODE, ORDER_RISK_PCT
+def _make_okx_ex():
+    ex = ccxt.okx({
+        "apiKey":   OKX_API_KEY,
+        "secret":   OKX_SECRET,
+        "password": OKX_PASSPHRASE,
+        "options":  {"defaultType": "swap"},
+    })
+    if OKX_DEMO:
+        ex.set_sandbox_mode(True)
+    return ex
+
+
+def _fetch_okx_balance():
+    """抓取 OKX 帳戶餘額，回傳 (可用, 總額) 或 (None, None)"""
+    if not OKX_API_KEY:
+        return None, None
+    try:
+        ex = _make_okx_ex()
+        bal   = ex.fetch_balance()
+        avail = bal["USDT"]["free"]  if "USDT" in bal else 0.0
+        total = bal["USDT"]["total"] if "USDT" in bal else 0.0
+        return float(avail), float(total)
+    except Exception:
+        return None, None
+
+
+def place_okx_order(symbol: str, direction: str, entry: float,
+                    sl: float, tp1: float, tp2: float):
+    global _LIVE_MODE, MAX_LEVERAGE
     if not _LIVE_MODE:
         tg("📝 Paper 模式：收到下單請求，未實際下單\n"
            "請先發送 /setlive 切換為實盤模式"); return
     try:
-        ex = ccxt.okx({
-            "apiKey":   OKX_API_KEY,
-            "secret":   OKX_SECRET,
-            "password": OKX_PASSPHRASE,
-            "options":  {"defaultType": "swap"},
-        })
-        if OKX_DEMO:
-            ex.set_sandbox_mode(True)
+        ex = _make_okx_ex()
         ex.load_markets()
-        bal  = ex.fetch_balance()
-        usdt = bal["USDT"]["free"] if "USDT" in bal else 0
-        if usdt <= 0:
-            tg("⚠️ USDT 餘額不足"); return
-        ex.set_leverage(ORDER_LEVERAGE, symbol)
-        price   = ex.fetch_ticker(symbol)["last"]
-        mkt     = ex.market(symbol)
-        prec    = int(mkt.get("precision", {}).get("amount", 0) or 0)
-        ct_sz   = float(mkt.get("contractSize", 1) or 1)
-        sl_dist = abs(price - sl)
-        if sl_dist <= 0:
-            tg("⚠️ 止損距離為 0，無法計算張數"); return
-        risk_usdt = usdt * ORDER_RISK_PCT / 100
-        raw   = risk_usdt / (sl_dist * ct_sz)
-        amt   = max(1, int(raw))   if prec == 0 else max(round(1 / ct_sz, prec), round(raw, prec))
-        half  = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
-        if amt <= 0:
-            tg("⚠️ 張數為 0"); return
+
+        # ── 1. 帳戶可用餘額 ──
+        bal   = ex.fetch_balance()
+        avail = float(bal["USDT"]["free"])  if "USDT" in bal else 0.0
+        if avail <= 0:
+            tg("⚠️ USDT 可用餘額不足"); return
+
+        # ── 2. 每倉保證金 = 可用 ÷ 10 ──
+        margin = avail / 10
+
+        # ── 3. 止損距離% & 建議槓桿 ──
+        price       = ex.fetch_ticker(symbol)["last"]
+        sl_dist_pct = abs(price - sl) / price * 100
+        if sl_dist_pct <= 0:
+            tg("⚠️ 止損距離為 0，無法計算槓桿"); return
+        sug_lev = max(1, min(int(100 / sl_dist_pct), MAX_LEVERAGE))
+
+        # ── 4. 倉位價值 & 張數 ──
+        mkt    = ex.market(symbol)
+        prec   = int(mkt.get("precision", {}).get("amount", 0) or 0)
+        ct_sz  = float(mkt.get("contractSize", 1) or 1)
+        pos_val = margin * sug_lev
+        raw     = pos_val / (price * ct_sz)
+        amt  = max(1, int(raw))          if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
+        half = max(1, int(amt // 2))     if prec == 0 else round(amt / 2, prec)
+
+        # ── 5. 設定槓桿 ──
+        ex.set_leverage(sug_lev, symbol)
+
+        # ── 6. TG 倉位摘要 ──
+        tg(
+            f"💰 可用餘額：{avail:.1f} U\n"
+            f"📦 每倉保證金：{margin:.1f} U（可用÷10）\n"
+            f"📊 倉位價值：{pos_val:.1f} U\n"
+            f"⚡ 建議槓桿：{sug_lev}x\n"
+            f"☠️ 最大虧損：{margin:.1f} U（逐倉保證金）"
+        )
+
+        # ── 7. 下單 ──
         is_l   = direction == "long"
         es, xs = ("buy", "sell") if is_l else ("sell", "buy")
         eo = ex.create_market_order(symbol, es, amt)
         res = [
-            f"✅ 進場\n{symbol} {'做多' if is_l else '做空'} {ORDER_LEVERAGE}x\n"
+            f"✅ 進場\n{symbol} {'做多' if is_l else '做空'} {sug_lev}x\n"
             f"均價:{eo.get('average') or price}  ID:{eo.get('id')}"
         ]
         try:
@@ -593,6 +634,7 @@ def poll_tg_callbacks():
                             Thread(
                                 target=place_okx_order,
                                 args=(order["symbol"], order["direction"],
+                                      order.get("entry", 0),
                                       order["sl"], order["tp1"], order["tp2"]),
                                 daemon=True,
                             ).start()
