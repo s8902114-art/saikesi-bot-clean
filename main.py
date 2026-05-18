@@ -34,7 +34,7 @@ from flask import Flask, request, jsonify
 COINALYZE_API_KEY  = "82087740-b30d-479f-8846-5ffb51540b19"
 
 # Discord 設定
-DISCORD_TOKEN      = os.environ.get("DISCORD_TOKEN", "MTUwNTk3MjU1ODg3OTUyNjkzMg.GBZAKE.oKHQLWmLrVg0eAF4Ak9Ikfsg51bIIthOnlFZII")
+DISCORD_TOKEN      = os.environ.get("DISCORD_TOKEN", "")
 DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "1505971611042320616")
 
 # Telegram 保留（可不設定，設了會同時發）
