@@ -326,6 +326,7 @@ def tg_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool):
     pending_orders[cb_key] = {
         "symbol":    OKX_SWAP.get(symbol, symbol),
         "direction": sig["side"],
+        "entry":     sig["entry"],
         "sl":        sig["sl"],
         "tp1":       sig["tp1"],
         "tp2":       sig["tp2"],
