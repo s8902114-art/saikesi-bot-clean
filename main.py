@@ -44,6 +44,7 @@ MAX_LEVERAGE     = 100    # 最高槓桿上限（可由 /setmaxlev 修改）
 MARGIN_PCT       = 10.0   # 每倉保證金佔可用餘額 %（可由 /setrisk 修改）
 SIGNAL_COOLDOWN  = 1800   # 防重複：同幣同時框同方向 30 分鐘內不重發
 _LIVE_MODE       = False  # 可由 /setlive /setpaper 切換
+_PAUSED          = False  # 可由 /pause /resume 切換（暫停發送訊號）
 _BOT_START_TS    = time.time()
 _bot_ref         = None   # TradingBotV3 實例（供 /status 查詢未平倉數）
 
