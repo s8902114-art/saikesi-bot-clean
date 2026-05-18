@@ -630,9 +630,11 @@ def _handle_tg_command(text: str):
         open_cnt = 0
         if _bot_ref is not None:
             open_cnt = sum(1 for p in _bot_ref.positions.values() if p and p.open)
+        paused_str = "⏸ 暫停中" if _PAUSED else "▶️ 運行中"
         tg(
             f"⚙️ <b>目前狀態</b>\n"
             f"━━━━━━━━━━━━\n"
+            f"訊號：{paused_str}\n"
             f"模式：{mode}\n"
             f"餘額：{bal_str}\n"
             f"每倉保證金：{margin_str}\n"
@@ -647,6 +649,8 @@ def _handle_tg_command(text: str):
         tg(
             "📖 <b>指令列表</b>\n"
             "━━━━━━━━━━━━\n"
+            "/pause — 暫停發送訊號（機器人繼續運行）\n"
+            "/resume — 恢復發送訊號\n"
             "/setrisk [數字] — 設定每倉保證金佔可用餘額%\n"
             "  例：/setrisk 5 → 每倉保證金 = 可用×5%\n"
             "/setmaxlev [數字] — 設定最高槓桿上限（例：/setmaxlev 50）\n"
