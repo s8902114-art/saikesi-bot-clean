@@ -113,3 +113,8 @@ externalPort = 8000
 [nix]
 channel = "stable-25_05"
 packages = ["glibcLocales"]
+
+[userenv]
+
+[userenv.shared]
+DISCORD_CHANNEL_ID = "1505971611042320616"
