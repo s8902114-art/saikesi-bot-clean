@@ -50,7 +50,7 @@ MAX_LEVERAGE     = 100
 MARGIN_PCT       = 10.0
 SIGNAL_COOLDOWN  = 1800
 _LIVE_MODE       = False
-_PAUSED          = True
+_PAUSED          = False
 _BOT_START_TS    = time.time()
 _bot_ref         = None
 
