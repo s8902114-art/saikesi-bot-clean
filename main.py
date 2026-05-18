@@ -1189,7 +1189,7 @@ class TradingBotV3:
         now_ts = time.time()
         if now_ts - self.last_signal_time.get(key, 0) < SIGNAL_COOLDOWN:
             return
-        self.last_signal_time[key] = now_ts
+        self.last_signal_time[key] = time.time()
 
         if _PAUSED:
             print(f"  [PAUSED] 跳過訊號：{label} {tf} {sig['side']}")
