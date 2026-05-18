@@ -736,11 +736,6 @@ def _handle_dc_command(text: str):
         else:
             dc("格式：`!auto 1H on` 或 `!auto all off`")
 
-    elif text.startswith("!autostatus"):
-        lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**
-" + "
-".join(lines))
 
     elif text.startswith("!help"):
         dc(
