@@ -50,7 +50,7 @@ MAX_LEVERAGE     = 100
 MARGIN_PCT       = 10.0
 SIGNAL_COOLDOWN  = 1800
 _LIVE_MODE       = False
-_PAUSED          = False
+_PAUSED          = True
 _BOT_START_TS    = time.time()
 _bot_ref         = None
 
@@ -756,10 +756,23 @@ def _handle_dc_command(text: str):
 
 _dc_last_msg_id = "0"
 
-def poll_dc_commands():
-    """輪詢 Discord 頻道訊息，處理 ! 指令"""
-    global _dc_last_msg_id
-    while True:
+        def poll_dc_commands():
+            """輪詢 Discord 頻道訊息，處理 ! 指令"""
+            global _dc_last_msg_id
+            # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
+            try:
+                r = requests.get(
+                    f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+                    headers=_dc_headers(),
+                    params={"limit": 1},
+                    timeout=15,
+                )
+                msgs = r.json()
+                if isinstance(msgs, list) and msgs:
+                    _dc_last_msg_id = msgs[0]["id"]
+            except Exception:
+                pass
+            while True:
         try:
             r = requests.get(
                 f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
