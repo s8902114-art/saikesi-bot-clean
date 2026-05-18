@@ -718,7 +718,7 @@ def _handle_dc_command(text: str):
 
     elif text.startswith("!autostatus"):
         lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**
+        dc("**自動下單狀態**\n" + "\n".join(lines))
 " + "
 ".join(lines))
 
@@ -740,7 +740,7 @@ def _handle_dc_command(text: str):
 
     elif text.startswith("!autostatus"):
         lines = [("on" if v else "off") + " " + k for k, v in AUTO_TRADE.items()]
-        dc("**自動下單狀態**
+        dc("**自動下單狀態**\n" + "\n".join(lines))
 " + "
 ".join(lines))
 
