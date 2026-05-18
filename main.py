@@ -198,26 +198,28 @@ MAX_CONSEC_LOSS   = 3
 PAUSE_HOURS       = 24
 
 BEST_PARAMS: Dict[str, Dict] = {
-    "1H_long":   {"tp1_mult": 1.3,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 4.0,
-                  "sl_atr_buffer": 0.15, "structure_lookback": 10,  "exit_mode": "fixed"},
-    "1H_short":  {"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.08, "structure_lookback": 20,  "exit_mode": "fixed"},
-    "15m_long":  {"tp1_mult": 1.5,  "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.01, "structure_lookback": 28,  "exit_mode": "fixed"},
-    "15m_short": {"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.08, "structure_lookback": 20,  "exit_mode": "fixed"},
-    "30m_long":  {"tp1_mult": 1.7,  "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.05, "structure_lookback": 10,  "exit_mode": "fixed"},
-    "30m_short": {"tp1_mult": 1.15, "tp2_intraday_mult": 1.35, "tp2_swing_mult": 2.25,
-                  "sl_atr_buffer": 0.01, "structure_lookback": 10,  "exit_mode": "trailing"},
-    "4H_long":   {"tp1_mult": 1.3,  "tp2_intraday_mult": 1.5,  "tp2_swing_mult": 3.0,
-                  "sl_atr_buffer": 0.03, "structure_lookback": 10,  "exit_mode": "trailing"},
-    "4H_short":  {"tp1_mult": 1.5,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 4.0,
-                  "sl_atr_buffer": 0.05, "structure_lookback": 30,  "exit_mode": "fixed"},
-    "5m_long":   {"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.08, "structure_lookback": 20,  "exit_mode": "fixed"},
-    "5m_short":  {"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
-                  "sl_atr_buffer": 0.08, "structure_lookback": 20,  "exit_mode": "fixed"},
+    # 日內（15m/30m）: TP1=1.725 TP2多=1.8 TP2空=3.2
+    "15m_long":  {"tp1_mult": 1.725, "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+                  "sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed"},
+    "15m_short": {"tp1_mult": 2.0,   "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+                  "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"},
+    "30m_long":  {"tp1_mult": 1.725, "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+                  "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed"},
+    "30m_short": {"tp1_mult": 2.0,   "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+                  "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing"},
+    # 波段（1H/4H）: TP1=1.725 TP2多=2.5 TP2空=4.0
+    "1H_long":   {"tp1_mult": 1.725, "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+                  "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed"},
+    "1H_short":  {"tp1_mult": 2.0,   "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+                  "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"},
+    "4H_long":   {"tp1_mult": 1.725, "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+                  "sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing"},
+    "4H_short":  {"tp1_mult": 2.0,   "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+                  "sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed"},
+    "5m_long":   {"tp1_mult": 1.725, "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+                  "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"},
+    "5m_short":  {"tp1_mult": 2.0,   "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+                  "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"},
 }
 
 def get_params(tf: str, side: str, base_dir: str = ".") -> Dict:
@@ -249,6 +251,7 @@ def get_params(tf: str, side: str, base_dir: str = ".") -> Dict:
 
 pending_orders: Dict[str, Dict] = {}
 _tg_offset = 0
+_BOT_START_TS = time.time()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
