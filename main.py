@@ -754,11 +754,12 @@ def _handle_dc_command(text: str):
         )
 
 
-        _dc_last_msg_id = "0"
+_dc_last_msg_id = "0"
 
         def poll_dc_commands():
             """輪詢 Discord 頻道訊息，處理 ! 指令"""
             global _dc_last_msg_id
+            # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
             try:
                 r = requests.get(
                     f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
