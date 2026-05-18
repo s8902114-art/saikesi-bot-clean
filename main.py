@@ -754,7 +754,7 @@ def _handle_dc_command(text: str):
         )
 
 
-_dc_last_msg_id = "0"
+        _dc_last_msg_id = "0"
 
         def poll_dc_commands():
             """輪詢 Discord 頻道訊息，處理 ! 指令"""
