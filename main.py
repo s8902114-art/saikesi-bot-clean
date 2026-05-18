@@ -41,6 +41,7 @@ OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
 OKX_DEMO       = False
 
 MAX_LEVERAGE     = 100    # 最高槓桿上限（可由 /setmaxlev 修改）
+MARGIN_PCT       = 10.0   # 每倉保證金佔可用餘額 %（可由 /setrisk 修改）
 SIGNAL_COOLDOWN  = 1800   # 防重複：同幣同時框同方向 30 分鐘內不重發
 _LIVE_MODE       = False  # 可由 /setlive /setpaper 切換
 _BOT_START_TS    = time.time()
@@ -499,8 +500,8 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         if avail <= 0:
             tg("⚠️ USDT 可用餘額不足"); return
 
-        # ── 2. 每倉保證金 = 可用 ÷ 10 ──
-        margin = avail / 10
+        # ── 2. 每倉保證金 = 可用 × MARGIN_PCT% ──
+        margin = avail * MARGIN_PCT / 100
 
         # ── 3. 止損距離% & 建議槓桿 ──
         price       = ex.fetch_ticker(symbol)["last"]
@@ -524,7 +525,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         # ── 6. TG 倉位摘要 ──
         tg(
             f"💰 可用餘額：{avail:.1f} U\n"
-            f"📦 每倉保證金：{margin:.1f} U（可用÷10）\n"
+            f"📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n"
             f"📊 倉位價值：{pos_val:.1f} U\n"
             f"⚡ 建議槓桿：{sug_lev}x\n"
             f"☠️ 最大虧損：{margin:.1f} U（逐倉保證金）"
@@ -560,10 +561,26 @@ def place_okx_order(symbol: str, direction: str, entry: float,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _handle_tg_command(text: str):
-    global _LIVE_MODE, MAX_LEVERAGE, _BOT_START_TS, _bot_ref
+    global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref
     text = text.strip()
 
-    if text.startswith("/setmaxlev"):
+    if text.startswith("/setrisk"):
+        parts = text.split()
+        if len(parts) >= 2:
+            try:
+                val = float(parts[1])
+                if val <= 0 or val > 100:
+                    tg("⚠️ 請輸入 0.1 ~ 100 之間的數字"); return
+                MARGIN_PCT = val
+                tg(f"✅ 每倉保證金比例已設為 <b>{val}%</b>\n"
+                   f"每單保證金 = 可用餘額 × {val}%")
+            except ValueError:
+                tg("⚠️ 格式錯誤，例：/setrisk 5")
+        else:
+            tg(f"目前每倉保證金：可用餘額 × <b>{MARGIN_PCT}%</b>\n"
+               f"修改請發：/setrisk [數字]（例：/setrisk 5）")
+
+    elif text.startswith("/setmaxlev"):
         parts = text.split()
         if len(parts) >= 2:
             try:
