@@ -588,8 +588,20 @@ _app = Flask(__name__)
 def _health():
     return f"賽克斯機器人 v4 | {len(SYMBOLS)} 個幣 | running"
 
+DISCORD_PUBLIC_KEY = "79788628a845970d78c0d99d2e85505d9a306bae482459d33eaa8d0f84b6c6d4"
+
 @_app.route("/discord-interactions", methods=["POST"])
 def discord_interactions():
+    signature = request.headers.get("X-Signature-Ed25519", "")
+    timestamp  = request.headers.get("X-Signature-Timestamp", "")
+    body = request.data
+    try:
+        from nacl.signing import VerifyKey
+        from nacl.exceptions import BadSignatureError
+        vk = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+        vk.verify((timestamp.encode() + body), bytes.fromhex(signature))
+    except Exception:
+        return jsonify({"error": "invalid signature"}), 401
     data = request.get_json()
     if not data:
         return jsonify({"error": "no data"}), 400
