@@ -1214,6 +1214,8 @@ class TradingBotV3:
         print()
 
     def run(self):
+        global _bot_ref
+        _bot_ref = self
         self.print_banner()
         print(f"  觸發方式：K棒收盤觸發  |  時區顯示：台灣時間 (UTC+8)")
         print("  Press Ctrl+C to stop\n")
