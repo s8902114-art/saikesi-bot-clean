@@ -560,52 +560,78 @@ def place_okx_order(symbol: str, direction: str, entry: float,
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _handle_tg_command(text: str):
-    global _LIVE_MODE, ORDER_RISK_PCT, _BOT_START_TS
+    global _LIVE_MODE, MAX_LEVERAGE, _BOT_START_TS, _bot_ref
     text = text.strip()
-    if text.startswith("/setrisk"):
+
+    if text.startswith("/setmaxlev"):
         parts = text.split()
         if len(parts) >= 2:
             try:
-                val = float(parts[1])
-                if val <= 0 or val > 100:
-                    tg("⚠️ 風險比例請輸入 0.1 ~ 100 之間的數字"); return
-                ORDER_RISK_PCT = val
-                tg(f"✅ 風險比例已設為 <b>{val}%</b>\n每單最大虧損 = 帳戶餘額 × {val}%")
+                val = int(float(parts[1]))
+                if val < 1 or val > 125:
+                    tg("⚠️ 槓桿上限請輸入 1 ~ 125 之間的整數"); return
+                MAX_LEVERAGE = val
+                tg(f"✅ 最高槓桿上限已設為 <b>{val}x</b>\n"
+                   f"建議槓桿 = min(100 ÷ 止損距離%, {val}x)")
             except ValueError:
-                tg("⚠️ 格式錯誤，例：/setrisk 2")
+                tg("⚠️ 格式錯誤，例：/setmaxlev 50")
         else:
-            tg(f"目前風險比例：<b>{ORDER_RISK_PCT}%</b>\n修改請發：/setrisk [數字]")
+            tg(f"目前最高槓桿上限：<b>{MAX_LEVERAGE}x</b>\n修改請發：/setmaxlev [數字]")
+
     elif text.startswith("/setlive"):
         if not OKX_API_KEY:
             tg("⚠️ 尚未設定 OKX_API_KEY，無法切換實盤"); return
         _LIVE_MODE = True
         tg("🔴 <b>已切換為實盤模式</b>\n點擊 ✅ 確認下單後將直接送出真實委託單")
+
     elif text.startswith("/setpaper"):
         _LIVE_MODE = False
         tg("📝 <b>已切換為模擬（Paper）模式</b>\n點擊 ✅ 確認下單不會送出真實委託單")
+
     elif text.startswith("/status"):
         elapsed = int(time.time() - _BOT_START_TS)
-        h, m = elapsed // 3600, (elapsed % 3600) // 60
-        mode  = "🔴 實盤" if _LIVE_MODE else "📝 Paper"
+        h, m    = elapsed // 3600, (elapsed % 3600) // 60
+        mode    = "🔴 實盤" if _LIVE_MODE else "📝 Paper"
+        # 帳戶餘額（即時抓取）
+        avail, total = _fetch_okx_balance()
+        if avail is not None:
+            margin_str = f"{avail/10:.1f} U（可用÷10）"
+            bal_str    = f"總額：{total:.1f} U  可用：{avail:.1f} U"
+        else:
+            margin_str = "N/A（需設定 OKX_API_KEY）"
+            bal_str    = "N/A"
+        # 未平倉數量（paper追蹤）
+        open_cnt = 0
+        if _bot_ref is not None:
+            open_cnt = sum(1 for p in _bot_ref.positions.values() if p and p.open)
         tg(
-            f"⚙️ <b>目前設定</b>\n"
+            f"⚙️ <b>目前狀態</b>\n"
             f"━━━━━━━━━━━━\n"
             f"模式：{mode}\n"
-            f"風險：{ORDER_RISK_PCT}%／單\n"
-            f"槓桿：{ORDER_LEVERAGE}x\n"
+            f"餘額：{bal_str}\n"
+            f"每倉保證金：{margin_str}\n"
+            f"最高槓桿上限：{MAX_LEVERAGE}x\n"
+            f"未平倉（Paper）：{open_cnt} 筆\n"
             f"已運行：{h}h {m}m\n"
             f"監控：{len(SYMBOLS)} 幣 | {len(TIMEFRAMES)} 時框\n"
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}"
         )
+
     elif text.startswith("/help"):
         tg(
             "📖 <b>指令列表</b>\n"
             "━━━━━━━━━━━━\n"
-            "/setrisk [數字] — 設定風險%（例：/setrisk 2）\n"
             "/setlive — 切換為實盤下單\n"
             "/setpaper — 切換為模擬（不下單）\n"
-            "/status — 顯示目前設定與運行時間\n"
-            "/help — 顯示此說明"
+            "/setmaxlev [數字] — 設定最高槓桿上限（例：/setmaxlev 50）\n"
+            "/status — 顯示模式／餘額／保證金／槓桿上限／未平倉／運行時間\n"
+            "/help — 顯示此說明\n"
+            "━━━━━━━━━━━━\n"
+            "倉位計算邏輯：\n"
+            "  每倉保證金 = 可用餘額 ÷ 10\n"
+            "  建議槓桿 = min(100 ÷ 止損距離%, 上限)\n"
+            "  倉位價值 = 保證金 × 建議槓桿\n"
+            "  最大虧損 = 每倉保證金（逐倉模式）"
         )
 
 
@@ -1171,7 +1197,7 @@ class TradingBotV3:
     def print_banner(self):
         print("\n" + "=" * 64)
         print(f"  賽克斯機器人 v4  |  TFs: {TIMEFRAMES}")
-        print(f"  幣種: {len(SYMBOLS)} 個  |  Mode: {'🔴 LIVE' if self.live else '📝 Paper'}")
+        print(f"  幣種: {len(SYMBOLS)} 個  |  Mode: {'🔴 LIVE' if self.live else '📝 Paper'}  |  MaxLev: {MAX_LEVERAGE}x")
         print(f"  QQE Primary  RSI={QQE_RSI} SF={QQE_SF} F={QQE_FACTOR_P} Thr={QQE_THRESHOLD}")
         print(f"  QQE Secondary RSI={QQE_RSI} SF={QQE_SF} F={QQE_FACTOR_S}")
         print(f"  CVD: {'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}")
@@ -1198,8 +1224,9 @@ class TradingBotV3:
             f"監控：{len(SYMBOLS)} 個幣\n"
             f"時框：{' / '.join(TIMEFRAMES)}\n"
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}\n"
-            f"模式：{'🔴 實盤' if _LIVE_MODE else '📝 Paper（/setlive 切換實盤）'}\n"
-            f"風險：{ORDER_RISK_PCT}%／單  槓桿：{ORDER_LEVERAGE}x\n"
+            f"模式：{'🔴 實盤' if _LIVE_MODE else '📝 Paper（發 /setlive 切換實盤）'}\n"
+            f"最高槓桿上限：{MAX_LEVERAGE}x（自動依止損距離計算）\n"
+            f"倉位：可用餘額÷10 × 建議槓桿\n"
             f"📖 發送 /help 查看所有指令"
         )
 
