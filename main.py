@@ -716,6 +716,12 @@ def _handle_dc_command(text: str):
             f"CVD：{'✅ Coinalyze' if COINALYZE_API_KEY else '⚠️ 無'}"
         )
 
+    elif text.startswith("!autostatus"):
+        lines = [f"{"✅" if v else "⛔"} {k}" for k, v in AUTO_TRADE.items()]
+        dc("**自動下單狀態**
+" + "
+".join(lines))
+
     elif text.startswith("!auto"):
         parts = text.split()
         if len(parts) >= 3:
