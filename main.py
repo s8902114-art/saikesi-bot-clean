@@ -912,21 +912,21 @@ class TradingBotV3:
                 if s in sides:
                     self.params[f"{tf}_{s}"] = get_params(tf, s, base_dir)
 
-        self.positions:       Dict[str, Optional[PaperPosition]] = {}
-        self.consec_loss:     Dict[str, int]                     = {}
-        self.pause_until:     Dict[str, Optional[datetime]]      = {}
-        self.last_signal_bar: Dict[str, str]                     = {}
-        self._bear_cache:     Dict[str, bool]                    = {}
+        self.positions:        Dict[str, Optional[PaperPosition]] = {}
+        self.consec_loss:      Dict[str, int]                     = {}
+        self.pause_until:      Dict[str, Optional[datetime]]      = {}
+        self.last_signal_time: Dict[str, float]                   = {}
+        self._bear_cache:      Dict[str, bool]                    = {}
 
         for tf, _, tf_sides in tf_plan:
             for inst_id in SYMBOLS:
                 for s in tf_sides:
                     if s in sides:
                         key = f"{inst_id}_{tf}_{s}"
-                        self.positions[key]       = None
-                        self.consec_loss[key]     = 0
-                        self.pause_until[key]     = None
-                        self.last_signal_bar[key] = ""
+                        self.positions[key]        = None
+                        self.consec_loss[key]      = 0
+                        self.pause_until[key]      = None
+                        self.last_signal_time[key] = 0.0
 
     def _key(self, inst_id, tf, side): return f"{inst_id}_{tf}_{side}"
 
@@ -1003,10 +1003,11 @@ class TradingBotV3:
         if not sig:
             return
 
-        # 防重複：同一根 K 棒不重複發訊號
-        if self.last_signal_bar.get(key) == sig["bar_ts"]:
+        # 防重複：同幣同時框同方向 30 分鐘內不重複發訊號
+        now_ts = time.time()
+        if now_ts - self.last_signal_time.get(key, 0) < SIGNAL_COOLDOWN:
             return
-        self.last_signal_bar[key] = sig["bar_ts"]
+        self.last_signal_time[key] = now_ts
 
         self._print_signal(sig, label, tf)
         tg_signal(sig, label, tf, sig.get("cvd_active", False))
