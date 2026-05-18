@@ -612,7 +612,7 @@ def _handle_tg_command(text: str):
         # 帳戶餘額（即時抓取）
         avail, total = _fetch_okx_balance()
         if avail is not None:
-            margin_str = f"{avail/10:.1f} U（可用÷10）"
+            margin_str = f"{avail * MARGIN_PCT / 100:.1f} U（可用×{MARGIN_PCT}%）"
             bal_str    = f"總額：{total:.1f} U  可用：{avail:.1f} U"
         else:
             margin_str = "N/A（需設定 OKX_API_KEY）"
