@@ -4,3 +4,4 @@ ccxt
 flask
 watchdog
 PyNaCl
+PyNaCl
