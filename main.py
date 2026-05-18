@@ -40,8 +40,11 @@ OKX_SECRET     = os.environ.get("OKX_SECRET_KEY", "")
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
 OKX_DEMO       = False
 
-ORDER_LEVERAGE = 5
-ORDER_PCT      = 0.10
+ORDER_LEVERAGE   = 5
+ORDER_RISK_PCT   = 1.0    # 每單風險佔帳戶 % (可由 /setrisk 修改)
+SIGNAL_COOLDOWN  = 1800   # 防重複：同幣同時框同方向 30 分鐘內不重發
+_LIVE_MODE       = False   # 可由 /setlive /setpaper 切換
+_BOT_START_TS    = time.time()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  FIXED STRATEGY CONSTANTS
