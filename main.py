@@ -2,20 +2,20 @@
 
 # -*- coding: utf-8 -*-
 
-“””
+"""""""""
 賽克斯訊號機器人 v4 — Production-Grade QQE MOD Signal Bot
 Discord 按鈕確認下單 | K棒收盤觸發 | 40+ 幣種 | 四時框 15m/30m/1H/4H
-“””
+"""""""""
 import sys, io
-if hasattr(sys.stdout, “reconfigure”):
-sys.stdout.reconfigure(encoding=“utf-8”, errors=“replace”)
+if hasattr(sys.stdout, """reconfigure"""):
+sys.stdout.reconfigure(encoding="""utf-8""", errors="""replace""")
 else:
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=“utf-8”, errors=“replace”)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="""utf-8""", errors="""replace""")
 
 import subprocess
-for _pkg in [“requests”, “pandas”, “numpy”, “ccxt”, “flask”]:
+for _pkg in ["""requests""", """pandas""", """numpy""", """ccxt""", """flask"""]:
 try: **import**(_pkg)
-except ImportError: subprocess.check_call([sys.executable, “-m”, “pip”, “install”, _pkg, “-q”])
+except ImportError: subprocess.check_call([sys.executable, """-m""", """pip""", """install""", _pkg, """-q"""])
 
 import argparse, base64, hashlib, hmac, json, math, os, time
 from datetime import datetime, timezone, timedelta
@@ -37,21 +37,21 @@ from flask import Flask, request, jsonify
 
 # 
 
-COINALYZE_API_KEY  = “82087740-b30d-479f-8846-5ffb51540b19”
+COINALYZE_API_KEY  = """82087740-b30d-479f-8846-5ffb51540b19"""
 
 # Discord 設定
 
-DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”, “”)
-DISCORD_CHANNEL_ID = os.environ.get(“DISCORD_CHANNEL_ID”, “1505971611042320616”)
+DISCORD_TOKEN = os.environ.get("""DISCORD_TOKEN""", """""")
+DISCORD_CHANNEL_ID = os.environ.get("""DISCORD_CHANNEL_ID""", """1505971611042320616""")
 
 # Telegram 保留（可不設定，設了會同時發）
 
-TG_BOT_TOKEN = os.environ.get(“TG_BOT_TOKEN”, “”)
-TG_CHAT_ID   = os.environ.get(“TG_CHAT_ID”, “”)
+TG_BOT_TOKEN = os.environ.get("""TG_BOT_TOKEN""", """""")
+TG_CHAT_ID   = os.environ.get("""TG_CHAT_ID""", """""")
 
-OKX_API_KEY    = os.environ.get(“OKX_API_KEY”, “”)
-OKX_SECRET     = os.environ.get(“OKX_SECRET_KEY”, “”)
-OKX_PASSPHRASE = os.environ.get(“OKX_PASSPHRASE”, “”)
+OKX_API_KEY    = os.environ.get("""OKX_API_KEY""", """""")
+OKX_SECRET     = os.environ.get("""OKX_SECRET_KEY""", """""")
+OKX_PASSPHRASE = os.environ.get("""OKX_PASSPHRASE""", """""")
 OKX_DEMO       = False
 
 MAX_LEVERAGE     = 100
@@ -60,7 +60,7 @@ SIGNAL_COOLDOWN  = 1800
 _LIVE_MODE       = False
 _PAUSED          = False
 _BOT_START_TS    = time.time()
-AUTO_TRADE = {“15m”: False, “30m”: False, “1H”: False, “4H”: False}
+AUTO_TRADE = {"""15m""": False, """30m""": False, """1H""": False, """4H""": False}
 _bot_ref         = None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -69,131 +69,131 @@ _bot_ref         = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-OKX_BASE  = “https://www.okx.com”
-CONA_BASE = “https://api.coinalyze.net/v1”
-DC_BASE   = “https://discord.com/api/v10”
+OKX_BASE  = """https://www.okx.com"""
+CONA_BASE = """https://api.coinalyze.net/v1"""
+DC_BASE   = """https://discord.com/api/v10"""
 
 SYMBOLS: Dict[str, str] = {
-“BTC-USDT-SWAP”:    “BTC/USDT”,
-“ETH-USDT-SWAP”:    “ETH/USDT”,
-“SOL-USDT-SWAP”:    “SOL/USDT”,
-“XRP-USDT-SWAP”:    “XRP/USDT”,
-“BNB-USDT-SWAP”:    “BNB/USDT”,
-“DOGE-USDT-SWAP”:   “DOGE/USDT”,
-“ADA-USDT-SWAP”:    “ADA/USDT”,
-“TRX-USDT-SWAP”:    “TRX/USDT”,
-“SUI-USDT-SWAP”:    “SUI/USDT”,
-“LINK-USDT-SWAP”:   “LINK/USDT”,
-“AVAX-USDT-SWAP”:   “AVAX/USDT”,
-“TON-USDT-SWAP”:    “TON/USDT”,
-“HBAR-USDT-SWAP”:   “HBAR/USDT”,
-“XLM-USDT-SWAP”:    “XLM/USDT”,
-“BCH-USDT-SWAP”:    “BCH/USDT”,
-“LTC-USDT-SWAP”:    “LTC/USDT”,
-“DOT-USDT-SWAP”:    “DOT/USDT”,
-“UNI-USDT-SWAP”:    “UNI/USDT”,
-“TAO-USDT-SWAP”:    “TAO/USDT”,
-“NEAR-USDT-SWAP”:   “NEAR/USDT”,
-“APT-USDT-SWAP”:    “APT/USDT”,
-“ARB-USDT-SWAP”:    “ARB/USDT”,
-“ATOM-USDT-SWAP”:   “ATOM/USDT”,
-“ETC-USDT-SWAP”:    “ETC/USDT”,
-“ICP-USDT-SWAP”:    “ICP/USDT”,
-“AAVE-USDT-SWAP”:   “AAVE/USDT”,
-“RENDER-USDT-SWAP”: “RENDER/USDT”,
-“FIL-USDT-SWAP”:    “FIL/USDT”,
-“ENA-USDT-SWAP”:    “ENA/USDT”,
-“ALGO-USDT-SWAP”:   “ALGO/USDT”,
-“WLD-USDT-SWAP”:    “WLD/USDT”,
-“ONDO-USDT-SWAP”:   “ONDO/USDT”,
-“JUP-USDT-SWAP”:    “JUP/USDT”,
-“POL-USDT-SWAP”:    “POL/USDT”,
-“ZEC-USDT-SWAP”:    “ZEC/USDT”,
-“DASH-USDT-SWAP”:   “DASH/USDT”,
-“PENGU-USDT-SWAP”:  “PENGU/USDT”,
-“MORPHO-USDT-SWAP”: “MORPHO/USDT”,
-“HYPE-USDT-SWAP”:   “HYPE/USDT”,
-“SKY-USDT-SWAP”:    “SKY/USDT”,
+"""BTC-USDT-SWAP""":    """BTC/USDT""",
+"""ETH-USDT-SWAP""":    """ETH/USDT""",
+"""SOL-USDT-SWAP""":    """SOL/USDT""",
+"""XRP-USDT-SWAP""":    """XRP/USDT""",
+"""BNB-USDT-SWAP""":    """BNB/USDT""",
+"""DOGE-USDT-SWAP""":   """DOGE/USDT""",
+"""ADA-USDT-SWAP""":    """ADA/USDT""",
+"""TRX-USDT-SWAP""":    """TRX/USDT""",
+"""SUI-USDT-SWAP""":    """SUI/USDT""",
+"""LINK-USDT-SWAP""":   """LINK/USDT""",
+"""AVAX-USDT-SWAP""":   """AVAX/USDT""",
+"""TON-USDT-SWAP""":    """TON/USDT""",
+"""HBAR-USDT-SWAP""":   """HBAR/USDT""",
+"""XLM-USDT-SWAP""":    """XLM/USDT""",
+"""BCH-USDT-SWAP""":    """BCH/USDT""",
+"""LTC-USDT-SWAP""":    """LTC/USDT""",
+"""DOT-USDT-SWAP""":    """DOT/USDT""",
+"""UNI-USDT-SWAP""":    """UNI/USDT""",
+"""TAO-USDT-SWAP""":    """TAO/USDT""",
+"""NEAR-USDT-SWAP""":   """NEAR/USDT""",
+"""APT-USDT-SWAP""":    """APT/USDT""",
+"""ARB-USDT-SWAP""":    """ARB/USDT""",
+"""ATOM-USDT-SWAP""":   """ATOM/USDT""",
+"""ETC-USDT-SWAP""":    """ETC/USDT""",
+"""ICP-USDT-SWAP""":    """ICP/USDT""",
+"""AAVE-USDT-SWAP""":   """AAVE/USDT""",
+"""RENDER-USDT-SWAP""": """RENDER/USDT""",
+"""FIL-USDT-SWAP""":    """FIL/USDT""",
+"""ENA-USDT-SWAP""":    """ENA/USDT""",
+"""ALGO-USDT-SWAP""":   """ALGO/USDT""",
+"""WLD-USDT-SWAP""":    """WLD/USDT""",
+"""ONDO-USDT-SWAP""":   """ONDO/USDT""",
+"""JUP-USDT-SWAP""":    """JUP/USDT""",
+"""POL-USDT-SWAP""":    """POL/USDT""",
+"""ZEC-USDT-SWAP""":    """ZEC/USDT""",
+"""DASH-USDT-SWAP""":   """DASH/USDT""",
+"""PENGU-USDT-SWAP""":  """PENGU/USDT""",
+"""MORPHO-USDT-SWAP""": """MORPHO/USDT""",
+"""HYPE-USDT-SWAP""":   """HYPE/USDT""",
+"""SKY-USDT-SWAP""":    """SKY/USDT""",
 }
 
 OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 
 CONA_SPOT: Dict[str, str] = {
-“BTC/USDT”:   “BTCUSDT.A”,
-“ETH/USDT”:   “ETHUSDT.A”,
-“SOL/USDT”:   “SOLUSDT.A”,
-“XRP/USDT”:   “XRPUSDT.A”,
-“BNB/USDT”:   “BNBUSDT.A”,
-“DOGE/USDT”:  “DOGEUSDT.A”,
-“ADA/USDT”:   “ADAUSDT.A”,
-“TRX/USDT”:   “TRXUSDT.A”,
-“SUI/USDT”:   “SUIUSDT.A”,
-“LINK/USDT”:  “LINKUSDT.A”,
-“AVAX/USDT”:  “AVAXUSDT.A”,
-“TON/USDT”:   “TONUSDT.A”,
-“HBAR/USDT”:  “HBARUSDT.A”,
-“XLM/USDT”:   “XLMUSDT.A”,
-“BCH/USDT”:   “BCHUSDT.A”,
-“LTC/USDT”:   “LTCUSDT.A”,
-“DOT/USDT”:   “DOTUSDT.A”,
-“UNI/USDT”:   “UNIUSDT.A”,
-“NEAR/USDT”:  “NEARUSDT.A”,
-“APT/USDT”:   “APTUSDT.A”,
-“ARB/USDT”:   “ARBUSDT.A”,
-“ATOM/USDT”:  “ATOMUSDT.A”,
-“ETC/USDT”:   “ETCUSDT.A”,
-“ICP/USDT”:   “ICPUSDT.A”,
-“AAVE/USDT”:  “AAVEUSDT.A”,
-“FIL/USDT”:   “FILUSDT.A”,
-“ENA/USDT”:   “ENAUSDT.A”,
-“ALGO/USDT”:  “ALGOUSDT.A”,
-“WLD/USDT”:   “WLDUSDT.A”,
-“ONDO/USDT”:  “ONDOUSDT.A”,
+"""BTC/USDT""":   """BTCUSDT.A""",
+"""ETH/USDT""":   """ETHUSDT.A""",
+"""SOL/USDT""":   """SOLUSDT.A""",
+"""XRP/USDT""":   """XRPUSDT.A""",
+"""BNB/USDT""":   """BNBUSDT.A""",
+"""DOGE/USDT""":  """DOGEUSDT.A""",
+"""ADA/USDT""":   """ADAUSDT.A""",
+"""TRX/USDT""":   """TRXUSDT.A""",
+"""SUI/USDT""":   """SUIUSDT.A""",
+"""LINK/USDT""":  """LINKUSDT.A""",
+"""AVAX/USDT""":  """AVAXUSDT.A""",
+"""TON/USDT""":   """TONUSDT.A""",
+"""HBAR/USDT""":  """HBARUSDT.A""",
+"""XLM/USDT""":   """XLMUSDT.A""",
+"""BCH/USDT""":   """BCHUSDT.A""",
+"""LTC/USDT""":   """LTCUSDT.A""",
+"""DOT/USDT""":   """DOTUSDT.A""",
+"""UNI/USDT""":   """UNIUSDT.A""",
+"""NEAR/USDT""":  """NEARUSDT.A""",
+"""APT/USDT""":   """APTUSDT.A""",
+"""ARB/USDT""":   """ARBUSDT.A""",
+"""ATOM/USDT""":  """ATOMUSDT.A""",
+"""ETC/USDT""":   """ETCUSDT.A""",
+"""ICP/USDT""":   """ICPUSDT.A""",
+"""AAVE/USDT""":  """AAVEUSDT.A""",
+"""FIL/USDT""":   """FILUSDT.A""",
+"""ENA/USDT""":   """ENAUSDT.A""",
+"""ALGO/USDT""":  """ALGOUSDT.A""",
+"""WLD/USDT""":   """WLDUSDT.A""",
+"""ONDO/USDT""":  """ONDOUSDT.A""",
 }
 
 CONA_PERP: Dict[str, str] = {
-“BTC/USDT”:   “BTCUSDT_PERP.A”,
-“ETH/USDT”:   “ETHUSDT_PERP.A”,
-“SOL/USDT”:   “SOLUSDT_PERP.A”,
-“XRP/USDT”:   “XRPUSDT_PERP.A”,
-“BNB/USDT”:   “BNBUSDT_PERP.A”,
-“DOGE/USDT”:  “DOGEUSDT_PERP.A”,
-“ADA/USDT”:   “ADAUSDT_PERP.A”,
-“TRX/USDT”:   “TRXUSDT_PERP.A”,
-“SUI/USDT”:   “SUIUSDT_PERP.A”,
-“LINK/USDT”:  “LINKUSDT_PERP.A”,
-“AVAX/USDT”:  “AVAXUSDT_PERP.A”,
-“HBAR/USDT”:  “HBARUSDT_PERP.A”,
-“XLM/USDT”:   “XLMUSDT_PERP.A”,
-“BCH/USDT”:   “BCHUSDT_PERP.A”,
-“LTC/USDT”:   “LTCUSDT_PERP.A”,
-“DOT/USDT”:   “DOTUSDT_PERP.A”,
-“UNI/USDT”:   “UNIUSDT_PERP.A”,
-“NEAR/USDT”:  “NEARUSDT_PERP.A”,
-“APT/USDT”:   “APTUSDT_PERP.A”,
-“ARB/USDT”:   “ARBUSDT_PERP.A”,
-“ATOM/USDT”:  “ATOMUSDT_PERP.A”,
-“ETC/USDT”:   “ETCUSDT_PERP.A”,
-“ICP/USDT”:   “ICPUSDT_PERP.A”,
-“AAVE/USDT”:  “AAVEUSDT_PERP.A”,
-“FIL/USDT”:   “FILUSDT_PERP.A”,
-“ENA/USDT”:   “ENAUSDT_PERP.A”,
-“ALGO/USDT”:  “ALGOUSDT_PERP.A”,
-“WLD/USDT”:   “WLDUSDT_PERP.A”,
-“ONDO/USDT”:  “ONDOUSDT_PERP.A”,
+"""BTC/USDT""":   """BTCUSDT_PERP.A""",
+"""ETH/USDT""":   """ETHUSDT_PERP.A""",
+"""SOL/USDT""":   """SOLUSDT_PERP.A""",
+"""XRP/USDT""":   """XRPUSDT_PERP.A""",
+"""BNB/USDT""":   """BNBUSDT_PERP.A""",
+"""DOGE/USDT""":  """DOGEUSDT_PERP.A""",
+"""ADA/USDT""":   """ADAUSDT_PERP.A""",
+"""TRX/USDT""":   """TRXUSDT_PERP.A""",
+"""SUI/USDT""":   """SUIUSDT_PERP.A""",
+"""LINK/USDT""":  """LINKUSDT_PERP.A""",
+"""AVAX/USDT""":  """AVAXUSDT_PERP.A""",
+"""HBAR/USDT""":  """HBARUSDT_PERP.A""",
+"""XLM/USDT""":   """XLMUSDT_PERP.A""",
+"""BCH/USDT""":   """BCHUSDT_PERP.A""",
+"""LTC/USDT""":   """LTCUSDT_PERP.A""",
+"""DOT/USDT""":   """DOTUSDT_PERP.A""",
+"""UNI/USDT""":   """UNIUSDT_PERP.A""",
+"""NEAR/USDT""":  """NEARUSDT_PERP.A""",
+"""APT/USDT""":   """APTUSDT_PERP.A""",
+"""ARB/USDT""":   """ARBUSDT_PERP.A""",
+"""ATOM/USDT""":  """ATOMUSDT_PERP.A""",
+"""ETC/USDT""":   """ETCUSDT_PERP.A""",
+"""ICP/USDT""":   """ICPUSDT_PERP.A""",
+"""AAVE/USDT""":  """AAVEUSDT_PERP.A""",
+"""FIL/USDT""":   """FILUSDT_PERP.A""",
+"""ENA/USDT""":   """ENAUSDT_PERP.A""",
+"""ALGO/USDT""":  """ALGOUSDT_PERP.A""",
+"""WLD/USDT""":   """WLDUSDT_PERP.A""",
+"""ONDO/USDT""":  """ONDOUSDT_PERP.A""",
 }
 
-BAR_TO_CONA = {“5m”: “5min”, “15m”: “15min”, “30m”: “30min”, “1H”: “1hour”, “4H”: “4hour”}
-BAR_SECONDS  = {“5m”: 300, “15m”: 900, “30m”: 1800, “1H”: 3600, “4H”: 14400}
+BAR_TO_CONA = {"""5m""": """5min""", """15m""": """15min""", """30m""": """30min""", """1H""": """1hour""", """4H""": """4hour"""}
+BAR_SECONDS  = {"""5m""": 300, """15m""": 900, """30m""": 1800, """1H""": 3600, """4H""": 14400}
 WARMUP       = 700
 
-TIMEFRAMES = [“15m”, “30m”, “1H”, “4H”]
+TIMEFRAMES = ["""15m""", """30m""", """1H""", """4H"""]
 
 DEFAULT_TF_PLAN = [
-(“15m”, 180, [“long”, “short”]),
-(“30m”, 300, [“long”, “short”]),
-(“1H”,  600, [“long”, “short”]),
-(“4H”,  900, [“long”, “short”]),
+("""15m""", 180, ["""long""", """short"""]),
+("""30m""", 300, ["""long""", """short"""]),
+("""1H""",  600, ["""long""", """short"""]),
+("""4H""",  900, ["""long""", """short"""]),
 ]
 
 QQE_RSI       = 6
@@ -213,49 +213,49 @@ MAX_CONSEC_LOSS   = 3
 PAUSE_HOURS       = 24
 
 BEST_PARAMS: Dict[str, Dict] = {
-“15m_long”:  {“tp1_mult”: 1.725, “tp2_intraday_mult”: 1.8,  “tp2_swing_mult”: 1.8,
-“sl_atr_buffer”: 0.01, “structure_lookback”: 28, “exit_mode”: “fixed”},
-“15m_short”: {“tp1_mult”: 2.0,   “tp2_intraday_mult”: 3.2,  “tp2_swing_mult”: 3.2,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”},
-“30m_long”:  {“tp1_mult”: 1.725, “tp2_intraday_mult”: 1.8,  “tp2_swing_mult”: 1.8,
-“sl_atr_buffer”: 0.05, “structure_lookback”: 10, “exit_mode”: “fixed”},
-“30m_short”: {“tp1_mult”: 2.0,   “tp2_intraday_mult”: 3.2,  “tp2_swing_mult”: 3.2,
-“sl_atr_buffer”: 0.01, “structure_lookback”: 10, “exit_mode”: “trailing”},
-“1H_long”:   {“tp1_mult”: 1.725, “tp2_intraday_mult”: 2.5,  “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.15, “structure_lookback”: 10, “exit_mode”: “fixed”},
-“1H_short”:  {“tp1_mult”: 2.0,   “tp2_intraday_mult”: 4.0,  “tp2_swing_mult”: 4.0,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”},
-“4H_long”:   {“tp1_mult”: 1.725, “tp2_intraday_mult”: 2.5,  “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.03, “structure_lookback”: 10, “exit_mode”: “trailing”},
-“4H_short”:  {“tp1_mult”: 2.0,   “tp2_intraday_mult”: 4.0,  “tp2_swing_mult”: 4.0,
-“sl_atr_buffer”: 0.05, “structure_lookback”: 30, “exit_mode”: “fixed”},
-“5m_long”:   {“tp1_mult”: 1.725, “tp2_intraday_mult”: 1.8,  “tp2_swing_mult”: 1.8,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”},
-“5m_short”:  {“tp1_mult”: 2.0,   “tp2_intraday_mult”: 3.2,  “tp2_swing_mult”: 3.2,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”},
+"""15m_long""":  {"""tp1_mult""": 1.725, """tp2_intraday_mult""": 1.8,  """tp2_swing_mult""": 1.8,
+"""sl_atr_buffer""": 0.01, """structure_lookback""": 28, """exit_mode""": """fixed"""},
+"""15m_short""": {"""tp1_mult""": 2.0,   """tp2_intraday_mult""": 3.2,  """tp2_swing_mult""": 3.2,
+"""sl_atr_buffer""": 0.08, """structure_lookback""": 20, """exit_mode""": """fixed"""},
+"""30m_long""":  {"""tp1_mult""": 1.725, """tp2_intraday_mult""": 1.8,  """tp2_swing_mult""": 1.8,
+"""sl_atr_buffer""": 0.05, """structure_lookback""": 10, """exit_mode""": """fixed"""},
+"""30m_short""": {"""tp1_mult""": 2.0,   """tp2_intraday_mult""": 3.2,  """tp2_swing_mult""": 3.2,
+"""sl_atr_buffer""": 0.01, """structure_lookback""": 10, """exit_mode""": """trailing"""},
+"""1H_long""":   {"""tp1_mult""": 1.725, """tp2_intraday_mult""": 2.5,  """tp2_swing_mult""": 2.5,
+"""sl_atr_buffer""": 0.15, """structure_lookback""": 10, """exit_mode""": """fixed"""},
+"""1H_short""":  {"""tp1_mult""": 2.0,   """tp2_intraday_mult""": 4.0,  """tp2_swing_mult""": 4.0,
+"""sl_atr_buffer""": 0.08, """structure_lookback""": 20, """exit_mode""": """fixed"""},
+"""4H_long""":   {"""tp1_mult""": 1.725, """tp2_intraday_mult""": 2.5,  """tp2_swing_mult""": 2.5,
+"""sl_atr_buffer""": 0.03, """structure_lookback""": 10, """exit_mode""": """trailing"""},
+"""4H_short""":  {"""tp1_mult""": 2.0,   """tp2_intraday_mult""": 4.0,  """tp2_swing_mult""": 4.0,
+"""sl_atr_buffer""": 0.05, """structure_lookback""": 30, """exit_mode""": """fixed"""},
+"""5m_long""":   {"""tp1_mult""": 1.725, """tp2_intraday_mult""": 1.8,  """tp2_swing_mult""": 1.8,
+"""sl_atr_buffer""": 0.08, """structure_lookback""": 20, """exit_mode""": """fixed"""},
+"""5m_short""":  {"""tp1_mult""": 2.0,   """tp2_intraday_mult""": 3.2,  """tp2_swing_mult""": 3.2,
+"""sl_atr_buffer""": 0.08, """structure_lookback""": 20, """exit_mode""": """fixed"""},
 }
 
-def get_params(tf: str, side: str, base_dir: str = “.”) -> Dict:
-trade_keys = {“tp1_mult”, “tp2_intraday_mult”, “tp2_swing_mult”,
-“sl_atr_buffer”, “structure_lookback”, “exit_mode”}
+def get_params(tf: str, side: str, base_dir: str = """.""") -> Dict:
+trade_keys = {"""tp1_mult""", """tp2_intraday_mult""", """tp2_swing_mult""",
+"""sl_atr_buffer""", """structure_lookback""", """exit_mode"""}
 for fname in [
-os.path.join(base_dir, f”best_params_{tf.lower()}*{side}.json”),
-os.path.join(base_dir, “final_params_all.json”),
+os.path.join(base_dir, f"""best_params_{tf.lower()}*{side}.json"""),
+os.path.join(base_dir, """final_params_all.json"""),
 ]:
 if os.path.exists(fname):
-with open(fname, encoding=“utf-8”) as f:
+with open(fname, encoding="""utf-8""") as f:
 raw = json.load(f)
-data = raw.get(f”{tf}*{side}”, raw.get(“params”, raw))
+data = raw.get(f"""{tf}*{side}""", raw.get("""params""", raw))
 p = {k: v for k, v in data.items() if k in trade_keys}
 if len(p) >= 4:
-print(f”  [params] {tf} {side} ← {os.path.basename(fname)}”)
-return {**BEST_PARAMS.get(f”{tf}*{side}”, {}), **p}
-key = f”{tf}*{side}”
+print(f"""  [params] {tf} {side} ← {os.path.basename(fname)}""")
+return {**BEST_PARAMS.get(f"""{tf}*{side}""", {}), **p}
+key = f"""{tf}*{side}"""
 if key in BEST_PARAMS:
-print(f”  [params] {tf} {side} ← built-in defaults”)
+print(f"""  [params] {tf} {side} ← built-in defaults""")
 return BEST_PARAMS[key].copy()
-return {“tp1_mult”: 1.7, “tp2_intraday_mult”: 1.8, “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”}
+return {"""tp1_mult""": 1.7, """tp2_intraday_mult""": 1.8, """tp2_swing_mult""": 2.5,
+"""sl_atr_buffer""": 0.08, """structure_lookback""": 20, """exit_mode""": """fixed"""}
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -275,8 +275,8 @@ _BOT_START_TS = time.time()
 
 def _dc_headers() -> Dict:
 return {
-“Authorization”: f”Bot {DISCORD_TOKEN}”,
-“Content-Type”: “application/json”,
+"""Authorization""": f"""Bot {DISCORD_TOKEN}""",
+"""Content-Type""": """application/json""",
 }
 
 def dc(text: str):
@@ -284,30 +284,30 @@ if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
 return
 try:
 requests.post(
-f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”,
+f"""{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages""",
 headers=_dc_headers(),
-json={“content”: text},
+json={"""content""": text},
 timeout=10,
 )
 except Exception as e:
-print(f”  [DC] {e}”)
+print(f"""  [DC] {e}""")
 
 def dc_embed(embed: Dict, components: List = None):
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
 return None
-payload = {“embeds”: [embed]}
+payload = {"""embeds""": [embed]}
 if components:
-payload[“components”] = components
+payload["""components"""] = components
 try:
 r = requests.post(
-f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”,
+f"""{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages""",
 headers=_dc_headers(),
 json=payload,
 timeout=10,
 )
-return r.json().get(“id”)
+return r.json().get("""id""")
 except Exception as e:
-print(f”  [DC embed] {e}”)
+print(f"""  [DC embed] {e}""")
 return None
 
 def dc_edit(message_id: str, content: str):
@@ -315,70 +315,70 @@ if not DISCORD_TOKEN or not message_id:
 return
 try:
 requests.patch(
-f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}”,
+f"""{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}""",
 headers=_dc_headers(),
-json={“content”: content, “components”: []},
+json={"""content""": content, """components""": []},
 timeout=10,
 )
 except Exception as e:
-print(f”  [DC edit] {e}”)
+print(f"""  [DC edit] {e}""")
 
 def dc_signal(sig: Dict, symbol: str, tf: str, cvd_active: bool) -> str:
-side_emoji = “🟢” if sig[“side”] == “long” else “🔴”
-dir_s      = “做多” if sig[“side”] == “long” else “做空”
-swing_tag  = “📐 波段” if sig[“is_swing”] else “⚡ 日內”
-cvd_tag    = “CVD ✅” if cvd_active else “CVD ⚠️”
-color      = 0x00c851 if sig[“side”] == “long” else 0xff4444
-ts_utc = datetime.fromisoformat(sig[“time”].replace(“Z”, “+00:00”))
+side_emoji = """🟢""" if sig["""side"""] == """long""" else """🔴"""
+dir_s      = """做多""" if sig["""side"""] == """long""" else """做空"""
+swing_tag  = """📐 波段""" if sig["""is_swing"""] else """⚡ 日內"""
+cvd_tag    = """CVD ✅""" if cvd_active else """CVD ⚠️"""
+color      = 0x00c851 if sig["""side"""] == """long""" else 0xff4444
+ts_utc = datetime.fromisoformat(sig["""time"""].replace("""Z""", """+00:00"""))
 ts_tw  = ts_utc + timedelta(hours=8)
-ts_str = ts_tw.strftime(”%m/%d %H:%M”)
-coin   = symbol.split(”/”)[0]
-cb_key = f”{coin}*{tf}*{sig[‘side’]}*{int(time.time())}”
+ts_str = ts_tw.strftime("""%m/%d %H:%M""")
+coin   = symbol.split("""/""")[0]
+cb_key = f"""{coin}*{tf}*{sig[‘side’]}*{int(time.time())}"""
 pending_orders[cb_key] = {
-“symbol”:    OKX_SWAP.get(symbol, symbol),
-“direction”: sig[“side”],
-“entry”:     sig[“entry”],
-“sl”:        sig[“sl”],
-“tp1”:       sig[“tp1”],
-“tp2”:       sig[“tp2”],
+"""symbol""":    OKX_SWAP.get(symbol, symbol),
+"""direction""": sig["""side"""],
+"""entry""":     sig["""entry"""],
+"""sl""":        sig["""sl"""],
+"""tp1""":       sig["""tp1"""],
+"""tp2""":       sig["""tp2"""],
 }
 embed = {
-“title”: f”{side_emoji} {coin} [{tf} {dir_s}]  {swing_tag}  {cvd_tag}”,
-“color”: color,
-“fields”: [
-{“name”: “時間 (TST)”, “value”: ts_str, “inline”: True},
-{“name”: “ATR”, “value”: str(sig[“atr”]), “inline”: True},
-{“name”: “出場模式”, “value”: sig[“exit_mode”], “inline”: True},
-{“name”: “入場”, “value”: f”`{sig['entry']}`”, “inline”: True},
-{“name”: “止損 🛑”, “value”: f”`{sig['sl']}`  (風險 {sig[‘risk_pct’]:.2f}%)”, “inline”: True},
-{“name”: “\u200b”, “value”: “\u200b”, “inline”: True},
-{“name”: f”TP1 🎯 (50%)  1:{sig[‘rr1’]:.2f}”, “value”: f”`{sig['tp1']}`”, “inline”: True},
-{“name”: f”TP2 🎯 (50%)  1:{sig[‘rr2’]:.2f}”, “value”: f”`{sig['tp2']}`”, “inline”: True},
-{“name”: “TP1後止損移至”, “value”: f”`{sig['entry']}`”, “inline”: True},
+"""title""": f"""{side_emoji} {coin} [{tf} {dir_s}]  {swing_tag}  {cvd_tag}""",
+"""color""": color,
+"""fields""": [
+{"""name""": """時間 (TST)""", """value""": ts_str, """inline""": True},
+{"""name""": """ATR""", """value""": str(sig["""atr"""]), """inline""": True},
+{"""name""": """出場模式""", """value""": sig["""exit_mode"""], """inline""": True},
+{"""name""": """入場""", """value""": f"""`{sig['entry']}`""", """inline""": True},
+{"""name""": """止損 🛑""", """value""": f"""`{sig['sl']}`  (風險 {sig[‘risk_pct’]:.2f}%)""", """inline""": True},
+{"""name""": """\u200b""", """value""": """\u200b""", """inline""": True},
+{"""name""": f"""TP1 🎯 (50%)  1:{sig[‘rr1’]:.2f}""", """value""": f"""`{sig['tp1']}`""", """inline""": True},
+{"""name""": f"""TP2 🎯 (50%)  1:{sig[‘rr2’]:.2f}""", """value""": f"""`{sig['tp2']}`""", """inline""": True},
+{"""name""": """TP1後止損移至""", """value""": f"""`{sig['entry']}`""", """inline""": True},
 ],
-“footer”: {“text”: f”key: {cb_key}”},
+"""footer""": {"""text""": f"""key: {cb_key}"""},
 }
 components = [{
-“type”: 1,
-“components”: [
-{“type”: 2, “style”: 3, “label”: “✅ 確認下單”, “custom_id”: f”confirm*{cb_key}”},
-{“type”: 2, “style”: 4, “label”: “❌ 跳過”,     “custom_id”: f”skip_{cb_key}”},
+"""type""": 1,
+"""components""": [
+{"""type""": 2, """style""": 3, """label""": """✅ 確認下單""", """custom_id""": f"""confirm*{cb_key}"""},
+{"""type""": 2, """style""": 4, """label""": """❌ 跳過""",     """custom_id""": f"""skip_{cb_key}"""},
 ]
 }]
 msg_id = dc_embed(embed, components)
 if msg_id:
-pending_orders[cb_key][“msg_id”] = msg_id
+pending_orders[cb_key]["""msg_id"""] = msg_id
 return cb_key
 
 def dc_exit(symbol: str, tf: str, side: str, msg: str):
-emoji = “✅” if “TP” in msg else “🛑” if “SL” in msg else “⏸”
-coin  = symbol.split(”/”)[0]
-dc(f”{emoji} **{coin} [{tf} {side.upper()}] 出場**\n{msg}”)
+emoji = """✅""" if """TP""" in msg else """🛑""" if """SL""" in msg else """⏸"""
+coin  = symbol.split("""/""")[0]
+dc(f"""{emoji} **{coin} [{tf} {side.upper()}] 出場**\n{msg}""")
 
 def dc_pause(symbol: str, tf: str, side: str, resume: datetime):
-coin = symbol.split(”/”)[0]
-dc(f”⏸ **{coin} [{tf} {side.upper()}] 連虧{MAX_CONSEC_LOSS}單暫停**\n”
-f”恢復：{(resume + timedelta(hours=8)).strftime(’%m/%d %H:%M’)} (TST)”)
+coin = symbol.split("""/""")[0]
+dc(f"""⏸ **{coin} [{tf} {side.upper()}] 連虧{MAX_CONSEC_LOSS}單暫停**\n"""
+f"""恢復：{(resume + timedelta(hours=8)).strftime(’%m/%d %H:%M’)} (TST)""")
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -391,13 +391,13 @@ if not TG_BOT_TOKEN or not TG_CHAT_ID:
 return
 try:
 requests.post(
-f”https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage”,
-json={“chat_id”: TG_CHAT_ID, “text”: text,
-“parse_mode”: “HTML”, “disable_web_page_preview”: True},
+f"""https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage""",
+json={"""chat_id""": TG_CHAT_ID, """text""": text,
+"""parse_mode""": """HTML""", """disable_web_page_preview""": True},
 timeout=10,
 )
 except Exception as e:
-print(f”  [TG] {e}”)
+print(f"""  [TG] {e}""")
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -406,52 +406,52 @@ print(f”  [TG] {e}”)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _okx_ts() -> str:
-return datetime.utcnow().strftime(”%Y-%m-%dT%H:%M:%S.%f”)[:-3] + “Z”
+return datetime.utcnow().strftime("""%Y-%m-%dT%H:%M:%S.%f""")[:-3] + """Z"""
 
-def _okx_sign(ts: str, method: str, path: str, body: str = “”) -> str:
+def _okx_sign(ts: str, method: str, path: str, body: str = """""") -> str:
 msg = ts + method + path + body
 sig = hmac.new(OKX_SECRET.encode(), msg.encode(), hashlib.sha256).digest()
 return base64.b64encode(sig).decode()
 
-def _okx_headers(method: str, path: str, body: str = “”) -> Dict:
+def _okx_headers(method: str, path: str, body: str = """""") -> Dict:
 ts = _okx_ts()
 return {
-“OK-ACCESS-KEY”:        OKX_API_KEY,
-“OK-ACCESS-SIGN”:       _okx_sign(ts, method, path, body),
-“OK-ACCESS-TIMESTAMP”:  ts,
-“OK-ACCESS-PASSPHRASE”: OKX_PASSPHRASE,
-“Content-Type”:         “application/json”,
-**({“x-simulated-trading”: “1”} if OKX_DEMO else {}),
+"""OK-ACCESS-KEY""":        OKX_API_KEY,
+"""OK-ACCESS-SIGN""":       _okx_sign(ts, method, path, body),
+"""OK-ACCESS-TIMESTAMP""":  ts,
+"""OK-ACCESS-PASSPHRASE""": OKX_PASSPHRASE,
+"""Content-Type""":         """application/json""",
+**({"""x-simulated-trading""": """1"""} if OKX_DEMO else {}),
 }
 
 def _okx_pub(path: str, params: dict) -> list:
 try:
-d = requests.get(f”{OKX_BASE}{path}”, params=params, timeout=15).json()
-return d.get(“data”, []) if d.get(“code”) == “0” else []
+d = requests.get(f"""{OKX_BASE}{path}""", params=params, timeout=15).json()
+return d.get("""data""", []) if d.get("""code""") == """0""" else []
 except:
 return []
 
 def fetch_ohlcv(inst_id: str, bar: str, limit: int = WARMUP) -> pd.DataFrame:
 rows = sorted(
-_okx_pub(”/api/v5/market/candles”,
-{“instId”: inst_id, “bar”: bar, “limit”: min(limit, 300)}),
+_okx_pub("""/api/v5/market/candles""",
+{"""instId""": inst_id, """bar""": bar, """limit""": min(limit, 300)}),
 key=lambda x: int(x[0])
 )
 if not rows:
 return pd.DataFrame()
-df = pd.DataFrame(rows, columns=[“ts”, “open”, “high”, “low”, “close”, “vol”,
-“vC”, “vCQ”, “confirm”])
-for c in (“open”, “high”, “low”, “close”, “vol”):
+df = pd.DataFrame(rows, columns=["""ts""", """open""", """high""", """low""", """close""", """vol""",
+"""vC""", """vCQ""", """confirm"""])
+for c in ("""open""", """high""", """low""", """close""", """vol"""):
 df[c] = df[c].astype(float)
-df[“ts”] = pd.to_datetime(df[“ts”].astype(np.int64), unit=“ms”, utc=True)
-df.set_index(“ts”, inplace=True)
+df["""ts"""] = pd.to_datetime(df["""ts"""].astype(np.int64), unit="""ms""", utc=True)
+df.set_index("""ts""", inplace=True)
 return df.iloc[:-1]
 
 def fetch_funding_now(swap_id: str) -> float:
-rows = _okx_pub(”/api/v5/public/funding-rate”, {“instId”: swap_id})
+rows = _okx_pub("""/api/v5/public/funding-rate""", {"""instId""": swap_id})
 if rows:
-return float(rows[0].get(“fundingRate”, 0))
-return float(“nan”)
+return float(rows[0].get("""fundingRate""", 0))
+return float("""nan""")
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -460,53 +460,53 @@ return float(“nan”)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _cona_get(endpoint: str, params: dict) -> list:
-url = f”{CONA_BASE}/{endpoint}”
-headers = {“api-key”: COINALYZE_API_KEY} if COINALYZE_API_KEY else {}
+url = f"""{CONA_BASE}/{endpoint}"""
+headers = {"""api-key""": COINALYZE_API_KEY} if COINALYZE_API_KEY else {}
 try:
 d = requests.get(url, params=params, headers=headers, timeout=20).json()
-return d if isinstance(d, list) else d.get(“result”, d.get(“data”, []))
+return d if isinstance(d, list) else d.get("""result""", d.get("""data""", []))
 except:
 return []
 
 def fetch_cvd(cona_sym: str, cona_iv: str, from_ms: int, to_ms: int) -> pd.Series:
 if not COINALYZE_API_KEY:
 return pd.Series(dtype=float)
-data = _cona_get(“history”, {“symbols”: cona_sym, “interval”: cona_iv,
-“from”: from_ms // 1000, “to”: to_ms // 1000,
-“convert_to_usd”: “false”})
+data = _cona_get("""history""", {"""symbols""": cona_sym, """interval""": cona_iv,
+"""from""": from_ms // 1000, """to""": to_ms // 1000,
+"""convert_to_usd""": """false"""})
 rows = []
 for item in data:
 if not isinstance(item, dict):
 continue
-ts = item.get(“t”, item.get(“time”, 0))
-v  = float(item.get(“v”, 0) or 0)
-bv = float(item.get(“bv”, item.get(“buy_volume”, v / 2)) or v / 2)
+ts = item.get("""t""", item.get("""time""", 0))
+v  = float(item.get("""v""", 0) or 0)
+bv = float(item.get("""bv""", item.get("""buy_volume""", v / 2)) or v / 2)
 rows.append((int(ts) * 1000, 2 * bv - v))
 if not rows:
 return pd.Series(dtype=float)
-df_c = pd.DataFrame(rows, columns=[“ts”, “delta”])
-df_c[“ts”] = pd.to_datetime(df_c[“ts”].astype(np.int64), unit=“ms”, utc=True)
-df_c = df_c.set_index(“ts”).sort_index()
-return df_c[“delta”].cumsum()
+df_c = pd.DataFrame(rows, columns=["""ts""", """delta"""])
+df_c["""ts"""] = pd.to_datetime(df_c["""ts"""].astype(np.int64), unit="""ms""", utc=True)
+df_c = df_c.set_index("""ts""").sort_index()
+return df_c["""delta"""].cumsum()
 
 def fetch_oi(cona_sym: str, cona_iv: str, from_ms: int, to_ms: int) -> pd.Series:
 if not COINALYZE_API_KEY:
 return pd.Series(dtype=float)
-data = _cona_get(“open-interest-history”,
-{“symbols”: cona_sym, “interval”: cona_iv,
-“from”: from_ms // 1000, “to”: to_ms // 1000})
+data = _cona_get("""open-interest-history""",
+{"""symbols""": cona_sym, """interval""": cona_iv,
+"""from""": from_ms // 1000, """to""": to_ms // 1000})
 rows = []
 for item in data:
 if not isinstance(item, dict):
 continue
-ts = item.get(“t”, item.get(“time”, 0))
-v  = float(item.get(“v”, item.get(“oi”, 0)) or 0)
+ts = item.get("""t""", item.get("""time""", 0))
+v  = float(item.get("""v""", item.get("""oi""", 0)) or 0)
 rows.append((int(ts) * 1000, v))
 if not rows:
 return pd.Series(dtype=float)
-df_o = pd.DataFrame(rows, columns=[“ts”, “oi”])
-df_o[“ts”] = pd.to_datetime(df_o[“ts”].astype(np.int64), unit=“ms”, utc=True)
-return df_o.set_index(“ts”).sort_index()[“oi”]
+df_o = pd.DataFrame(rows, columns=["""ts""", """oi"""])
+df_o["""ts"""] = pd.to_datetime(df_o["""ts"""].astype(np.int64), unit="""ms""", utc=True)
+return df_o.set_index("""ts""").sort_index()["""oi"""]
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -516,10 +516,10 @@ return df_o.set_index(“ts”).sort_index()[“oi”]
 
 def _make_okx_ex():
 ex = ccxt.okx({
-“apiKey”:   OKX_API_KEY,
-“secret”:   OKX_SECRET,
-“password”: OKX_PASSPHRASE,
-“options”:  {“defaultType”: “swap”},
+"""apiKey""":   OKX_API_KEY,
+"""secret""":   OKX_SECRET,
+"""password""": OKX_PASSPHRASE,
+"""options""":  {"""defaultType""": """swap"""},
 })
 if OKX_DEMO:
 ex.set_sandbox_mode(True)
@@ -531,8 +531,8 @@ return None, None
 try:
 ex = _make_okx_ex()
 bal   = ex.fetch_balance()
-avail = bal[“USDT”][“free”]  if “USDT” in bal else 0.0
-total = bal[“USDT”][“total”] if “USDT” in bal else 0.0
+avail = bal["""USDT"""]["""free"""]  if """USDT""" in bal else 0.0
+total = bal["""USDT"""]["""total"""] if """USDT""" in bal else 0.0
 return float(avail), float(total)
 except Exception:
 return None, None
@@ -541,59 +541,59 @@ def place_okx_order(symbol: str, direction: str, entry: float,
 sl: float, tp1: float, tp2: float):
 global _LIVE_MODE, MAX_LEVERAGE
 if not _LIVE_MODE:
-dc(“📝 Paper 模式：收到下單請求，未實際下單\n請先發送 `!setlive` 切換為實盤模式”)
+dc("""📝 Paper 模式：收到下單請求，未實際下單\n請先發送 `!setlive` 切換為實盤模式""")
 return
 try:
 ex = _make_okx_ex()
 ex.load_markets()
 bal   = ex.fetch_balance()
-avail = float(bal[“USDT”][“free”]) if “USDT” in bal else 0.0
+avail = float(bal["""USDT"""]["""free"""]) if """USDT""" in bal else 0.0
 if avail <= 0:
-dc(“⚠️ USDT 可用餘額不足”); return
+dc("""⚠️ USDT 可用餘額不足"""); return
 margin = avail * MARGIN_PCT / 100
-price       = ex.fetch_ticker(symbol)[“last”]
+price       = ex.fetch_ticker(symbol)["""last"""]
 sl_dist_pct = abs(price - sl) / price * 100
 if sl_dist_pct <= 0:
-dc(“⚠️ 止損距離為 0，無法計算槓桿”); return
+dc("""⚠️ 止損距離為 0，無法計算槓桿"""); return
 sug_lev = max(1, min(int(100 / sl_dist_pct), MAX_LEVERAGE))
 mkt    = ex.market(symbol)
-prec   = int(mkt.get(“precision”, {}).get(“amount”, 0) or 0)
-ct_sz  = float(mkt.get(“contractSize”, 1) or 1)
+prec   = int(mkt.get("""precision""", {}).get("""amount""", 0) or 0)
+ct_sz  = float(mkt.get("""contractSize""", 1) or 1)
 pos_val = margin * sug_lev
 raw     = pos_val / (price * ct_sz)
 amt  = max(1, int(raw))      if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
 half = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
 ex.set_leverage(sug_lev, symbol)
 dc(
-f”💰 可用餘額：{avail:.1f} U\n”
-f”📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n”
-f”📊 倉位價值：{pos_val:.1f} U\n”
-f”⚡ 建議槓桿：{sug_lev}x\n”
-f”☠️ 最大虧損：{margin:.1f} U（逐倉保證金）”
+f"""💰 可用餘額：{avail:.1f} U\n"""
+f"""📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n"""
+f"""📊 倉位價值：{pos_val:.1f} U\n"""
+f"""⚡ 建議槓桿：{sug_lev}x\n"""
+f"""☠️ 最大虧損：{margin:.1f} U（逐倉保證金）"""
 )
-is_l   = direction == “long”
-es, xs = (“buy”, “sell”) if is_l else (“sell”, “buy”)
-eo = ex.create_market_order(symbol, es, amt, params={“posSide”: “long” if is_l else “short”, “tdMode”: “isolated”})
+is_l   = direction == """long"""
+es, xs = ("""buy""", """sell""") if is_l else ("""sell""", """buy""")
+eo = ex.create_market_order(symbol, es, amt, params={"""posSide""": """long""" if is_l else """short""", """tdMode""": """isolated"""})
 res = [
-f”✅ 進場\n{symbol} {‘做多’ if is_l else ‘做空’} {sug_lev}x\n”
-f”均價:{eo.get(‘average’) or price}  ID:{eo.get(‘id’)}”
+f"""✅ 進場\n{symbol} {‘做多’ if is_l else ‘做空’} {sug_lev}x\n"""
+f"""均價:{eo.get(‘average’) or price}  ID:{eo.get(‘id’)}"""
 ]
-pos_side = “long” if is_l else “short”
+pos_side = """long""" if is_l else """short"""
 try:
-o = ex.create_order(symbol, “stop_market”, xs, amt, None,
-{“stopPrice”: sl, “reduceOnly”: True, “posSide”: pos_side})
-res.append(f”🛑 SL {sl} ID:{o.get(‘id’)}”)
+o = ex.create_order(symbol, """stop_market""", xs, amt, None,
+{"""stopPrice""": sl, """reduceOnly""": True, """posSide""": pos_side})
+res.append(f"""🛑 SL {sl} ID:{o.get(‘id’)}""")
 except Exception as e:
-res.append(f”⚠️ SL失敗:{e}”)
-for px, n, lbl in [(tp1, half, “TP1”), (tp2, half, “TP2”)]:
+res.append(f"""⚠️ SL失敗:{e}""")
+for px, n, lbl in [(tp1, half, """TP1"""), (tp2, half, """TP2""")]:
 try:
-o = ex.create_limit_order(symbol, xs, n, px, {“reduceOnly”: True, “posSide”: pos_side})
-res.append(f”🎯 {lbl} {px} x{n} ID:{o.get(‘id’)}”)
+o = ex.create_limit_order(symbol, xs, n, px, {"""reduceOnly""": True, """posSide""": pos_side})
+res.append(f"""🎯 {lbl} {px} x{n} ID:{o.get(‘id’)}""")
 except Exception as e:
-res.append(f”⚠️ {lbl}失敗:{e}”)
-dc(”\n”.join(res))
+res.append(f"""⚠️ {lbl}失敗:{e}""")
+dc("""\n""".join(res))
 except Exception as e:
-dc(f”⚠️ 下單失敗:{e}”)
+dc(f"""⚠️ 下單失敗:{e}""")
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -603,16 +603,16 @@ dc(f”⚠️ 下單失敗:{e}”)
 
 _app = Flask(**name**)
 
-@_app.route(”/”)
+@_app.route("""/""")
 def _health():
-return f”賽克斯機器人 v4 | {len(SYMBOLS)} 個幣 | running”
+return f"""賽克斯機器人 v4 | {len(SYMBOLS)} 個幣 | running"""
 
-DISCORD_PUBLIC_KEY = “79788628a845970d78c0d99d2e85505d9a306bae482459d33eaa8d0f84b6c6d4”
+DISCORD_PUBLIC_KEY = """79788628a845970d78c0d99d2e85505d9a306bae482459d33eaa8d0f84b6c6d4"""
 
-@*app.route(”/discord-interactions”, methods=[“POST”])
+@*app.route("""/discord-interactions""", methods=["""POST"""])
 def discord_interactions():
-signature = request.headers.get(“X-Signature-Ed25519”, “”)
-timestamp  = request.headers.get(“X-Signature-Timestamp”, “”)
+signature = request.headers.get("""X-Signature-Ed25519""", """""")
+timestamp  = request.headers.get("""X-Signature-Timestamp""", """""")
 body = request.data
 try:
 from nacl.signing import VerifyKey
@@ -620,39 +620,39 @@ from nacl.exceptions import BadSignatureError
 vk = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
 vk.verify((timestamp.encode() + body), bytes.fromhex(signature))
 except Exception:
-return jsonify({“error”: “invalid signature”}), 401
+return jsonify({"""error""": """invalid signature"""}), 401
 data = request.get_json()
 if not data:
-return jsonify({“error”: “no data”}), 400
-if data.get(“type”) == 1:
-return jsonify({“type”: 1})
-if data.get(“type”) == 3:
-custom_id = data.get(“data”, {}).get(“custom_id”, “”)
-if custom_id.startswith(“confirm*”):
+return jsonify({"""error""": """no data"""}), 400
+if data.get("""type""") == 1:
+return jsonify({"""type""": 1})
+if data.get("""type""") == 3:
+custom_id = data.get("""data""", {}).get("""custom_id""", """""")
+if custom_id.startswith("""confirm*"""):
 key   = custom_id[8:]
 order = pending_orders.pop(key, None)
 if order:
 Thread(
 target=place_okx_order,
-args=(order[“symbol”], order[“direction”],
-order.get(“entry”, 0),
-order[“sl”], order[“tp1”], order[“tp2”]),
+args=(order["""symbol"""], order["""direction"""],
+order.get("""entry""", 0),
+order["""sl"""], order["""tp1"""], order["""tp2"""]),
 daemon=True,
 ).start()
-msg_id = order.get(“msg_id”)
+msg_id = order.get("""msg_id""")
 if msg_id:
-Thread(target=dc_edit, args=(msg_id, “✅ 已確認下單，執行中…”), daemon=True).start()
-return jsonify({“type”: 6})
+Thread(target=dc_edit, args=(msg_id, """✅ 已確認下單，執行中…"""), daemon=True).start()
+return jsonify({"""type""": 6})
 else:
-return jsonify({“type”: 4, “data”: {“content”: “⚠️ 訊號已過期”, “flags”: 64}})
-elif custom_id.startswith(“skip_”):
+return jsonify({"""type""": 4, """data""": {"""content""": """⚠️ 訊號已過期""", """flags""": 64}})
+elif custom_id.startswith("""skip_"""):
 key = custom_id[5:]
 order = pending_orders.pop(key, None)
-msg_id = order.get(“msg_id”) if order else None
+msg_id = order.get("""msg_id""") if order else None
 if msg_id:
-Thread(target=dc_edit, args=(msg_id, “❌ 已跳過此訊號”), daemon=True).start()
-return jsonify({“type”: 6})
-return jsonify({“type”: 1})
+Thread(target=dc_edit, args=(msg_id, """❌ 已跳過此訊號"""), daemon=True).start()
+return jsonify({"""type""": 6})
+return jsonify({"""type""": 1})
 
 def _handle_dc_command(text: str):
 global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref, _PAUSED
@@ -770,55 +770,55 @@ elif text.startswith("!help"):
     )
 ```
 
-_dc_last_msg_id = “0”
+_dc_last_msg_id = """0"""
 
 def poll_dc_commands():
-“”“輪詢 Discord 頻道訊息，處理 ! 指令”””
+"""""""""輪詢 Discord 頻道訊息，處理 ! 指令"""""""""
 global _dc_last_msg_id
 # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
 try:
 r = requests.get(
-f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”,
+f"""{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages""",
 headers=_dc_headers(),
-params={“limit”: 1},
+params={"""limit""": 1},
 timeout=15,
 )
 msgs = r.json()
 if isinstance(msgs, list) and msgs:
-_dc_last_msg_id = msgs[0][“id”]
+_dc_last_msg_id = msgs[0]["""id"""]
 except Exception:
 pass
 while True:
 try:
 r = requests.get(
-f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”,
+f"""{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages""",
 headers=_dc_headers(),
-params={“after”: _dc_last_msg_id, “limit”: 10},
+params={"""after""": _dc_last_msg_id, """limit""": 10},
 timeout=15,
 )
 msgs = r.json()
 if isinstance(msgs, list) and msgs:
 seen = set()
-for msg in sorted(msgs, key=lambda m: m.get(“id”, “0”)):
-_dc_last_msg_id = msg[“id”]
-content = msg.get(“content”, “”)
-if msg.get(“author”, {}).get(“bot”):
+for msg in sorted(msgs, key=lambda m: m.get("""id""", """0""")):
+_dc_last_msg_id = msg["""id"""]
+content = msg.get("""content""", """""")
+if msg.get("""author""", {}).get("""bot"""):
 continue
-if content.startswith(”!”):
-dedup_key = msg[“id”]
+if content.startswith("""!"""):
+dedup_key = msg["""id"""]
 if dedup_key not in seen:
 seen.add(dedup_key)
 _handle_dc_command(content)
 except Exception as e:
-print(f”[DC輪詢] {e}”)
+print(f"""[DC輪詢] {e}""")
 sleep(3)
 
 def run_web():
-port = int(os.environ.get(“PORT”, 3000))
+port = int(os.environ.get("""PORT""", 3000))
 import logging
-log = logging.getLogger(“werkzeug”)
+log = logging.getLogger("""werkzeug""")
 log.setLevel(logging.ERROR)
-_app.run(host=“0.0.0.0”, port=port, debug=False)
+_app.run(host="""0.0.0.0""", port=port, debug=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -851,17 +851,17 @@ return [tf for tf, ts in next_closes.items() if abs(ts - earliest) <= 15]
 def precompute_base(df: pd.DataFrame) -> pd.DataFrame:
 df = df.copy()
 for s in (12, 144, 169, 576, 676):
-df[f”e{s}”] = df[“close”].ewm(span=s, adjust=False).mean()
-df[“sTop”] = df[[“e144”, “e169”]].max(axis=1)
-df[“sBot”] = df[[“e144”, “e169”]].min(axis=1)
-df[“lTop”] = df[[“e576”, “e676”]].max(axis=1)
-df[“lBot”] = df[[“e576”, “e676”]].min(axis=1)
-hi, lo, cl = df[“high”], df[“low”], df[“close”]
+df[f"""e{s}"""] = df["""close"""].ewm(span=s, adjust=False).mean()
+df["""sTop"""] = df[["""e144""", """e169"""]].max(axis=1)
+df["""sBot"""] = df[["""e144""", """e169"""]].min(axis=1)
+df["""lTop"""] = df[["""e576""", """e676"""]].max(axis=1)
+df["""lBot"""] = df[["""e576""", """e676"""]].min(axis=1)
+hi, lo, cl = df["""high"""], df["""low"""], df["""close"""]
 tr = pd.concat([hi - lo,
 (hi - cl.shift()).abs(),
 (lo - cl.shift()).abs()], axis=1).max(axis=1)
-df[“atr”]        = tr.ewm(span=14, adjust=False).mean()
-df[“channel_ok”] = (df[“e144”] - df[“e576”]).abs() >= df[“atr”] * 2
+df["""atr"""]        = tr.ewm(span=14, adjust=False).mean()
+df["""channel_ok"""] = (df["""e144"""] - df["""e576"""]).abs() >= df["""atr"""] * 2
 return df
 
 def _ws(a: np.ndarray, p: int) -> np.ndarray:
@@ -872,7 +872,7 @@ r[i] = r[i - 1] - r[i - 1] / p + a[i]
 return r
 
 def adx_series(df: pd.DataFrame, period: int = 14) -> pd.Series:
-hi, lo, cl = df[“high”].values, df[“low”].values, df[“close”].values
+hi, lo, cl = df["""high"""].values, df["""low"""].values, df["""close"""].values
 n = len(hi)
 tr_a, pdm, mdm = np.zeros(n), np.zeros(n), np.zeros(n)
 for i in range(1, n):
@@ -884,7 +884,7 @@ mdm[i] = dn if dn > u  and dn > 0 else 0
 atr_ = *ws(tr_a, period)
 pdi  = *ws(pdm,  period)
 mdi  = *ws(mdm,  period)
-with np.errstate(divide=“ignore”, invalid=“ignore”):
+with np.errstate(divide="""ignore""", invalid="""ignore"""):
 p* = np.where(atr* > 0, 100 * pdi / atr*, 0)
 m_ = np.where(atr_ > 0, 100 * mdi / atr_, 0)
 dx = np.where(p_ + m_ > 0, 100 * np.abs(p_ - m_) / (p_ + m_), 0)
@@ -892,16 +892,16 @@ return pd.Series(_ws(dx, period), index=df.index)
 
 def add_swing(df: pd.DataFrame) -> pd.DataFrame:
 df = df.copy()
-df[“adx”] = adx_series(df, 14)
-agg  = {“open”: “first”, “high”: “max”, “low”: “min”, “close”: “last”}
-df4  = df[[“open”, “high”, “low”, “close”]].resample(“4h”).agg(agg).dropna()
-df4[“e144_4h”] = df4[“close”].ewm(span=144, adjust=False).mean()
-df4[“e576_4h”] = df4[“close”].ewm(span=576, adjust=False).mean()
-df4[“trend4h”] = (df4[“e144_4h”] > df4[“e576_4h”]).shift(1)
-df4[“slope4h”] = (df4[“e576_4h”] > df4[“e576_4h”].shift(20)).shift(1)
-df[“trend4h”]  = df4[“trend4h”].reindex(df.index, method=“ffill”).fillna(False)
-df[“slope4h”]  = df4[“slope4h”].reindex(df.index, method=“ffill”).fillna(False)
-df[“is_swing”] = df[“trend4h”] & df[“slope4h”] & (df[“adx”] > ADX_THR)
+df["""adx"""] = adx_series(df, 14)
+agg  = {"""open""": """first""", """high""": """max""", """low""": """min""", """close""": """last"""}
+df4  = df[["""open""", """high""", """low""", """close"""]].resample("""4h""").agg(agg).dropna()
+df4["""e144_4h"""] = df4["""close"""].ewm(span=144, adjust=False).mean()
+df4["""e576_4h"""] = df4["""close"""].ewm(span=576, adjust=False).mean()
+df4["""trend4h"""] = (df4["""e144_4h"""] > df4["""e576_4h"""]).shift(1)
+df4["""slope4h"""] = (df4["""e576_4h"""] > df4["""e576_4h"""].shift(20)).shift(1)
+df["""trend4h"""]  = df4["""trend4h"""].reindex(df.index, method="""ffill""").fillna(False)
+df["""slope4h"""]  = df4["""slope4h"""].reindex(df.index, method="""ffill""").fillna(False)
+df["""is_swing"""] = df["""trend4h"""] & df["""slope4h"""] & (df["""adx"""] > ADX_THR)
 return df
 
 def calc_qqe(close: pd.Series, rsi_period: int, sf: int,
@@ -934,18 +934,18 @@ bull.iloc[0] = bear.iloc[0] = False
 return bull, bear, tr
 
 def add_dual_qqe(df: pd.DataFrame) -> pd.DataFrame:
-bull1, bear1, tr1 = calc_qqe(df[“close”], QQE_RSI, QQE_SF, QQE_FACTOR_P, QQE_THRESHOLD)
-_,     _,     tr2 = calc_qqe(df[“close”], QQE_RSI, QQE_SF, QQE_FACTOR_S, QQE_THRESHOLD)
+bull1, bear1, tr1 = calc_qqe(df["""close"""], QQE_RSI, QQE_SF, QQE_FACTOR_P, QQE_THRESHOLD)
+_,     _,     tr2 = calc_qqe(df["""close"""], QQE_RSI, QQE_SF, QQE_FACTOR_S, QQE_THRESHOLD)
 df = df.copy()
-df[“qbull”] = bull1 & (tr2 == 1)
-df[“qbear”] = bear1 & (tr2 == -1)
-df[“qtr”]   = np.where((tr1 == 1) & (tr2 == 1),   1,
+df["""qbull"""] = bull1 & (tr2 == 1)
+df["""qbear"""] = bear1 & (tr2 == -1)
+df["""qtr"""]   = np.where((tr1 == 1) & (tr2 == 1),   1,
 np.where((tr1 == -1) & (tr2 == -1), -1, 0)).astype(np.int8)
 return df
 
 def is_bear_market(df_1h: pd.DataFrame, min_bars: int = BEAR_MIN_BARS) -> bool:
-e144 = df_1h[“e144”].values
-e576 = df_1h[“e576”].values
+e144 = df_1h["""e144"""].values
+e576 = df_1h["""e576"""].values
 count = 0
 for i in range(len(e144) - 1, -1, -1):
 if e144[i] < e576[i]: count += 1
@@ -971,16 +971,16 @@ if len(recent) < w or np.any(np.isnan(recent)): return False
 return bool(recent[-1] < recent[-2] and recent[-2] >= recent[0])
 
 def check_cvd(df: pd.DataFrame, side: str) -> Tuple[Optional[bool], bool]:
-if “cvd_spot” not in df.columns:
+if """cvd_spot""" not in df.columns:
 return None, False
 n = len(df); i = n - 1
-cvds = df[“cvd_spot”].values
-cvdp = df[“cvd_perp”].values if “cvd_perp” in df.columns else np.full(n, np.nan)
-oi   = df[“oi”].values       if “oi”       in df.columns else np.full(n, np.nan)
+cvds = df["""cvd_spot"""].values
+cvdp = df["""cvd_perp"""].values if """cvd_perp""" in df.columns else np.full(n, np.nan)
+oi   = df["""oi"""].values       if """oi"""       in df.columns else np.full(n, np.nan)
 if np.isnan(cvds[i]) or np.isnan(cvdp[i]) or np.isnan(oi[i]) or i < 1:
 return None, False
 oi_up = oi[i] > oi[i - 1]
-if side == “long”:
+if side == """long""":
 ok = _cvd_turning_up(cvds, i) and _cvd_turning_up(cvdp, i) and oi_up
 else:
 ok = _cvd_turning_down(cvds, i) and _cvd_turning_down(cvdp, i) and oi_up
@@ -997,14 +997,14 @@ w   = lo[max(0, idx - lb - 1):idx - 1]
 pts = [w[j] for j in range(n, len(w) - n)
 if all(w[j] < w[j - k] for k in range(1, n + 1))
 and all(w[j] < w[j + k] for k in range(1, n + 1))]
-return pts[-1] if pts else (float(w.min()) if len(w) > 0 else float(“nan”))
+return pts[-1] if pts else (float(w.min()) if len(w) > 0 else float("""nan"""))
 
 def _piv_high(hi: np.ndarray, idx: int, lb: int, n: int = 2) -> float:
 w   = hi[max(0, idx - lb - 1):idx - 1]
 pts = [w[j] for j in range(n, len(w) - n)
 if all(w[j] > w[j - k] for k in range(1, n + 1))
 and all(w[j] > w[j + k] for k in range(1, n + 1))]
-return pts[-1] if pts else (float(w.max()) if len(w) > 0 else float(“nan”))
+return pts[-1] if pts else (float(w.max()) if len(w) > 0 else float("""nan"""))
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1013,7 +1013,7 @@ return pts[-1] if pts else (float(w.max()) if len(w) > 0 else float(“nan”))
 # ══════════════════════════════════════════════════════════════════════════════
 
 def check_signal(df: pd.DataFrame, params: Dict, side: str,
-funding_now: float = float(“nan”),
+funding_now: float = float("""nan"""),
 bear_market: bool = False) -> Optional[Dict]:
 i = len(df) - 1
 if i < 10: return None
@@ -1098,12 +1098,12 @@ return {
 class PaperPosition:
 def **init**(self, signal: Dict, symbol: str, tf: str):
 self.symbol    = symbol; self.tf    = tf
-self.side      = signal[“side”]
-self.entry     = signal[“entry”]
-self.sl        = signal[“sl”]
-self.tp1       = signal[“tp1”]
-self.tp2       = signal[“tp2”]
-self.exit_mode = signal[“exit_mode”]
+self.side      = signal["""side"""]
+self.entry     = signal["""entry"""]
+self.sl        = signal["""sl"""]
+self.tp1       = signal["""tp1"""]
+self.tp2       = signal["""tp2"""]
+self.exit_mode = signal["""exit_mode"""]
 self.tp1_hit   = False
 self.open      = True
 
@@ -1150,7 +1150,7 @@ def update(self, df: pd.DataFrame) -> Optional[str]:
 
 class TradingBotV3:
 def **init**(self, tf_plan: List[Tuple], sides: List[str],
-live: bool = False, base_dir: str = “.”):
+live: bool = False, base_dir: str = """."""):
 self.tf_plan  = tf_plan
 self.sides    = sides
 self.live     = live
@@ -1379,14 +1379,14 @@ def run(self):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-ap = argparse.ArgumentParser(description=“賽克斯訊號機器人 v4”)
-ap.add_argument(”–tf”,   default=“all”,
-help=“Timeframe: 15m/30m/1H/4H/all (default: all)”)
-ap.add_argument(”–side”, default=“both”,
-choices=[“long”, “short”, “both”])
-ap.add_argument(”–live”, action=“store_true”)
-ap.add_argument(”–once”, action=“store_true”)
-ap.add_argument(”–dir”,  default=”.”)
+ap = argparse.ArgumentParser(description="""賽克斯訊號機器人 v4""")
+ap.add_argument("""–tf""",   default="""all""",
+help="""Timeframe: 15m/30m/1H/4H/all (default: all)""")
+ap.add_argument("""–side""", default="""both""",
+choices=["""long""", """short""", """both"""])
+ap.add_argument("""–live""", action="""store_true""")
+ap.add_argument("""–once""", action="""store_true""")
+ap.add_argument("""–dir""",  default=""".""")
 args = ap.parse_args()
 
 ```
@@ -1417,7 +1417,7 @@ else:
     bot.run()
 ```
 
-if **name** == “**main**”:
+if **name** == """**main**""":
 main()
 
 # Mon May 18 08:36:40 PM UTC 2026
