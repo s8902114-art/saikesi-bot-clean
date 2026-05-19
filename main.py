@@ -809,6 +809,10 @@ def poll_dc_commands():
                     content = msg.get("content", "")
                     if msg.get("author", {}).get("bot"):
                         continue
+                    author = msg.get("author", {})
+                    if author.get("bot") is True or author.get("username") == "RobotAhaha":
+                        _dc_last_msg_id = msg["id"]; _write_last_msg_id(msg["id"])
+                        continue
                     if content.startswith("!"):
                         _handle_dc_command(content)
         except Exception as e:
