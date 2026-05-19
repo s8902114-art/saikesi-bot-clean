@@ -760,6 +760,17 @@ def _handle_dc_command(text: str):
 
 
 _dc_last_msg_id = "0"
+_DC_LOCK_FILE = "/tmp/dc_last_msg_id.txt"
+
+def _read_last_msg_id():
+    try:
+        with open(_DC_LOCK_FILE) as f: return f.read().strip() or "0"
+    except: return "0"
+
+def _write_last_msg_id(mid):
+    try:
+        with open(_DC_LOCK_FILE, "w") as f: f.write(mid)
+    except: pass
 
 def poll_dc_commands():
     """輪詢 Discord 頻道訊息，處理 ! 指令"""
@@ -787,13 +798,13 @@ def poll_dc_commands():
             r = requests.get(
                 f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
                 headers=_dc_headers(),
-                params={"after": _dc_last_msg_id, "limit": 10},
+                params={"after": _read_last_msg_id(), "limit": 10},
                 timeout=15,
             )
             msgs = r.json()
             if isinstance(msgs, list) and msgs:
                 for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
-                    _dc_last_msg_id = msg["id"]
+                    _dc_last_msg_id = msg["id"]; _write_last_msg_id(msg["id"])
                     content = msg.get("content", "")
                     if msg.get("author", {}).get("bot"):
                         continue
