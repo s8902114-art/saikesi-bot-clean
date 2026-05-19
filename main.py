@@ -1381,7 +1381,14 @@ def main():
         bot.run()
 
 
+import fcntl, sys
 if __name__ == "__main__":
+    _lock = open('/tmp/saikesi.lock', 'w')
+    try:
+        fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print('另一個進程已在運行，退出。')
+        sys.exit(0)
     main()
 # Mon May 18 08:36:40 PM UTC 2026
 # Mon May 18 09:20:56 PM UTC 2026
