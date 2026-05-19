@@ -557,7 +557,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         )
         is_l   = direction == "long"
         es, xs = ("buy", "sell") if is_l else ("sell", "buy")
-        eo = ex.create_market_order(symbol, es, amt, params={"posSide": "long" if is_l else "short", "tdMode": "isolated"})
+        eo = ex.create_market_order(symbol, es, amt, params={"posSide": "long" if is_l else "short", "tdMode": "isolated", "posMode": "long_short_mode"})
         res = [
             f"✅ 進場\n{symbol} {'做多' if is_l else '做空'} {sug_lev}x\n"
             f"均價:{eo.get('average') or price}  ID:{eo.get('id')}"
