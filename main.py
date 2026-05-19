@@ -784,14 +784,19 @@ def poll_dc_commands():
             params={"limit": 10},
             timeout=15,
         )
-        msgs = r.json()
-        if isinstance(msgs, list) and msgs:
-            for m in msgs:
-                if not m.get("author", {}).get("bot"):
-                    _dc_last_msg_id = m["id"]
-                    break
-            else:
-                _dc_last_msg_id = msgs[0]["id"]
+    msgs = r.json()
+    if isinstance(msgs, list) and msgs:
+        msg = msgs[0]
+
+        # 💡 鐵律 1：如果是機器人自己發的訊息，直接標記為已讀，絕對不要執行指令！
+        author = msg.get("author", {})
+        if author.get("bot") is True or author.get("username") == "RobotAhaha":
+            _dc_last_msg_id = msg["id"]
+            # 這裡如果是函式初始化可以寫 pass 讓它順利往下進入 while True
+            _dc_last_msg_id = msg["id"]
+        else:
+            # 💡 鐵律 2：如果是真人的訊息，才更新為起始過濾 ID
+            _dc_last_msg_id = msg["id"]
     except Exception:
         pass
     while True:
@@ -805,16 +810,19 @@ def poll_dc_commands():
             msgs = r.json()
             if isinstance(msgs, list) and msgs:
                 for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
-                    _dc_last_msg_id = msg["id"]; _write_last_msg_id(msg["id"])
-                    content = msg.get("content", "")
-                    if msg.get("author", {}).get("bot"):
-                        continue
+
+                     # 💡 終極核心防線：在 while 迴圈內，只要發現發言者是 Bot，立刻不處理、直接跳過！
                     author = msg.get("author", {})
                     if author.get("bot") is True or author.get("username") == "RobotAhaha":
-                        _dc_last_msg_id = msg["id"]; _write_last_msg_id(msg["id"])
-                        continue
-                    if content.startswith("!"):
-                        _handle_dc_command(content)
+                        _dc_last_msg_id = msg["id"]
+                        continue  # 👈 跳過此訊息，繼續看下一條
+
+                    # --- 底下是你原本就有的舊程式碼 (處理指令的地方) ---
+                    _dc_last_msg_id = msg["id"]
+                    text = msg.get("content", "")
+
+                    if text.startswith("!status"):
+                        # ... 原本的處理邏輯 ...
         except Exception as e:
             print(f"[DC輪詢] {e}")
         sleep(3)
@@ -1416,3 +1424,4 @@ if __name__ == "__main__":
 # Mon May 18 08:36:40 PM UTC 2026
 # Mon May 18 09:20:56 PM UTC 2026
 # Tue May 19 07:14:03 PM UTC 2026
+# Tue May 19 09:03:15 PM UTC 2026
