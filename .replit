@@ -41,7 +41,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "echo done"
-args = "python auto_push.py"
+args = "echo done"
 
 [workflows.workflow.metadata]
 outputType = "console"
