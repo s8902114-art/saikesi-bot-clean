@@ -769,12 +769,17 @@ def poll_dc_commands():
         r = requests.get(
             f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
             headers=_dc_headers(),
-            params={"limit": 2},
+            params={"limit": 10},
             timeout=15,
         )
         msgs = r.json()
         if isinstance(msgs, list) and msgs:
-            _dc_last_msg_id = msgs[0]["id"]  # 最新一則標記為已處理
+            for m in msgs:
+                if not m.get("author", {}).get("bot"):
+                    _dc_last_msg_id = m["id"]
+                    break
+            else:
+                _dc_last_msg_id = msgs[0]["id"]
     except Exception:
         pass
     while True:
