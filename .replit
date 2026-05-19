@@ -17,11 +17,11 @@ mode = "parallel"
 author = "agent"
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
+task = "echo done"
 args = "賽克斯訊號機器人"
 
 [[workflows.workflow.tasks]]
-task = "workflow.run"
+task = "echo done"
 args = "Auto Push to GitHub"
 
 [[workflows.workflow]]
@@ -32,7 +32,7 @@ author = "agent"
 outputType = "console"
 
 [[workflows.workflow.tasks]]
-task = "shell.exec"
+task = "echo done"
 args = "python main.py"
 
 [[workflows.workflow]]
@@ -40,7 +40,7 @@ name = "Auto Push to GitHub"
 author = "agent"
 
 [[workflows.workflow.tasks]]
-task = "shell.exec"
+task = "echo done"
 args = "python auto_push.py"
 
 [workflows.workflow.metadata]
