@@ -547,6 +547,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         raw     = pos_val / (price * ct_sz)
         amt  = max(1, int(raw))      if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
         half = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
+        ex.set_margin_mode("isolated", symbol)
         ex.set_leverage(sug_lev, symbol, params={"posSide": direction})
         dc(
             f"💰 可用餘額：{avail:.1f} U\n"
@@ -557,7 +558,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         )
         is_l   = direction == "long"
         es, xs = ("buy", "sell") if is_l else ("sell", "buy")
-        eo = ex.create_market_order(symbol, es, amt, params={"posSide": "long" if is_l else "short"})
+        eo = ex.create_market_order(symbol, es, amt, params={"posSide": "long" if is_l else "short", "tdMode": "isolated"})
         res = [
             f"✅ 進場\n{symbol} {'做多' if is_l else '做空'} {sug_lev}x\n"
             f"均價:{eo.get('average') or price}  ID:{eo.get('id')}"
