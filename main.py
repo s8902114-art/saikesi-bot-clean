@@ -564,13 +564,13 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         ]
         try:
             o = ex.create_order(symbol, "stop_market", xs, amt, None,
-                                {"stopPrice": sl, "reduceOnly": True})
+                                {"stopPrice": sl, "reduceOnly": True, "posSide": "long" if is_l else "short"})
             res.append(f"🛑 SL {sl} ID:{o.get('id')}")
         except Exception as e:
             res.append(f"⚠️ SL失敗:{e}")
         for px, n, lbl in [(tp1, half, "TP1"), (tp2, half, "TP2")]:
             try:
-                o = ex.create_limit_order(symbol, xs, n, px, {"reduceOnly": True})
+                o = ex.create_limit_order(symbol, xs, n, px, {"reduceOnly": True, "posSide": "long" if is_l else "short"})
                 res.append(f"🎯 {lbl} {px} x{n} ID:{o.get('id')}")
             except Exception as e:
                 res.append(f"⚠️ {lbl}失敗:{e}")
