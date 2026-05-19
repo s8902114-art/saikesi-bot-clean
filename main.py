@@ -762,12 +762,12 @@ def poll_dc_commands():
         r = requests.get(
             f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
             headers=_dc_headers(),
-            params={"limit": 1},
+            params={"limit": 2},
             timeout=15,
         )
         msgs = r.json()
         if isinstance(msgs, list) and msgs:
-            _dc_last_msg_id = msgs[0]["id"]
+            _dc_last_msg_id = msgs[0]["id"]  # 最新一則標記為已處理
     except Exception:
         pass
     while True:
