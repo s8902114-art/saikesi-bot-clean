@@ -776,34 +776,7 @@ def poll_dc_commands():
     """輪詢 Discord 頻道訊息，處理 ! 指令"""
     global _dc_last_msg_id
     # 用 Discord 頻道做分散式鎖，只讓第一個啟動的進程處理指令
-    import random, time as _t
-    my_token = str(random.randint(100000, 999999))
-    _t.sleep(random.uniform(1, 4))  # 隨機延遲錯開
-    # 發送自己的 token
-    try:
-        requests.post(
-            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
-            headers=_dc_headers(),
-            json={"content": f"__lock_{my_token}__"},
-            timeout=10,
-        )
-    except: pass
-    _t.sleep(2)
-    # 讀最近訊息，看有沒有比自己早的 lock
-    try:
-        r = requests.get(
-            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
-            headers=_dc_headers(),
-            params={"limit": 10},
-            timeout=10,
-        )
-        msgs = r.json()
-        for m in reversed(msgs):
-            content = m.get("content", "")
-            if content.startswith("__lock_") and not content.endswith(f"_{my_token}__"):
-                print(f"[DC] 發現其他主進程，此進程退出指令輪詢")
-                return
-    except: pass
+
     # 啟動時先抓最新訊息ID，避免重啟後重複處理舊指令
     try:
         r = requests.get(
