@@ -563,7 +563,7 @@ pos_val = margin * sug_lev
 raw     = pos_val / (price * ct_sz)
 amt  = max(1, int(raw))      if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
 half = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
-ex.set_leverage(sug_lev, symbol)
+ex.set_leverage(sug_lev, symbol, params={"posSide": "long" if is_l else "short"})
 dc(
 f”💰 可用餘額：{avail:.1f} U\n”
 f”📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n”
