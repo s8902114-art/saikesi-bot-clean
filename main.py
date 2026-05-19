@@ -71,7 +71,7 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 # ══════════════════════════════════════════════════════════════════════════════
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 MARGIN_PCT = 10.0          # 單筆交易佔用總可用資金之百分比 (10.0 = 10%)
-SIGNAL_COOLDOWN = 1800     # 同一商品相同時框的訊號冷卻時間 (秒)
+SIGNAL_COOLDOWN = 1800     # 同一商品商品相同時框的訊號冷卻時間 (秒)
 MAX_CONSEC_LOSS = 3       # 最大連續虧損次數限制，達標後觸發熔斷
 PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 
@@ -188,6 +188,9 @@ FUNDING_LONG_MAX = 0.0001
 FUNDING_SHORT_MIN = -0.0001
 CVD_WINDOW = 3
 BEAR_MIN_BARS = 20
+
+# 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
+_dc_last_msg_id = "0"
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  多時框全自動路由最佳化動態參數對照表 (PRODUCTION CONFIG MAPPINGS)
@@ -1193,53 +1196,78 @@ def execute_console_command(command_text: str):
         )
         dc_log(help_menu)
 
-_LOCK_FILE_PATH = "/tmp/dc_poller_marker.txt"
-def _get_stored_message_marker() -> str:
-    try:
-        with open(_LOCK_FILE_PATH) as f:
-            return f.read().strip() or "0"
-    except:
-        return "0"
-def _set_stored_message_marker(message_id: str):
-    try:
-        with open(_LOCK_FILE_PATH, "w") as f:
-            f.write(str(message_id))
-    except:
-        pass
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  🛠️ 核心修正：將遠端訊息抓取與 10 條遠端指令完美整合成單一 Try-Except 區塊 (Non-Repainting)
+# ══════════════════════════════════════════════════════════════════════════════
 def run_discord_command_poller_loop():
-    """ 獨立背景線程：每 3 秒長輪詢 Discord 頻道文字，實時同步控制台指令 """
-    global _bot_ref
+    """ 獨立背景線程：每 3 秒長輪詢 Discord 頻道文字，實時同步控制台指令 (完美修正語法縮排版) """
+    global _dc_last_msg_id
+
+    # 初始化：先抓一次最新訊息，作為起點，避免重啟時重複執行舊指令
     try:
-        initial_res = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=_dc_headers(), params={"limit": 10}, timeout=15).json()
-        if isinstance(initial_res, list) and initial_res:
-            _set_stored_message_marker(initial_res[0]["id"])
-    except:
-        pass
+        init_res = requests.get(
+            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", 
+            headers=_dc_headers(), 
+            params={"limit": 1}, 
+            timeout=15
+        ).json()
+        if isinstance(init_res, list) and init_res:
+            _dc_last_msg_id = init_res[0]["id"]
+    except Exception as e:
+        print(f"[-] 初始化 Discord Poller 失敗: {e}")
 
     while True:
         try:
-            last_processed_id = _get_stored_message_marker()
-            fetched_messages = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=_dc_headers(), params={"after": last_processed_id, "limit": 10}, timeout=15).json()
+            # 1. 抓取啟動時最新訊息，避免重複處理舊指令
+            r = requests.get(
+                f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+                headers=_dc_headers(),
+                params={"limit": 10},
+                timeout=15
+            )
+            msgs = r.json()
+            if isinstance(msgs, list) and msgs:
+                msg = msgs[0]
 
-            if isinstance(fetched_messages, list) and fetched_messages:
-                # 按照 ID (時間順序) 排序由舊到新處理指令
-                for msg in sorted(fetched_messages, key=lambda m: m.get("id", "0")):
-                    current_msg_id = msg["id"]
-                    author_node = msg.get("author", {})
-
-                    # 避免解析自身或其它 Bot 的訊息，防止無窮循環
-                    if author_node.get("bot") is True or author_node.get("username") == "RobotAhaha":
-                        _set_stored_message_marker(current_msg_id)
-                        continue
-
-                    _set_stored_message_marker(current_msg_id)
-                    raw_content = msg.get("content", "").strip()
-                    if raw_content.startswith("!"):
-                        execute_console_command(raw_content)
-        except:
+                # 💡 鐵律 1：如果是機器人自己發的訊息，直接記為已讀，絕對不要執行！
+                author = msg.get("author", {})
+                if author.get("bot") is True or author.get("username") == "RobotAhaha":
+                    _dc_last_msg_id = msg["id"]
+                else:
+                    # 💡 鐵律 2：如果是真人的訊息，才更新最高快取 ID
+                    _dc_last_msg_id = msg["id"]
+        except Exception as e:
+            print(f"[-] 核心拉取異常，已自動略過進入 while True 區間: {e}")
             pass
-        sleep(3)
+
+        # 2. 進入實際的 while True 輪詢區間
+        while True:
+            try:
+                r = requests.get(
+                    f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
+                    headers=_dc_headers(),
+                    params={"after": _dc_last_msg_id, "limit": 10},
+                    timeout=15
+                )
+                msgs = r.json()
+                if isinstance(msgs, list) and msgs:
+                    # 依時間順序由舊到新排序處理
+                    for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
+                        _dc_last_msg_id = msg["id"]
+
+                        # 🛡️ 終極核心防線：只要發現發言者是 Bot，立刻忽略、直接跳過！
+                        author = msg.get("author", {})
+                        if author.get("bot") is True or author.get("username") == "RobotAhaha":
+                            continue  # 🏃 🧱 跳過此訊息，繼續看下一條
+
+                        # 解析文字指令
+                        text = msg.get("content", "")
+                        if text.startswith("!"):
+                            execute_console_command(text)
+            except Exception as loop_err:
+                print(f"[-] Poller 內部輪詢發生輕微異常，自動跳過: {loop_err}")
+                pass
+            sleep(3)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  精密排程與主核心輪詢控制 (SCHEDULER LOOP)
@@ -1316,4 +1344,4 @@ if __name__ == "__main__":
     Thread(target=run_discord_command_poller_loop, daemon=True).start()
 
     # 3. 推進主線程進入無盡交易排程核心
-    run_strategy_scanning_loop()# Tue May 19 09:24:06 PM UTC 2026
+    run_strategy_scanning_loop()
