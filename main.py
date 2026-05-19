@@ -547,7 +547,7 @@ def place_okx_order(symbol: str, direction: str, entry: float,
         raw     = pos_val / (price * ct_sz)
         amt  = max(1, int(raw))      if prec == 0 else max(round(1/ct_sz, prec), round(raw, prec))
         half = max(1, int(amt // 2)) if prec == 0 else round(amt / 2, prec)
-        ex.set_leverage(sug_lev, symbol)
+        ex.set_leverage(sug_lev, symbol, params={"posSide": "long" if is_l else "short"})
         dc(
             f"💰 可用餘額：{avail:.1f} U\n"
             f"📦 每倉保證金：{margin:.1f} U（可用×{MARGIN_PCT}%）\n"
@@ -1221,9 +1221,11 @@ class TradingBotV3:
             return
 
         now_ts = time.time()
-        if now_ts - self.last_signal_time.get(key, 0) < SIGNAL_COOLDOWN:
+        lock_file = f"/tmp/sig_{key}.lock"
+        if os.path.exists(lock_file) and now_ts - os.path.getmtime(lock_file) < SIGNAL_COOLDOWN:
             return
-        self.last_signal_time[key] = time.time()
+        open(lock_file, "w").close()
+        self.last_signal_time[key] = now_ts
 
         if _PAUSED:
             print(f"  [PAUSED] 跳過訊號：{label} {tf} {sig['side']}")
