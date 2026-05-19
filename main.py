@@ -49,10 +49,10 @@ OKX_DEMO       = False
 MAX_LEVERAGE     = 100
 MARGIN_PCT       = 10.0
 SIGNAL_COOLDOWN  = 1800
-_LIVE_MODE       = False
+_LIVE_MODE       = True if os.environ.get("OKX_API_KEY") else False
 _PAUSED          = False
 _BOT_START_TS    = time.time()
-AUTO_TRADE = {"15m": False, "30m": False, "1H": False, "4H": False}
+AUTO_TRADE = {"15m": True, "30m": True, "1H": True, "4H": True}
 _bot_ref         = None
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -563,8 +563,8 @@ def place_okx_order(symbol: str, direction: str, entry: float,
             f"均價:{eo.get('average') or price}  ID:{eo.get('id')}"
         ]
         try:
-            o = ex.create_order(symbol, "stop_market", xs, amt, None,
-                                {"stopPrice": sl, "reduceOnly": True, "posSide": direction})
+            o = ex.create_order(symbol, "market", xs, amt, sl,
+                                {"stopLoss": {"triggerPrice": str(sl), "orderPrice": "-1"}, "reduceOnly": True, "posSide": direction})
             res.append(f"🛑 SL {sl} ID:{o.get('id')}")
         except Exception as e:
             res.append(f"⚠️ SL失敗:{e}")
@@ -741,14 +741,20 @@ def _handle_dc_command(text: str):
         dc(
             "📖 **指令列表**\n"
             "────────────────\n"
-            "`!pause` — 暫停發送訊號\n"
-            "`!resume` — 恢復發送訊號\n"
-            "`!setrisk [數字]` — 設定每倉保證金%\n"
-            "`!setmaxlev [數字]` — 設定最高槓桿上限\n"
             "`!setlive` — 切換為實盤下單\n"
             "`!setpaper` — 切換為模擬（不下單）\n"
+            "`!auto all on/off` — 開關全部時框自動下單\n"
+            "`!auto 15m/30m/1H/4H on/off` — 開關指定時框\n"
+            "`!autostatus` — 查看各時框自動下單狀態\n"
+            "`!setrisk [數字]` — 設定每倉保證金%（目前10%）\n"
+            "`!setmaxlev [數字]` — 設定最高槓桿上限（目前100x）\n"
+            "`!pause` — 暫停發送訊號\n"
+            "`!resume` — 恢復發送訊號\n"
             "`!status` — 顯示目前狀態\n"
-            "`!help` — 顯示此說明"
+            "`!help` — 顯示此說明\n"
+            "────────────────\n"
+            "⏰ 時區：台灣時間 TST (UTC+8)\n"
+            "📡 訊號觸發：K棒收盤觸發（15m/30m/1H/4H）"
         )
 
 
