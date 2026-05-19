@@ -26,7 +26,7 @@ fi
 # 強制推送到新乾淨 repo
 PUSH_OUT=$(git push "$REPO" main --force 2>&1)
 if [ $? -eq 0 ]; then
-    echo "[push] ✅ 推送完成 → saikesi-bot-clean"
+    echo "[push] ✅ 推送完成 → saikesi-bot"
 else
     echo "[push] ❌ 失敗：$PUSH_OUT"
 fi
