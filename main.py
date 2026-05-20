@@ -330,7 +330,7 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     cvd_tag = "CVD ✅ 動能同步確認" if cvd_ok else "CVD ⚠️ 量能背離過濾"
     card_color = 0x2ecc71 if sig["side"] == "long" else "0xe74c3c"
 
-    tw_time = datetime.fromisoformat(sig["time"].replace("Z", "+00:00")) + timedelta(hours=8)
+    tw_time = datetime.fromisoformat(sig["time"].replace("Z", "").replace("+00:00", "")) + timedelta(hours=8)
     coin_name = symbol.split("/")[0]
     unique_callback_key = f"sykes_{coin_name.lower()}_{tf}_{sig['side']}_{int(time.time())}"
 
