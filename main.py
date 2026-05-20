@@ -1115,7 +1115,7 @@ def poll_dc_commands():
     print("[DC] 指令輪詢已啟動。")
     while True:
         try:
-            params = {"limit": 5}
+            params = {"limit": 20}
             if _dc_last_msg_id:
                 params["after"] = _dc_last_msg_id
             resp = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=headers, params=params, timeout=10)
