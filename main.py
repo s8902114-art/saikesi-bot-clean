@@ -74,8 +74,8 @@ TG_CHAT_ID = os.environ.get(“TG_CHAT_ID”, “”)
 # OKX 交易所帳戶配置
 
 OKX_API_KEY = os.environ.get(“OKX_API_KEY”, “”)
-OKX_SECRET = os.environ.get(“OKX_SECRET_KEY”, “”)
-OKX_PASSPHRASE = os.environ.get(“OKX_PASSPHRASE”, “”)
+OKX_SECRET = os.environ.get("OKX_SECRET_KEY", "359300E99DD8870F8990CC698BC4F491")
+OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "Small5017714@")
 OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 # ══════════════════════════════════════════════════════════════════════════════
