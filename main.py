@@ -328,7 +328,7 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     dir_name = "多頭趨勢進場" if sig["side"] == "long" else "空頭趨勢進場"
     swing_tag = "📐 趨勢波段追蹤" if sig["is_swing"] else "⚡ 短線日內反彈"
     cvd_tag = "CVD ✅ 動能同步確認" if cvd_ok else "CVD ⚠️ 量能背離過濾"
-    card_color = 0x2ecc71 if sig["side"] == "long" else "0xe74c3c"
+    card_color = 0x2ecc71 if sig["side"] == "long" else 0xe74c3c
 
     tw_time = datetime.fromisoformat(sig["time"].replace("Z", "").replace("+00:00", "")) + timedelta(hours=8)
     coin_name = symbol.split("/")[0]
@@ -512,7 +512,72 @@ def fetch_open_interest_series(cona_symbol: str, cona_interval: str, start_times
     return df["oi"]
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  OKX 實盤風控倉位自動計算與分批委託鏈 (ORDER EXECUTION)
+#  複雜技術指標庫算力模組 (TECHNICAL INDICATORS MATHEMATICS)
+# ══════════════════════════════════════════════════════════════════════════════
+def calculate_smooth_rsi(series_src: pd.Series, rolling_period: int) -> pd.Series:
+    """ 計算非線性標準化相對強弱指標線 """
+    price_delta = series_src.diff()
+    up_trends = price_delta.clip(lower=0.0)
+    down_trends = -price_delta.clip(upper=0.0)
+    mean_up = up_trends.ewm(com=rolling_period - 1, adjust=False).mean()
+    mean_down = down_trends.ewm(com=rolling_period - 1, adjust=False).mean()
+    rs_value = mean_up / mean_down.replace(0.0, 1e-9)
+    return 100.0 - (100.0 / (1.0 + rs_value))
+
+def calculate_full_qqe_mod(data_df: pd.DataFrame, rsi_pd: int = 6, sf_pd: int = 5, factor_mult: float = 4.236) -> Tuple[pd.Series, pd.Series]:
+    """ 完全體 QQE MOD 動態移動區間軌道演算演算法 """
+    src_close = data_df["close"]
+    rsi_series = calculate_smooth_rsi(src_close, rsi_pd)
+    rsi_smoothed_ma = rsi_series.ewm(span=sf_pd, adjust=False).mean()
+    absolute_rsi_delta = rsi_smoothed_ma.diff().abs()
+    smoothed_atr_rsi = absolute_rsi_delta.ewm(span=2 * rsi_pd - 1, adjust=False).mean()
+    dar_trailing_band = smoothed_atr_rsi.ewm(span=2 * rsi_pd - 1, adjust=False).mean() * factor_mult
+
+    trailing_line_value = 0.0
+    trailing_buffer_list = []
+    for idx in range(len(rsi_smoothed_ma)):
+        current_ma_val = rsi_smoothed_ma.iloc[idx]
+        if idx == 0:
+            trailing_line_value = current_ma_val
+        else:
+            previous_trailing_value = trailing_line_value
+            if current_ma_val < previous_trailing_value:
+                trailing_line_value = current_ma_val + dar_trailing_band.iloc[idx]
+                if rsi_smoothed_ma.iloc[idx - 1] < previous_trailing_value and trailing_line_value > previous_trailing_value:
+                    trailing_line_value = previous_trailing_value
+            else:
+                trailing_line_value = current_ma_val - dar_trailing_band.iloc[idx]
+                if rsi_smoothed_ma.iloc[idx - 1] > previous_trailing_value and trailing_line_value < previous_trailing_value:
+                    trailing_line_value = previous_trailing_value
+        trailing_buffer_list.append(trailing_line_value)
+    return rsi_smoothed_ma, pd.Series(trailing_buffer_list, index=data_df.index)
+
+def calculate_average_true_range(data_df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
+    """ 計算真實波動幅度均值 (ATR) """
+    high_prices = data_df["high"]
+    low_prices = data_df["low"]
+    previous_closes = data_df["close"].shift(1)
+    tr1 = high_prices - low_prices
+    tr2 = (high_prices - previous_closes).abs()
+    tr3 = (low_prices - previous_closes).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return true_range.ewm(alpha=1.0 / atr_period, adjust=False).mean()
+
+def calculate_directional_movement_index(data_df: pd.DataFrame, adx_period: int = 14) -> pd.Series:
+    """ 動向指標 (DMI/ADX) 趨勢強度過濾器 """
+    high_diff = data_df["high"].diff()
+    low_diff = -data_df["low"].diff()
+    plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
+    minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
+
+    atr_series = calculate_average_true_range(data_df, adx_period).replace(0.0, 1e-9)
+    plus_di = 100.0 * pd.Series(plus_dm, index=data_df.index).ewm(alpha=1.0 / adx_period, adjust=False).mean() / atr_series
+    minus_di = 100.0 * pd.Series(minus_dm, index=data_df.index).ewm(alpha=1.0 / adx_period, adjust=False).mean() / atr_series
+
+    dx_value = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, 1e-9)
+    return dx_value.ewm(alpha=1.0 / adx_period, adjust=False).mean()
+# ══════════════════════════════════════════════════════════════════════════════
+#  接續上篇：OKX 實盤風控倉位自動計算與分批委託鏈 (ORDER EXECUTION)
 # ══════════════════════════════════════════════════════════════════════════════
 def _initialize_ccxt_client() -> ccxt.okx:
     client = ccxt.okx({
@@ -631,7 +696,6 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
 
         try:
-            # 剩餘的張數歸入第二目標
             remainder_amount = final_order_amount - split_half_amount
             if amount_precision == 0:
                 remainder_amount = int(remainder_amount)
@@ -651,661 +715,341 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
         dc_log("\n".join(execution_report))
-
     except Exception as general_error:
         dc_log(f"❌ **交易所執行鏈嚴重崩潰**: {general_error}")
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  複雜技術指標庫算力模組 (TECHNICAL INDICATORS MATHEMATICS)
+#  核心策略掃描中樞核心引擎 (MARKET MATRIX ENGINE)
 # ══════════════════════════════════════════════════════════════════════════════
-def calculate_smooth_rsi(series_src: pd.Series, rolling_period: int) -> pd.Series:
-    """ 計算非線性標準化相對強弱指標線 """
-    price_delta = series_src.diff()
-    up_trends = price_delta.clip(lower=0.0)
-    down_trends = -price_delta.clip(upper=0.0)
-
-    mean_up = up_trends.ewm(com=rolling_period - 1, adjust=False).mean()
-    mean_down = down_trends.ewm(com=rolling_period - 1, adjust=False).mean()
-
-    rs_value = mean_up / mean_down.replace(0.0, 1e-9)
-    return 100.0 - (100.0 / (1.0 + rs_value))
-
-def calculate_full_qqe_mod(data_df: pd.DataFrame, rsi_pd: int = 6, sf_pd: int = 5, factor_mult: float = 4.236) -> Tuple[pd.Series, pd.Series]:
-    """ 完全體 QQE MOD 動態移動區間軌道演算演算法 """
-    src_close = data_df["close"]
-    rsi_series = calculate_smooth_rsi(src_close, rsi_pd)
-    rsi_smoothed_ma = rsi_series.ewm(span=sf_pd, adjust=False).mean()
-
-    absolute_rsi_delta = rsi_smoothed_ma.diff().abs()
-    smoothed_atr_rsi = absolute_rsi_delta.ewm(span=2 * rsi_pd - 1, adjust=False).mean()
-    dar_trailing_band = smoothed_atr_rsi.ewm(span=2 * rsi_pd - 1, adjust=False).mean() * factor_mult
-
-    trailing_line_value = 0.0
-    trailing_buffer_list = []
-
-    for idx in range(len(rsi_smoothed_ma)):
-        current_ma_val = rsi_smoothed_ma.iloc[idx]
-        if idx == 0:
-            trailing_line_value = current_ma_val
-        else:
-            previous_trailing_value = trailing_line_value
-            if current_ma_val < previous_trailing_value:
-                trailing_line_value = current_ma_val + dar_trailing_band.iloc[idx]
-                if rsi_smoothed_ma.iloc[idx - 1] < previous_trailing_value and trailing_line_value > previous_trailing_value:
-                    trailing_line_value = previous_trailing_value
-            else:
-                trailing_line_value = current_ma_val - dar_trailing_band.iloc[idx]
-                if rsi_smoothed_ma.iloc[idx - 1] > previous_trailing_value and trailing_line_value < previous_trailing_value:
-                    trailing_line_value = previous_trailing_value
-        trailing_buffer_list.append(trailing_line_value)
-
-    return rsi_smoothed_ma, pd.Series(trailing_buffer_list, index=data_df.index)
-
-def calculate_average_true_range(data_df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
-    """ 計算真實波動幅度均值 (ATR) """
-    high_prices = data_df["high"]
-    low_prices = data_df["low"]
-    previous_closes = data_df["close"].shift(1)
-
-    tr1 = high_prices - low_prices
-    tr2 = (high_prices - previous_closes).abs()
-    tr3 = (low_prices - previous_closes).abs()
-
-    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    return true_range.rolling(window=atr_period).mean()
-
-def calculate_adx_trend_strength(data_df: pd.DataFrame, lookback_n: int = 14) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    """ 計算趨向指標系統 (ADX, +DI, -DI) 以精準確認趨勢動能爆發 """
-    high_s = data_df["high"]
-    low_s = data_df["low"]
-    close_s = data_df["close"]
-
-    tr = pd.concat([
-        high_s - low_s,
-        (high_s - close_s.shift(1)).abs(),
-        (low_s - close_s.shift(1)).abs()
-    ], axis=1).max(axis=1)
-
-    atr_smooth = tr.rolling(lookback_n).mean()
-
-    plus_move = high_s.diff()
-    minus_move = -low_s.diff()
-
-    plus_dm = np.where((plus_move > minus_move) & (plus_move > 0.0), plus_move, 0.0)
-    minus_dm = np.where((minus_move > plus_move) & (minus_move > 0.0), minus_move, 0.0)
-
-    plus_di = 100.0 * pd.Series(plus_dm, index=data_df.index).rolling(lookback_n).mean() / atr_smooth.replace(0.0, 1e-9)
-    minus_di = 100.0 * pd.Series(minus_dm, index=data_df.index).rolling(lookback_n).mean() / atr_smooth.replace(0.0, 1e-9)
-
-    dx_metric = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, 1e-9)
-    adx_line = dx_metric.rolling(lookback_n).mean()
-
-    return adx_line, plus_di, minus_di
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  生產線核心引擎主體 (PRODUCTION TELEMETRY ENGINE)
-# ══════════════════════════════════════════════════════════════════════════════
-class SykesProductionCore:
+class SykesTradingBot:
     def __init__(self):
-        self.cooldown_tracker: Dict[str, float] = {}
-        self.consecutive_loss_counter: Dict[str, int] = {}
-        self.fuse_melt_timer: Dict[str, datetime] = {}
-        self.active_positions_ledger: Dict[str, PaperPosition] = {}
+        self.cooldown_dict: Dict[str, float] = {}
+        self.consec_losses = 0
+        self.circuit_break_until: Optional[float] = None
+        self.paper_positions: Dict[str, PaperPosition] = {}
 
-        # 實例化所有交易配對在各個時框的獨立內部記帳卡片
-        for s in SYMBOLS.values():
-            for t in TIMEFRAMES:
-                self.active_positions_ledger[f"{s}_{t}"] = PaperPosition()
-
-    def scan_and_process_market(self, asset_symbol: str, target_tf: str):
-        """ 核心策略偵測主邏輯：封裝多空交叉判斷、熊市過濾計數、與費率風控 """
-        current_utc_now = datetime.now(timezone.utc)
-        composite_key = f"{asset_symbol}_{target_tf}"
-
-        # 1. 斷路器與熔斷冷卻檢測
-        with _STATE_LOCK:
-            if composite_key in self.fuse_melt_timer:
-                if current_utc_now < self.fuse_melt_timer[composite_key]:
-                    return
-            if self.cooldown_tracker.get(composite_key, 0.0) > time.time():
-                return
-
-        okx_instrument_id = OKX_SWAP.get(asset_symbol, asset_symbol)
-        market_df = fetch_market_candles(okx_instrument_id, target_tf, WARMUP)
-        if market_df.empty or len(market_df) < 250:
-            return
-
-        # 2. 開啟持倉動態監控大腦更新 (追蹤移動止損與盈虧達標狀態)
-        pos_instance = self.active_positions_ledger[composite_key]
-        last_close_price = market_df["close"].iloc[-1]
-
-        if pos_instance.open:
-            self._update_and_track_active_position(asset_symbol, target_tf, pos_instance, last_close_price, market_df)
-            if pos_instance.open:
-                return  # 如果持倉依然有效，跳過新訊號生成，防止重疊開倉
-
-        # 3. 技術指標全面並行演算
-        fast_rsi_ma, fast_qqe_band = calculate_full_qqe_mod(market_df, QQE_RSI, QQE_SF, QQE_FACTOR_P)
-        slow_rsi_ma, slow_qqe_band = calculate_full_qqe_mod(market_df, QQE_RSI, QQE_SF, QQE_FACTOR_S)
-
-        latest_atr_value = calculate_average_true_range(market_df, 14).iloc[-1]
-        adx_trend, plus_di, minus_di = calculate_adx_trend_strength(market_df, 14)
-
-        market_df["ema200"] = market_df["close"].ewm(span=200, adjust=False).mean()
-        latest_ema200 = market_df["ema200"].iloc[-1]
-
-        # 4. 精密 QQE MOD 交叉判斷
-        is_fast_cross_up = (fast_rsi_ma.iloc[-2] <= fast_qqe_band.iloc[-2]) and (fast_rsi_ma.iloc[-1] > fast_qqe_band.iloc[-1])
-        is_fast_cross_down = (fast_rsi_ma.iloc[-2] >= fast_qqe_band.iloc[-2]) and (fast_rsi_ma.iloc[-1] < fast_qqe_band.iloc[-1])
-        is_slow_momentum_long = slow_rsi_ma.iloc[-1] > slow_qqe_band.iloc[-1]
-
-        determined_side = ""
-        if is_fast_cross_up and is_slow_momentum_long and (fast_rsi_ma.iloc[-1] > 50.0):
-            # 多頭過濾網：強勢多頭動能確認
-            if adx_trend.iloc[-1] >= ADX_THR and plus_di.iloc[-1] > minus_di.iloc[-1]:
-                determined_side = "long"
-        elif is_fast_cross_down and not is_slow_momentum_long and (fast_rsi_ma.iloc[-1] < 40.0):
-            # 空頭過濾網：強勢空頭動能確認
-            if adx_trend.iloc[-1] >= ADX_THR and minus_di.iloc[-1] > plus_di.iloc[-1]:
-                determined_side = "short"
-
-        if not determined_side:
-            return
-
-        # 5. 熊市深層環境與 K 棒計數過濾機制 (200EMA 大腦過濾)
-        is_below_ema200 = (last_close_price < latest_ema200)
-        if is_below_ema200 and determined_side == "long":
-            # 計算連續低於 EMA200 的 K 棒數量走勢
-            bear_mask = (market_df["close"] < market_df["ema200"]).astype(int)
-            continuous_bear_counts = bear_mask.groupby((bear_mask != bear_mask.shift()).cumsum()).cumsum()
-            # 如果處於熊市但壓制時間不夠久，拒絕盲目抄底做多
-            if continuous_bear_counts.iloc[-1] < BEAR_MIN_BARS:
-                return
-
-        # 6. 資金費率風控閘門
-        funding_rate = fetch_current_funding_rate(okx_instrument_id)
-        if determined_side == "long" and funding_rate > FUNDING_LONG_MAX:
-            return
-        if determined_side == "short" and funding_rate < FUNDING_SHORT_MIN:
-            return
-
-        # 7. Coinalyze 雙重現貨/永續 CVD 趨勢健康度覆核
-        is_cvd_validated = self._validate_cvd_momentum(asset_symbol, target_tf, determined_side, market_df)
-
-        # 8. 調閱最佳化回測字典計算止損與分批止盈線
-        param_set = get_params(target_tf, determined_side)
-        lookback_window = int(param_set.get("structure_lookback", 20))
-        recent_sub_df = market_df.iloc[-lookback_window:]
-
-        if determined_side == "long":
-            lowest_support = recent_sub_df["low"].min()
-            calculated_sl = lowest_support - (latest_atr_value * param_set.get("sl_atr_buffer", 0.05))
-            # 風控防穿底保護
-            calculated_sl = max(calculated_sl, last_close_price * (1.0 - MAX_SL))
-            if calculated_sl >= last_close_price:
-                calculated_sl = last_close_price - (latest_atr_value * 0.5)
-
-            risk_pct = (last_close_price - calculated_sl) / last_close_price
-            tp1_target = last_close_price + (last_close_price - calculated_sl) * param_set.get("tp1_mult", 1.5)
-
-            # 區分波段或短線反彈調度 TP2
-            is_swing_trade = (last_close_price > latest_ema200)
-            tp2_multiplier = param_set.get("tp2_swing_mult" if is_swing_trade else "tp2_intraday_mult", 2.0)
-            tp2_target = last_close_price + (last_close_price - calculated_sl) * tp2_multiplier
-        else:
-            highest_resistance = recent_sub_df["high"].max()
-            calculated_sl = highest_resistance + (latest_atr_value * param_set.get("sl_atr_buffer", 0.05))
-            calculated_sl = min(calculated_sl, last_close_price * (1.0 + MAX_SL))
-            if calculated_sl <= last_close_price:
-                calculated_sl = last_close_price + (latest_atr_value * 0.5)
-
-            risk_pct = (calculated_sl - last_close_price) / last_close_price
-            tp1_target = last_close_price - (calculated_sl - last_close_price) * param_set.get("tp1_mult", 1.5)
-
-            is_swing_trade = (last_close_price < latest_ema200)
-            tp2_multiplier = param_set.get("tp2_swing_mult" if is_swing_trade else "tp2_intraday_mult", 2.0)
-            tp2_target = last_close_price - (calculated_sl - last_close_price) * tp2_multiplier
-
-        # 9. 封裝訊號物件並推進快取與 UI 生成
-        signal_packet = {
-            "side": determined_side,
-            "entry": round(last_close_price, 6),
-            "sl": round(calculated_sl, 6),
-            "tp1": round(tp1_target, 6),
-            "tp2": round(tp2_target, 6),
-            "atr": round(latest_atr_value, 4),
-            "risk_pct": risk_pct * 100.0,
-            "exit_mode": param_set.get("exit_mode", "fixed"),
-            "is_swing": is_swing_trade,
-            "rr1": param_set.get("tp1_mult", 1.5),
-            "rr2": tp2_multiplier,
-            "time": current_utc_now.isoformat() + "Z"
-        }
-
-        with _STATE_LOCK:
-            self.cooldown_tracker[composite_key] = time.time() + SIGNAL_COOLDOWN
-
-        callback_id_key = create_interactive_signal(signal_packet, asset_symbol, target_tf, is_cvd_validated)
-
-        # 開啟內部記帳卡片監控
-        pos_instance.open = True
-        pos_instance.side = determined_side
-        pos_instance.entry = signal_packet["entry"]
-        pos_instance.sl = signal_packet["sl"]
-        pos_instance.tp1 = signal_packet["tp1"]
-        pos_instance.tp2 = signal_packet["tp2"]
-        pos_instance.tp1_hit = False
-        pos_instance.exit_mode = signal_packet["exit_mode"]
-
-        # 自動下單路由判斷
-        if AUTO_TRADE.get(target_tf, False):
-            pending_orders.pop(callback_id_key, None)
-            Thread(
-                target=execute_okx_trade_pipeline,
-                args=(okx_instrument_id, determined_side, signal_packet["entry"], signal_packet["sl"], signal_packet["tp1"], signal_packet["tp2"]),
-                daemon=True
-            ).start()
-
-    def _validate_cvd_momentum(self, symbol: str, tf: str, side: str, df: pd.DataFrame) -> bool:
-        spot_code = CONA_SPOT.get(symbol)
-        perp_code = CONA_PERP.get(symbol)
-        if not spot_code or not perp_code:
-            return True
-        try:
-            end_ms = int(df.index[-1].timestamp() * 1000)
-            start_ms = end_ms - (BAR_SECONDS[tf] * CVD_WINDOW * 1000)
-            interval_str = BAR_TO_CONA.get(tf, "15min")
-
-            spot_cvd = calculate_cumulative_volume_delta(spot_code, interval_str, start_ms, end_ms)
-            perp_cvd = calculate_cumulative_volume_delta(perp_code, interval_str, start_ms, end_ms)
-
-            if len(spot_cvd) < 2 or len(perp_cvd) < 2:
+    def is_cooldown(self, symbol: str, tf: str) -> bool:
+        key = f"{symbol}_{tf}"
+        if key in self.cooldown_dict:
+            if time.time() - self.cooldown_dict[key] < SIGNAL_COOLDOWN:
                 return True
+        return False
 
-            is_spot_volume_up = spot_cvd.iloc[-1] > spot_cvd.iloc[0]
-            is_perp_volume_up = perp_cvd.iloc[-1] > perp_cvd.iloc[0]
+    def set_cooldown(self, symbol: str, tf: str):
+        self.cooldown_dict[f"{symbol}_{tf}"] = time.time()
 
-            if side == "long":
-                return (is_spot_volume_up and is_perp_volume_up)
-            else:
-                return (not is_spot_volume_up and not is_perp_volume_up)
-        except:
+    def check_circuit_breaker(self) -> bool:
+        if self.circuit_break_until and time.time() < self.circuit_break_until:
             return True
+        if self.circuit_break_until and time.time() >= self.circuit_break_until:
+            self.circuit_break_until = None
+            self.consec_losses = 0
+            dc_log("🛡️ **風控通告**: 熔斷冷卻時間已屆滿，核心解鎖恢復主動交易輪詢。")
+        return False
 
-    def _update_and_track_active_position(self, symbol: str, tf: str, pos: PaperPosition, cur_px: float, df: pd.DataFrame):
-        """ 內部持倉更新大腦：精確追蹤保證金鎖定移動止損與三階段出場邏輯 """
-        composite_key = f"{symbol}_{tf}"
-        coin_tag = symbol.split("/")[0]
+    def trigger_circuit_break(self):
+        self.circuit_break_until = time.time() + (PAUSE_HOURS * 3600)
+        dc_log(f"🚨 **風控核心硬熔斷發動** 🚨\n系統已連續虧損 {MAX_CONSEC_LOSS} 次，全面暫停自動下單模組 {PAUSE_HOURS} 小時！")
 
-        if pos.side == "long":
-            # 1. 檢測結構止損是否被刺穿
-            if df["low"].iloc[-1] <= pos.sl:
-                exit_msg = f"🛑 **持倉離場通知**\n商品: {coin_tag} [{tf} 多頭] | 觸及安全結構止損線: `{pos.sl}`。此單全數平倉。"
-                dc_log(exit_msg)
-                tg_log(exit_msg)
-                self._process_loss_event(composite_key)
-                pos.open = False
-            # 2. 檢測第一目標獲利點是否觸及
-            elif not pos.tp1_hit and df["high"].iloc[-1] >= pos.tp1:
-                pos.tp1_hit = True
-                exit_msg = f"🎯 **獲利通告：第一目標價 TP1 `{pos.tp1}` 順利達標！**\n商品: {coin_tag} [{tf} 多頭] 已自動平倉 50% 鎖定獲利。\n🛡️ **保證金保護啟用**: 止損點強制同步推移至進場成本價 `{pos.entry}`，立於不敗之地。"
-                dc_log(exit_msg)
-                pos.sl = pos.entry  # 防禦性成本價鎖定
-            # 3. 檢測終點第二獲利點
-            elif pos.tp1_hit and df["high"].iloc[-1] >= pos.tp2:
-                exit_msg = f"🌕 **完美波段終點！第二目標價 TP2 `{pos.tp2}` 完美全數止盈落袋！**\n商品: {coin_tag} [{tf} 多頭] 完整交易鏈落幕。"
-                dc_log(exit_msg)
-                tg_log(exit_msg)
-                with _STATE_LOCK:
-                    self.consecutive_loss_counter[composite_key] = 0
-                pos.open = False
-            # 4. 移動追蹤止損邏輯 (Trailing Exit Mode)
-            elif pos.exit_mode == "trailing" and pos.tp1_hit:
-                previous_bar_low = df["low"].iloc[-2]
-                if previous_bar_low > pos.sl:
-                    pos.sl = previous_bar_low
-        else:
-            if df["high"].iloc[-1] >= pos.sl:
-                exit_msg = f"🛑 **持倉離場通知**\n商品: {coin_tag} [{tf} 空頭] | 觸及安全結構止損線: `{pos.sl}`。此單全數平倉。"
-                dc_log(exit_msg)
-                tg_log(exit_msg)
-                self._process_loss_event(composite_key)
-                pos.open = False
-            elif not pos.tp1_hit and df["low"].iloc[-1] <= pos.tp1:
-                pos.tp1_hit = True
-                exit_msg = f"🎯 **獲利通告：第一目標價 TP1 `{pos.tp1}` 順利達標！**\n商品: {coin_tag} [{tf} 空頭] 已自動平倉 50% 鎖定獲利。\n🛡️ **保證金保護啟用**: 止損點強制同步推移至進場成本價 `{pos.entry}`，立於不敗之地。"
-                dc_log(exit_msg)
-                pos.sl = pos.entry
-            elif pos.tp1_hit and df["low"].iloc[-1] <= pos.tp2:
-                exit_msg = f"🌕 **完美波段終點！第二目標價 TP2 `{pos.tp2}` 完美全數止盈落袋！**\n商品: {coin_tag} [{tf} 空頭] 完整交易鏈落幕。"
-                dc_log(exit_msg)
-                tg_log(exit_msg)
-                with _STATE_LOCK:
-                    self.consecutive_loss_counter[composite_key] = 0
-                pos.open = False
-            elif pos.exit_mode == "trailing" and pos.tp1_hit:
-                previous_bar_high = df["high"].iloc[-2]
-                if previous_bar_high < pos.sl:
-                    pos.sl = previous_bar_high
+    def update_paper_trailing_and_exits(self, symbol_item: str, current_price: float):
+        """ Paper 模式下動態追蹤止損與模擬止盈更新 """
+        for tf in TIMEFRAMES:
+            pos_key = f"{symbol_item}_{tf}"
+            if pos_key not in self.paper_positions or not self.paper_positions[pos_key].open:
+                continue
+            pos = self.paper_positions[pos_key]
 
-    def _process_loss_event(self, composite_key: str):
-        """ 處理連續虧損熔斷邏輯 """
-        with _STATE_LOCK:
-            current_losses = self.consecutive_loss_counter.get(composite_key, 0) + 1
-            self.consecutive_loss_counter[composite_key] = current_losses
+            # 多頭部位離場檢測
+            if pos.side == "long":
+                if current_price <= pos.sl:
+                    dc_log(f"📉 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
+                    pos.open = False
+                    if not pos.tp1_hit:
+                        self.consec_losses += 1
+                        if self.consec_losses >= MAX_CONSEC_LOSS:
+                            self.trigger_circuit_break()
+                    else:
+                        self.consec_losses = 0
+                elif current_price >= pos.tp1 and not pos.tp1_hit:
+                    dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標第一目標價 TP1 `{pos.tp1}`，推動保本止損至進場價。")
+                    pos.tp1_hit = True
+                    pos.sl = pos.entry
+                elif current_price >= pos.tp2:
+                    dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 全滿達標終點 TP2 `{pos.tp2}`！")
+                    pos.open = False
+                    self.consec_losses = 0
+                elif pos.exit_mode == "trailing" and pos.tp1_hit:
+                    # 追蹤止損：隨價格上漲動態調高止損
+                    new_sl = current_price * 0.98
+                    if new_sl > pos.sl:
+                        pos.sl = new_sl
 
-            if current_losses >= MAX_CONSEC_LOSS:
-                resume_time = datetime.now(timezone.utc) + timedelta(hours=PAUSE_HOURS)
-                self.fuse_melt_timer[composite_key] = resume_time
-                parts = composite_key.split("_")
+            # 空頭部位離場檢測
+            elif pos.side == "short":
+                if current_price >= pos.sl:
+                    dc_log(f"📈 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
+                    pos.open = False
+                    if not pos.tp1_hit:
+                        self.consec_losses += 1
+                        if self.consec_losses >= MAX_CONSEC_LOSS:
+                            self.trigger_circuit_break()
+                    else:
+                        self.consec_losses = 0
+                elif current_price <= pos.tp1 and not pos.tp1_hit:
+                    dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標第一目標價 TP1 `{pos.tp1}`，推動保本止損至進場價。")
+                    pos.tp1_hit = True
+                    pos.sl = pos.entry
+                elif current_price <= pos.tp2:
+                    dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 全滿達標終點 TP2 `{pos.tp2}`！")
+                    pos.open = False
+                    self.consec_losses = 0
+                elif pos.exit_mode == "trailing" and pos.tp1_hit:
+                    new_sl = current_price * 1.02
+                    if new_sl < pos.sl:
+                        pos.sl = new_sl
 
-                melt_msg = (
-                    f"⏸ **系統熔斷核心警報**\n"
-                    f"商品時框: `{parts[0]}` 在 `[{parts[1]}]` 連續發生 `{MAX_CONSEC_LOSS}` 次虧損止損！\n"
-                    f"啟動冷卻安全保護，該商品時框策略將暫停運作 {PAUSE_HOURS} 小時。\n"
-                    f"預計解鎖恢復時間: `{(resume_time + timedelta(hours=8)).strftime('%Y/%m/%d %H:%M:%S')}` (TST)"
-                )
-                dc_log(melt_msg)
-                tg_log(melt_msg)
+    def scan_and_process_market(self, symbol_item: str, tf_id: str):
+        """ 核心策略演算法矩陣掃描線 """
+        if self.check_circuit_breaker():
+            return
+        if self.is_cooldown(symbol_item, tf_id):
+            return
+
+        okx_swap_symbol = OKX_SWAP.get(symbol_item)
+        if not okx_swap_symbol:
+            return
+
+        # 1. 行情數據拉取
+        okx_bar_fmt = BAR_TO_CONA.get(tf_id, "15min")
+        df = fetch_market_candles(okx_swap_symbol, tf_id)
+        if df.empty or len(df) < 100:
+            return
+
+        current_close_price = df["close"].iloc[-1]
+        self.update_paper_trailing_and_exits(symbol_item, current_close_price)
+
+        # 2. QQE MOD 與指標訊號計算
+        p = get_params(tf_id, "long")  # 預設載入基本結構看盤
+        rsi_ma, trailing_band = calculate_full_qqe_mod(df, QQE_RSI, QQE_SF, QQE_FACTOR_P)
+        atr_series = calculate_average_true_range(df, 14)
+        adx_series = calculate_directional_movement_index(df, 14)
+
+        current_rsi_ma = rsi_ma.iloc[-1]
+        current_band = trailing_band.iloc[-1]
+        prev_rsi_ma = rsi_ma.iloc[-2]
+        prev_band = trailing_band.iloc[-2]
+        current_atr = atr_series.iloc[-1]
+        current_adx = adx_series.iloc[-1]
+
+        # 3. 趨勢強度與多空狀態過濾
+        trend_is_long = current_rsi_ma > current_band
+        trend_just_crossed_long = (prev_rsi_ma <= prev_band) and trend_is_long
+        trend_just_crossed_short = (prev_rsi_ma >= prev_band) and not trend_is_long
+
+        # 資金費率過濾
+        funding_rate = fetch_current_funding_rate(okx_swap_symbol)
+
+        # 4. 多頭訊號與進場規劃
+        if trend_just_crossed_long and current_adx >= ADX_THR:
+            if funding_rate > FUNDING_LONG_MAX:
+                return  # 多頭費率過高過濾
+
+            p = get_params(tf_id, "long")
+            lookback = int(p["structure_lookback"])
+            recent_low = df["low"].iloc[-lookback:].min()
+            calculated_sl = recent_low - (current_atr * p["sl_atr_buffer"])
+
+            # 確保止損百分比安全
+            risk_pct = (abs(current_close_price - calculated_sl) / current_close_price)
+            if risk_pct > MAX_SL:
+                calculated_sl = current_close_price * (1.0 - MAX_SL)
+                risk_pct = MAX_SL
+
+            tp1_target = current_close_price + (current_atr * p["tp1_mult"])
+            tp2_target = current_close_price + (current_atr * p["tp2_swing_mult"])
+
+            # 計算盈虧比 (Reward-to-Risk Ratio)
+            risk_delta = abs(current_close_price - calculated_sl) or 1e-9
+            rr1 = abs(tp1_target - current_close_price) / risk_delta
+            rr2 = abs(tp2_target - current_close_price) / risk_delta
+
+            # Coinalyze CVD 動能過濾
+            cvd_verified = True
+            cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
+            if cona_code:
+                end_ts = int(time.time() * 1000)
+                start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
+                cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
+                if not cvd_line.empty and len(cvd_line) >= 2:
+                    if cvd_line.iloc[-1] < cvd_line.iloc[-2]:
+                        cvd_verified = False  # 價漲量縮，屬於背離訊號
+
+            signal_payload = {
+                "side": "long", "entry": current_close_price, "sl": round(calculated_sl, 5),
+                "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
+                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": True,
+                "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
+            }
+
+            self.set_cooldown(symbol_item, tf_id)
+            callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
+
+            # 路由：若開啟自動下單則直通實盤管道
+            if AUTO_TRADE.get(tf_id) and cvd_verified:
+                execute_okx_trade_pipeline(okx_swap_symbol, "long", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"])
+            else:
+                # 寫入 PaperPosition 狀態紀錄機
+                pos = PaperPosition()
+                pos.open = True; pos.side = "long"; pos.entry = current_close_price
+                pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
+                pos.exit_mode = p["exit_mode"]
+                self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
+
+        # 5. 空頭訊號與進場規劃
+        elif trend_just_crossed_short and current_adx >= ADX_THR:
+            if funding_rate < FUNDING_SHORT_MIN:
+                return  # 空頭費率過度負值過濾
+
+            p = get_params(tf_id, "short")
+            lookback = int(p["structure_lookback"])
+            recent_high = df["high"].iloc[-lookback:].max()
+            calculated_sl = recent_high + (current_atr * p["sl_atr_buffer"])
+
+            risk_pct = (abs(calculated_sl - current_close_price) / current_close_price)
+            if risk_pct > MAX_SL:
+                calculated_sl = current_close_price * (1.0 + MAX_SL)
+                risk_pct = MAX_SL
+
+            tp1_target = current_close_price - (current_atr * p["tp1_mult"])
+            tp2_target = current_close_price - (current_atr * p["tp2_swing_mult"])
+
+            risk_delta = abs(calculated_sl - current_close_price) or 1e-9
+            rr1 = abs(current_close_price - tp1_target) / risk_delta
+            rr2 = abs(current_close_price - tp2_target) / risk_delta
+
+            cvd_verified = True
+            cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
+            if cona_code:
+                end_ts = int(time.time() * 1000)
+                start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
+                cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
+                if not cvd_line.empty and len(cvd_line) >= 2:
+                    if cvd_line.iloc[-1] > cvd_line.iloc[-2]:
+                        cvd_verified = False  # 價跌量增，空頭背離過濾
+
+            signal_payload = {
+                "side": "short", "entry": current_close_price, "sl": round(calculated_sl, 5),
+                "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
+                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": True,
+                "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
+            }
+
+            self.set_cooldown(symbol_item, tf_id)
+            callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
+
+            if AUTO_TRADE.get(tf_id) and cvd_verified:
+                execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"])
+            else:
+                pos = PaperPosition()
+                pos.open = True; pos.side = "short"; pos.entry = current_close_price
+                pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
+                pos.exit_mode = p["exit_mode"]
+                self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
+
+_bot_ref = SykesTradingBot()
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  FLASK WEBHOOK 交互控制中心 (DISCORD INTERACTIONS ENDPOINT)
+#  嵌入式 WEB 伺服器與 DISCORD INTERACTION API 控制台 (WEB CONTROL CENTER)
 # ══════════════════════════════════════════════════════════════════════════════
 app = Flask(__name__)
 
-@app.route("/")
-def system_health_status():
-    mode_string = "🔴 實盤運作中" if _LIVE_MODE else "📝 Paper 監控中"
-    return f"<h3>賽克斯全模組多時框交易核心 v4 運行指標正常</h3>工作模式: {mode_string}<br>監控池體積: {len(SYMBOLS)} 項目"
-
-@app.route("/discord-interactions", methods=["POST"])
-def handle_discord_interaction_webhook():
-    """ 實時處理來自 Discord 按鈕點擊事件的安全性 Ed25519 簽章覆核與下單分配 """
-    req_signature = request.headers.get("X-Signature-Ed25519", "")
-    req_timestamp = request.headers.get("X-Signature-Timestamp", "")
-    raw_payload_bytes = request.data
-
-    # 進行官方規格之 Ed25519 加密驗證
+def verify_discord_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
+    """ Ed25519 靜態無狀態簽章驗證演算法 """
+    if not DISCORD_PUBLIC_KEY or not signature or not timestamp:
+        return False
     try:
         from nacl.signing import VerifyKey
-        verification_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
-        verification_key.verify(req_timestamp.encode() + raw_payload_bytes, bytes.fromhex(req_signature))
+        verify_key = VerifyKey(bytes.fromhex(DISCORD_PUBLIC_KEY))
+        verify_key.verify(timestamp.encode() + raw_body, signature=bytes.fromhex(signature))
+        return True
     except:
-        return jsonify({"error": "Unauthorized cryptographic signature"}), 401
+        return False
 
-    interaction_json = request.get_json() or {}
+@app.route("/interactions", methods=["POST"])
+def discord_interactions_webhook():
+    """ 接收並解析來自 Discord 互動式 UI 按鈕的異步點擊授權回調 """
+    signature = request.headers.get("X-Signature-Ed25519", "")
+    timestamp = request.headers.get("X-Signature-Timestamp", "")
+    raw_body = request.data
 
-    # 處理 Discord 的 Ping 探針確認
-    if interaction_json.get("type") == 1:
-        return jsonify({"type": 1})
+    if not verify_discord_signature(raw_body, signature, timestamp):
+        return jsonify({"type": 1}), 200  # 即使密鑰未配對，依舊響應 Ping 以防止 Discord 斷開
 
-    # 處理 UI 元件點擊事件 (Component Type = 3)
-    if interaction_json.get("type") == 3:
-        clicked_custom_id = interaction_json.get("data", {}).get("custom_id", "")
+    interaction_data = request.json or {}
+    if interaction_data.get("type") == 1:
+        return jsonify({"type": 1}), 200
 
-        if clicked_custom_id.startswith("confirm_"):
-            target_key = clicked_custom_id[8:]
-            matched_order = pending_orders.pop(target_key, None)
+    if interaction_data.get("type") == 3:  # 代表按鈕交互組件觸發
+        custom_id = interaction_data.get("data", {}).get("custom_id", "")
+        message_id = interaction_data.get("message", {}).get("id", "")
 
-            if matched_order:
-                # 派發執行線程，防止 Webhook 逾時
-                Thread(
-                    target=execute_okx_trade_pipeline,
-                    args=(
-                        matched_order["symbol"], matched_order["direction"],
-                        matched_order.get("entry", 0.0), matched_order["sl"],
-                        matched_order["tp1"], matched_order["tp2"]
-                    ),
-                    daemon=True
-                ).start()
+        if custom_id.startswith("confirm_") or custom_id.startswith("skip_"):
+            action = "confirm" if custom_id.startswith("confirm_") else "skip"
+            cache_key = custom_id.replace("confirm_", "").replace("skip_", "")
 
-                if matched_order.get("msg_id"):
-                    Thread(target=dc_embed_edit, args=(matched_order["msg_id"], "✅ **已核准下單**: 指令已安全發送至 OKX 交易所交易鏈..."), daemon=True).start()
-                return jsonify({"type": 6})  # 響應不留痕跡
-            else:
-                return jsonify({"type": 4, "data": {"content": "⚠️ **操作失敗**: 該訊號快取已失效、過期或已被自動下單模組移出佇列。", "flags": 64}})
-
-        elif clicked_custom_id.startswith("skip_"):
-            target_key = clicked_custom_id[5:]
-            matched_order = pending_orders.pop(target_key, None)
-            if matched_order and matched_order.get("msg_id"):
-                Thread(target=dc_embed_edit, args=(matched_order["msg_id"], "❌ **手動棄單**: 指令已被交易員拒絕，放棄該進場點。"), daemon=True).start()
-            return jsonify({"type": 6})
-
-    return jsonify({"type": 1})
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  DISCORD 控制台 10 條遠端指令監聽輪詢 (COMMAND POLLER)
-# ══════════════════════════════════════════════════════════════════════════════
-def execute_console_command(command_text: str):
-    """ 精確處理 10 條核心控制指令之字串解析與底層大腦定向更替 """
-    global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT, _BOT_START_TS, _bot_ref, _PAUSED
-    command_text = command_text.strip()
-    tokens = command_text.split()
-    if not tokens:
-        return
-
-    primary_cmd = tokens[0].lower()
-
-    if primary_cmd == "!setrisk" and len(tokens) >= 2:
-        try:
-            val = float(tokens[1])
-            if 0.1 <= val <= 100.0:
-                with _STATE_LOCK:
-                    MARGIN_PCT = val
-                dc_log(f"⚙️ **風控變更成功**: 單筆交易配置資金比重已修訂為 **{val}%** 的可用可用餘額。")
-        except:
-            pass
-
-    elif primary_cmd == "!setmaxlev" and len(tokens) >= 2:
-        try:
-            val = int(float(tokens[1]))
-            if 1 <= val <= 125:
-                with _STATE_LOCK:
-                    MAX_LEVERAGE = val
-                dc_log(f"⚙️ **風控變更成功**: 最高安全槓桿上限已修正鎖定為 **{val}x**")
-        except:
-            pass
-
-    elif primary_cmd == "!pause":
-        with _STATE_LOCK:
-            _PAUSED = True
-        dc_log("⏸ **系統暫停通告**: 全時框商品掃描與下單路由已全面進入冬眠狀態。")
-
-    elif primary_cmd == "!resume":
-        with _STATE_LOCK:
-            _PAUSED = False
-        dc_log("▶️ **系統恢復通告**: 全自動雙軌策略監控核心已重新恢復上線運作。")
-
-    elif primary_cmd == "!setlive":
-        if OKX_API_KEY:
-            with _STATE_LOCK:
-                _LIVE_MODE = True
-            dc_log("🔴 **最高防禦警報**: 系統工作模式正式切換為【實盤交易所直連交易】，將動用真實 USDT 資產建立合約持倉！")
-        else:
-            dc_log("⚠️ **切換失敗**: 檢測不到本地變數環境中的 OKX 帳戶私鑰金鑰！")
-
-    elif primary_cmd == "!setpaper":
-        with _STATE_LOCK:
-            _LIVE_MODE = False
-        dc_log("📝 **工作模式提示**: 系統已切換為【Paper虛擬記帳監控模式】。")
-
-    elif primary_cmd == "!autostatus":
-        status_report = ["📊 **時框自動下單分佈狀況**\n────────────────"]
-        for k, v in AUTO_TRADE.items():
-            status_report.append(f"時框 `{k}`: {'🟢 全自動即時下單已啟用' if v else '⛔ 訊號僅通知(手動按鈕)'}")
-        dc_log("\n".join(status_report))
-
-    elif primary_cmd == "!auto" and len(tokens) >= 3:
-        target_tf_arg = tokens[1].upper()
-        switch_state = (tokens[2].lower() == "on")
-
-        if target_tf_arg == "ALL":
-            for k in AUTO_TRADE:
-                AUTO_TRADE[k] = switch_state
-            dc_log(f"⚙️ **系統整合開關**: 所有時框的自動下單屬性已被全體定向設定為 **{'開啟' if switch_state else '關閉'}**")
-        elif target_tf_arg in AUTO_TRADE:
-            AUTO_TRADE[target_tf_arg] = switch_state
-            dc_log(f"⚙️ **時框開關更替**: 指定時框 `{target_tf_arg}` 自動下單已變更為 **{'開啟' if switch_state else '關閉'}**")
-
-    elif primary_cmd == "!status":
-        elapsed_seconds = int(time.time() - _BOT_START_TS)
-        hours_alive = elapsed_seconds // 3600
-        minutes_alive = (elapsed_seconds % 3600) // 60
-
-        work_mode = "🔴 實盤真金模式" if _LIVE_MODE else "📝 Paper 虛擬模擬"
-
-        try:
-            ex = _initialize_ccxt_client()
-            bal_node = ex.fetch_balance()
-            free_u = float(bal_node.get("USDT", {}).get("free", 0.0))
-            total_u = float(bal_node.get("USDT", {}).get("total", 0.0))
-            wallet_string = f"總權益: `{total_u:.2f}` U | 可用保證金: `{free_u:.2f}` U"
-        except:
-            wallet_string = "交易所權限無連結或私鑰異常 (N/A)"
-
-        active_position_count = 0
-        if _bot_ref:
-            active_position_count = sum(1 for p in _bot_ref.active_positions_ledger.values() if p and p.open)
-
-        metrics_block = (
-            f"⚙️ **賽克斯生產級交易核心運行指標系統**\n"
-            f"────────────────\n"
-            f"大腦監控狀態: {'⏸ 系統冬眠暫停中' if _PAUSED else '▶️ 全時掃描正常運作中'}\n"
-            f"目前工作特徵: **{work_mode}**\n"
-            f"交易所資產帳本: {wallet_string}\n"
-            f"單倉保證金配比: `{MARGIN_PCT}%` | 槓桿安全閾值上限: `{MAX_LEVERAGE}x`\n"
-            f"當前內部追蹤持倉數: `{active_position_count}` 倉位\n"
-            f"累計連續運作時間: `{hours_alive}` 小時 `{minutes_alive}` 分鐘\n"
-            f"多維監控規模: `{len(SYMBOLS)}` 大核心主流幣種 | 4 大時框同時覆蓋"
-        )
-        dc_log(metrics_block)
-
-    elif primary_cmd == "!help":
-        help_menu = (
-            f"📖 **控制台核心指令操作手冊**\n"
-            f"────────────────\n"
-            f"`!status` - 調閱當前大腦所有核心參數與交易所可用資產報表\n"
-            f"`!setlive` / `!setpaper` - 無縫切換實盤直連下單或虛擬記帳監控\n"
-            f"`!auto all on/off` - 總控制：全局開啟或關閉 4 大時框之全自動交易\n"
-            f"`!auto [15m/30m/1H/4H] on/off` - 單獨隔離控制指定時框是否啟用自動實盤路由\n"
-            f"`!autostatus` - 查看 4 大時框自動下單開關的詳細隔離分佈狀態\n"
-            f"`!setrisk [數字]` - 調整每筆交易佔用交易所可用資產的百分比比重\n"
-            f"`!setmaxlev [數字]` - 強制鎖定交易所最大安全槓桿允許倍數\n"
-            f"`!pause` / `!resume` - 緊急暫停或重新激活交易核心掃描訊號"
-        )
-        dc_log(help_menu)
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  🛠️ 核心修正：將遠端訊息抓取與 10 條遠端指令完美整合成單一 Try-Except 區塊 (Non-Repainting)
-# ══════════════════════════════════════════════════════════════════════════════
-def run_discord_command_poller_loop():
-    """ 獨立背景線程：每 3 秒長輪詢 Discord 頻道文字，實時同步控制台指令 (完美修正語法縮排版) """
-    global _dc_last_msg_id
-
-    # 初始化：先抓一次最新訊息，作為起點，避免重啟時重複執行舊指令
-    try:
-        init_res = requests.get(
-            f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", 
-            headers=_dc_headers(), 
-            params={"limit": 1}, 
-            timeout=15
-        ).json()
-        if isinstance(init_res, list) and init_res:
-            _dc_last_msg_id = init_res[0]["id"]
-    except Exception as e:
-        print(f"[-] 初始化 Discord Poller 失敗: {e}")
-
-    while True:
-        try:
-            # 1. 抓取啟動時最新訊息，避免重複處理舊指令
-            r = requests.get(
-                f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
-                headers=_dc_headers(),
-                params={"limit": 10},
-                timeout=15
-            )
-            msgs = r.json()
-            if isinstance(msgs, list) and msgs:
-                msg = msgs[0]
-
-                # 💡 鐵律 1：如果是機器人自己發的訊息，直接記為已讀，絕對不要執行！
-                author = msg.get("author", {})
-                if author.get("bot") is True or author.get("username") == "RobotAhaha":
-                    _dc_last_msg_id = msg["id"]
+            if cache_key in pending_orders:
+                order = pending_orders[cache_key]
+                if action == "confirm":
+                    # 異步直通實盤下單模組
+                    Thread(target=execute_okx_trade_pipeline, args=(
+                        order["symbol"], order["direction"], order["entry"],
+                        order["sl"], order["tp1"], order["tp2"]
+                    )).start()
+                    new_status_text = f"✅ **控制中樞已接獲授權**: 已成功向 OKX 發送該筆實盤精密風控委託鏈。"
                 else:
-                    # 💡 鐵律 2：如果是真人的訊息，才更新最高快取 ID
-                    _dc_last_msg_id = msg["id"]
-        except Exception as e:
-            print(f"[-] 核心拉取異常，已自動略過進入 while True 區間: {e}")
-            pass
+                    new_status_text = f"❌ **訊號已手動拋棄**: 該項目已被交易員放棄，不執行任何實盤劃轉。"
 
-        # 2. 進入實際的 while True 輪詢區間
-        while True:
-            try:
-                r = requests.get(
-                    f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages",
-                    headers=_dc_headers(),
-                    params={"after": _dc_last_msg_id, "limit": 10},
-                    timeout=15
-                )
-                msgs = r.json()
-                if isinstance(msgs, list) and msgs:
-                    # 依時間順序由舊到新排序處理
-                    for msg in sorted(msgs, key=lambda m: m.get("id", "0")):
-                        _dc_last_msg_id = msg["id"]
+                # 即時編輯卡片，移除按鈕避免重複觸發
+                Thread(target=dc_embed_edit, args=(message_id, new_status_text)).start()
+                pending_orders.pop(cache_key, None)
 
-                        # 🛡️ 終極核心防線：只要發現發言者是 Bot，立刻忽略、直接跳過！
-                        author = msg.get("author", {})
-                        if author.get("bot") is True or author.get("username") == "RobotAhaha":
-                            continue  # 🏃 🧱 跳過此訊息，繼續看下一條
+                return jsonify({
+                    "type": 4,
+                    "data": {"content": "核心中樞處理成功，正在向交易所進行線程同步...", "flags": 64}
+                }), 200
 
-                        # 解析文字指令
-                        text = msg.get("content", "")
-                        if text.startswith("!"):
-                            execute_console_command(text)
-            except Exception as loop_err:
-                print(f"[-] Poller 內部輪詢發生輕微異常，自動跳過: {loop_err}")
-                pass
-            sleep(3)
+    return jsonify({"type": 4, "data": {"content": "未知的核心控制碼", "flags": 64}}), 200
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  精密排程與主核心輪詢控制 (SCHEDULER LOOP)
+#  時間同步與無漂移收盤矩陣輪詢機制 (SCHEDULER & MAIN LOOP)
 # ══════════════════════════════════════════════════════════════════════════════
 def synchronise_and_wait_next_candle() -> List[str]:
-    """ 精密排程對齊模組：強制讓迴圈在 K 棒準確收盤後的第 5 秒整觸發，防秒差干擾 """
-    utc_timestamp_now = datetime.now(timezone.utc).timestamp()
-
-    # 計算各時框下一次收盤的精準秒數
-    next_close_targets = {
-        tf: (int(utc_timestamp_now / BAR_SECONDS[tf]) + 1) * BAR_SECONDS[tf] + 5
-        for tf in TIMEFRAMES
-    }
-
-    earliest_trigger_timestamp = min(next_close_targets.values())
-
+    """ 無漂移收盤對齊引擎：等待下一個整點/15分收盤 K 棒，返回觸發的時框 """
     while True:
-        remaining_wait_seconds = earliest_trigger_timestamp - datetime.now(timezone.utc).timestamp() - 0.5
-        if remaining_wait_seconds <= 0.0:
-            break
-        sleep(min(remaining_wait_seconds, 30.0))
+        now = datetime.now()
+        current_minute = now.minute
+        current_second = now.second
 
-    # 確認本次觸發究竟對齊了哪些時框
-    double_check_ts = datetime.now(timezone.utc).timestamp()
-    triggered_timeframes = []
-    for tf in TIMEFRAMES:
-        expected_boundary = earliest_trigger_timestamp - 5
-        actual_boundary = int(double_check_ts / BAR_SECONDS[tf]) * BAR_SECONDS[tf]
-        if abs(actual_boundary - expected_boundary) < 15:
-            triggered_timeframes.append(tf)
+        active_timeframes = []
+        # 每 15 分鐘收盤觸發檢測
+        if current_minute % 15 == 0 and current_second <= 3:
+            active_timeframes.append("15m")
+            if current_minute % 30 == 0:
+                active_timeframes.append("30m")
+            if current_minute == 0:
+                active_timeframes.append("1H")
+                if now.hour % 4 == 0:
+                    active_timeframes.append("4H")
 
-    return triggered_timeframes if triggered_timeframes else [TIMEFRAMES[0]]
+        if active_timeframes:
+            sleep(5)  # 延遲 5 秒，確保 OKX 伺服器端已經完全收盤並封裝好 K 棒數據
+            return active_timeframes
 
-def run_strategy_scanning_loop():
-    """ 交易核心主線程：執行 40+ 幣種與多時框的矩陣全天候輪詢 """
-    global _bot_ref, _PAUSED
-    _bot_ref = SykesProductionCore()
+        sleep(1)
 
+def main_polling_loop():
+    """ 交易中樞核心守護進程主迴圈 """
+    global _PAUSED, _bot_ref
     start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
     dc_log(start_alert)
     tg_log(start_alert)
@@ -1332,16 +1076,28 @@ def run_embedded_web_server():
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  系統總入口點 (APPLICATION ENTRY POINT)
+#  交易核心主入口引導程序 (ENTRYPOINT)
 # ══════════════════════════════════════════════════════════════════════════════
-_bot_ref: Optional[SykesProductionCore] = None
-
 if __name__ == "__main__":
-    # 1. 啟動 Web 伺服器線程處理 Discord Webhook
-    Thread(target=run_embedded_web_server, daemon=True).start()
+    parser = argparse.ArgumentParser(description="Sykes Multi-Timeframe Trading System Engine")
+    parser.add_argument("--live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
+    parser.add_argument("--demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
+    args = parser.parse_args()
 
-    # 2. 啟動遠端控制台指令輪詢監聽線程
-    Thread(target=run_discord_command_poller_loop, daemon=True).start()
+    if args.live:
+        _LIVE_MODE = True
+    if args.demo:
+        OKX_DEMO = True
 
-    # 3. 推進主線程進入無盡交易排程核心
-    run_strategy_scanning_loop()
+    print("=" * 70)
+    print(f" 賽克斯全功能智慧交易中樞核心引擎系統啟動中... ")
+    print(f" 實盤模式狀態: {'🟢 LIVE 實盤委託對接中' if _LIVE_MODE else '🟡 PAPER 模擬記帳觀察中'}")
+    print(f" OKX 環境配置: {'⚠️ 模擬盤 (Sandbox)' if OKX_DEMO else '⚡ 正式實盤節點'}")
+    print("=" * 70)
+
+    # 1. 異步啟動嵌入式控制台 Web 控制中樞
+    web_worker_thread = Thread(target=run_embedded_web_server, daemon=True)
+    web_worker_thread.start()
+
+    # 2. 直通主執行緒進入無漂移排程輪詢主迴圈
+    main_polling_loop()
