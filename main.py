@@ -1127,10 +1127,16 @@ def poll_dc_commands():
                         content = msg.get("content", "").strip()
                         author = msg.get("author", {})
                         is_bot = author.get("bot", False)
+                        if is_bot:
+                            if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
+                                _dc_last_msg_id = msg_id
+                            continue
+                        if not content.startswith("!"):
+                            if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
+                                _dc_last_msg_id = msg_id
+                            continue
                         if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
                             _dc_last_msg_id = msg_id
-                        if is_bot or not content.startswith("!"):
-                            continue
                         cmd = content.lower().split()[0]
                         uptime_s = int(time.time() - _BOT_START_TS)
                         uptime_h = uptime_s // 3600
