@@ -215,7 +215,7 @@ BEAR_MIN_BARS = 20
 
 # 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
 
-_dc_last_msg_id = None
+_dc_last_msg_id = "0"
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -692,7 +692,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             amount=final_order_amount,
             params={"posSide": trade_side, "tdMode": "isolated"}
         )
-        executed_average_price = entry_order.get("average") or entry_order.get("price") or current_market_price
+        executed_average_price = entry_order.get("average", current_market_price)
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
 
         try:
@@ -701,37 +701,16 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 type="market",
                 side=exit_action,
                 amount=final_order_amount,
+                price=stop_loss,
                 params={
-                    "tdMode": "isolated",
+                    "stopLoss": {"triggerPrice": str(stop_loss), "orderPrice": "-1"},
                     "reduceOnly": True,
-                    "posSide": trade_side,
-                    "tpTriggerPx": None,
-                    "slTriggerPx": str(stop_loss),
-                    "slOrdPx": "-1",
-                    "attachAlgoOrds": [{"attachAlgoClOrdId": "", "slTriggerPx": str(stop_loss), "slOrdPx": "-1", "slTriggerPxType": "last"}]
+                    "posSide": trade_side
                 }
             )
             execution_report.append(f"🛑 條件止損委託已錨定: `{stop_loss}`")
         except Exception as sle:
-            # fallback: place stop order separately
-            try:
-                ex.create_order(
-                    symbol=symbol_id,
-                    type="market",
-                    side=exit_action,
-                    amount=final_order_amount,
-                    params={
-                        "ordType": "conditional",
-                        "slTriggerPx": str(stop_loss),
-                        "slOrdPx": "-1",
-                        "reduceOnly": True,
-                        "posSide": trade_side,
-                        "tdMode": "isolated"
-                    }
-                )
-                execution_report.append(f"🛑 條件止損委託已錨定(備援): `{stop_loss}`")
-            except Exception as sle2:
-                execution_report.append(f"⚠️ 止損單掛載失敗: {sle2}")
+            execution_report.append(f"⚠️ 止損單掛載失敗: {sle}")
 
         try:
             ex.create_order(
@@ -740,7 +719,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 side=exit_action,
                 amount=split_half_amount,
                 price=tp1,
-                params={"posSide": trade_side, "reduceOnly": True}
+                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
             )
             execution_report.append(f"🌓 第一目標限價單掛置 (50%): `{tp1}`")
         except Exception as tp1e:
@@ -749,13 +728,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         remainder_amount = final_order_amount - split_half_amount
         if amount_precision == 0:
             remainder_amount = int(remainder_amount)
-            if remainder_amount < 1:
-                remainder_amount = 1
         else:
             remainder_amount = round(remainder_amount, amount_precision)
-            min_amount = round(1.0 / contract_size, amount_precision) if contract_size > 0 else 0.01
-            if remainder_amount < min_amount:
-                remainder_amount = min_amount
 
         try:
             ex.create_order(
@@ -764,7 +738,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 side=exit_action,
                 amount=remainder_amount,
                 price=tp2,
-                params={"posSide": trade_side, "reduceOnly": True}
+                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
             )
             execution_report.append(f"🌕 第二終點目標限價單掛置 (50%): `{tp2}`")
         except Exception as tp2e:
@@ -1113,9 +1087,17 @@ def poll_dc_commands():
         return
     headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
     print("[DC] 指令輪詢已啟動。")
+    # 啟動時先抓最新訊息ID，避免重複處理舊訊息
+    try:
+        init_resp = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=headers, params={"limit": 1}, timeout=10)
+        if init_resp.status_code == 200 and init_resp.json():
+            _dc_last_msg_id = init_resp.json()[0].get("id")
+            print(f"[DC] 初始化訊息ID: {_dc_last_msg_id}")
+    except:
+        pass
     while True:
         try:
-            params = {"limit": 20}
+            params = {"limit": 5}
             if _dc_last_msg_id:
                 params["after"] = _dc_last_msg_id
             resp = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=headers, params=params, timeout=10)
@@ -1127,16 +1109,10 @@ def poll_dc_commands():
                         content = msg.get("content", "").strip()
                         author = msg.get("author", {})
                         is_bot = author.get("bot", False)
-                        if is_bot:
-                            if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
-                                _dc_last_msg_id = msg_id
-                            continue
-                        if not content.startswith("!"):
-                            if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
-                                _dc_last_msg_id = msg_id
-                            continue
                         if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
                             _dc_last_msg_id = msg_id
+                        if is_bot or not content.startswith("!"):
+                            continue
                         cmd = content.lower().split()[0]
                         uptime_s = int(time.time() - _BOT_START_TS)
                         uptime_h = uptime_s // 3600
@@ -1165,7 +1141,6 @@ def poll_dc_commands():
                         elif cmd == "!setlive":
                             _LIVE_MODE = True
                             dc_log("🟢 **已切換為實盤模式**，自動下單鏈已啟用。")
-                        elif cmd == "!setpaper":
                             _LIVE_MODE = False
                             dc_log("🟡 **已切換為模擬模式**，僅觀察訊號不執行下單。")
                         elif cmd == "!pause":
