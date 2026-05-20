@@ -38,7 +38,7 @@ else:
 
 # 自動檢查並安裝缺少的第三方套件
 
-REQUIRED_PACKAGES = ["requests", "pandas", "numpy", "ccxt", "flask", "pynacl"]
+REQUIRED_PACKAGES = ["requests", "pandas", "numpy", "ccxt", "flask"]
 for pkg in REQUIRED_PACKAGES:
     try:
         __import__(pkg)
