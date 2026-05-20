@@ -695,6 +695,27 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 每倉保證金 = 帳戶可用餘額 ÷ POSITION_SLOTS
         allocated_margin = available_usdt / POSITION_SLOTS
 
+        # ── 下單前安全三項檢查 ──
+        positions_raw = ex.fetch_positions()
+        open_positions_count = len([p for p in positions_raw if float(p.get("contracts", 0) or 0) > 0])
+
+        # 條件 3：已開倉數量 < POSITION_SLOTS
+        if open_positions_count >= POSITION_SLOTS:
+            dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
+            return
+
+        # 條件 1：可用餘額 >= 每倉保證金
+        if available_usdt < allocated_margin:
+            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {allocated_margin:.2f} USDT")
+            return
+
+        # 條件 2：可用餘額 - 每倉保證金 >= 已開倉數量 × 每倉保證金 × 0.1
+        buffer_required = open_positions_count * allocated_margin * 0.1
+        if (available_usdt - allocated_margin) < buffer_required:
+            needed = allocated_margin + buffer_required
+            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {needed:.2f} USDT")
+            return
+
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
 
