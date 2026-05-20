@@ -780,61 +780,57 @@ class SykesTradingBot:
         dc_log(f"🚨 **風控核心硬熔斷發動** 🚨")
 
     def update_paper_trailing_and_exits(self, symbol_item: str, current_price: float, current_tf: str = None):
-        """ Paper 模式下動態追蹤止損與模擬止盈更新 """
-    for tf in TIMEFRAMES:
-        pos_key = f"{symbol_item}_{tf}"
-        if pos_key not in self.paper_positions or not self.paper_positions[pos_key].open:
-            continue
-        pos = self.paper_positions[pos_key]
+        for tf in TIMEFRAMES:
+            pos_key = f"{symbol_item}_{tf}"
+            if pos_key not in self.paper_positions or not self.paper_positions[pos_key].open:
+                continue
+            pos = self.paper_positions[pos_key]
 
-        # 多頭部位離場檢測
-        if pos.side == "long":
-            if current_price <= pos.sl:
-                dc_log(f"📉 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
-                pos.open = False
-                if not pos.tp1_hit:
-                    self.consec_losses += 1
-                    if self.consec_losses >= MAX_CONSEC_LOSS:
-                        self.trigger_circuit_break()
-                else:
+            if pos.side == "long":
+                if current_price <= pos.sl:
+                    dc_log(f"📉 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
+                    pos.open = False
+                    if not pos.tp1_hit:
+                        self.consec_losses += 1
+                        if self.consec_losses >= MAX_CONSEC_LOSS:
+                            self.trigger_circuit_break()
+                    else:
+                        self.consec_losses = 0
+                elif current_price >= pos.tp1 and not pos.tp1_hit:
+                    dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標TP1 `{pos.tp1}`，推動保本止損。")
+                    pos.tp1_hit = True
+                    pos.sl = pos.entry
+                elif current_price >= pos.tp2:
+                    dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 達標TP2 `{pos.tp2}`！")
+                    pos.open = False
                     self.consec_losses = 0
-            elif current_price >= pos.tp1 and not pos.tp1_hit:
-                dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標第一目標價 TP1 `{pos.tp1}`，推動保本止損至進場價。")
-                pos.tp1_hit = True
-                pos.sl = pos.entry
-            elif current_price >= pos.tp2:
-                dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 全滿達標終點 TP2 `{pos.tp2}`！")
-                pos.open = False
-                self.consec_losses = 0
-            elif pos.exit_mode == "trailing" and pos.tp1_hit:
-                # 追蹤止損：隨價格上漲動態調高止損
-                new_sl = current_price * 0.98
-                if new_sl > pos.sl:
-                    pos.sl = new_sl
+                elif pos.exit_mode == "trailing" and pos.tp1_hit:
+                    new_sl = current_price * 0.98
+                    if new_sl > pos.sl:
+                        pos.sl = new_sl
 
-        # 空頭部位離場檢測
-        elif pos.side == "short":
-            if current_price >= pos.sl:
-                dc_log(f"📈 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
-                pos.open = False
-                if not pos.tp1_hit:
-                    self.consec_losses += 1
-                    if self.consec_losses >= MAX_CONSEC_LOSS:
-                        self.trigger_circuit_break()
-                else:
+            elif pos.side == "short":
+                if current_price >= pos.sl:
+                    dc_log(f"📈 [紙交易離場] {symbol_item} ({tf}) 觸及止損價 `{pos.sl}`。")
+                    pos.open = False
+                    if not pos.tp1_hit:
+                        self.consec_losses += 1
+                        if self.consec_losses >= MAX_CONSEC_LOSS:
+                            self.trigger_circuit_break()
+                    else:
+                        self.consec_losses = 0
+                elif current_price <= pos.tp1 and not pos.tp1_hit:
+                    dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標TP1 `{pos.tp1}`，推動保本止損。")
+                    pos.tp1_hit = True
+                    pos.sl = pos.entry
+                elif current_price <= pos.tp2:
+                    dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 達標TP2 `{pos.tp2}`！")
+                    pos.open = False
                     self.consec_losses = 0
-            elif current_price <= pos.tp1 and not pos.tp1_hit:
-                dc_log(f"🎯 [紙交易獲利] {symbol_item} ({tf}) 達標第一目標價 TP1 `{pos.tp1}`，推動保本止損至進場價。")
-                pos.tp1_hit = True
-                pos.sl = pos.entry
-            elif current_price <= pos.tp2:
-                dc_log(f"🌕 [紙交易獲利] {symbol_item} ({tf}) 全滿達標終點 TP2 `{pos.tp2}`！")
-                pos.open = False
-                self.consec_losses = 0
-            elif pos.exit_mode == "trailing" and pos.tp1_hit:
-                new_sl = current_price * 1.02
-                if new_sl < pos.sl:
-                    pos.sl = new_sl
+                elif pos.exit_mode == "trailing" and pos.tp1_hit:
+                    new_sl = current_price * 1.02
+                    if new_sl < pos.sl:
+                        pos.sl = new_sl
 
     def scan_and_process_market(self, symbol_item: str, tf_id: str):
         """ 全時框商品訊號矩陣掃描引擎核心 """
