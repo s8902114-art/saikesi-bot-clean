@@ -215,7 +215,7 @@ BEAR_MIN_BARS = 20
 
 # 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
 
-_dc_last_msg_id = "0"
+_dc_last_msg_id = None
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1159,6 +1159,7 @@ def poll_dc_commands():
                         elif cmd == "!setlive":
                             _LIVE_MODE = True
                             dc_log("🟢 **已切換為實盤模式**，自動下單鏈已啟用。")
+                        elif cmd == "!setpaper":
                             _LIVE_MODE = False
                             dc_log("🟡 **已切換為模擬模式**，僅觀察訊號不執行下單。")
                         elif cmd == "!pause":
