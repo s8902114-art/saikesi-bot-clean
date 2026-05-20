@@ -4,5 +4,4 @@ ccxt
 flask
 watchdog
 PyNaCl
-PyNaCl
-PyNaCl
+numpy
