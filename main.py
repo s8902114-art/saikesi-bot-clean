@@ -2,7 +2,7 @@
 
 # -*- coding: utf-8 -*-
 
-“””
+"""
 賽克斯多時框全功能生產級交易系統 v4 (Production-Grade Multi-Timeframe System)
 支援 40+ 幣種監控 | 15m/30m/1H/4H 四時框輪詢 | QQE MOD 雙軌交叉策略
 CVD 累積成交量背離過濾 | OKX 實盤與模擬盤自動劃轉下單 | Discord 雙向按鈕控制台
