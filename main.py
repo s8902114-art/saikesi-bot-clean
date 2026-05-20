@@ -86,6 +86,7 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 MARGIN_PCT = 10.0          # 單筆交易佔用總可用資金之百分比 (10.0 = 10%)
+POSITION_SLOTS = 10        # 倉位格數，帳戶可用餘額均分格數
 SIGNAL_COOLDOWN = 1800     # 同一商品商品相同時框的訊號冷卻時間 (秒)
 MAX_CONSEC_LOSS = 3       # 最大連續虧損次數限制，達標後觸發熔斷
 PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
@@ -367,6 +368,8 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     coin_name = symbol.split("/")[0]
     unique_callback_key = f"sykes_{coin_name.lower()}_{tf}_{sig['side']}_{int(time.time())}"
 
+    exit_mode_label = "固定限價" if sig.get("exit_mode") == "fixed" else "追蹤止損"
+
     # 寫入待核准交易訂單池快取
     pending_orders[unique_callback_key] = {
     "symbol": OKX_SWAP.get(symbol, symbol),
@@ -374,7 +377,8 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     "entry": sig["entry"],
     "sl": sig["sl"],
     "tp1": sig["tp1"],
-    "tp2": sig["tp2"]
+    "tp2": sig["tp2"],
+    "exit_mode": sig.get("exit_mode", "fixed")
     }
 
     embed_payload = {
@@ -384,7 +388,7 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     "fields": [
         {"name": "觸發時間 (TST)", "value": tw_time.strftime("%Y/%m/%d %H:%M:%S"), "inline": True},
         {"name": "ATR 當前波動", "value": f"`{sig['atr']}`", "inline": True},
-        {"name": "離場機制", "value": f"`{sig['exit_mode']}`", "inline": True},
+        {"name": "離場機制", "value": f"`{exit_mode_label}`", "inline": True},
         {"name": "規劃進場價", "value": f"**{sig['entry']}** USDT", "inline": True},
         {"name": "安全結構止損 🛑", "value": f"`{sig['sl']}` ({sig['risk_pct']:.2f}%)", "inline": True},
         {"name": "保證金防禦", "value": "TP1達標後自動推成本價", "inline": True},
@@ -628,10 +632,52 @@ def _initialize_ccxt_client() -> ccxt.okx:
         client.set_sandbox_mode(True)
     return client
 
+def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str, pos_side: str) -> dict:
+    """ 使用 OKX REST API 掛條件式止損 Algo 單 (slTriggerPx) """
+    now_utc = datetime.now(timezone.utc)
+    ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
+    body = json.dumps({
+        "instId": inst_id, "tdMode": "isolated", "side": side,
+        "ordType": "conditional", "sz": amount, "posSide": pos_side,
+        "slTriggerPx": sl_trigger_px, "slOrdPx": "-1"
+    })
+    path = "/api/v5/trade/order-algo"
+    sig = _okx_generate_signature(ts, "POST", path, body)
+    headers = {
+        "OK-ACCESS-KEY": OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+    if OKX_DEMO:
+        headers["x-simulated-trading"] = "1"
+    r = requests.post(f"{OKX_BASE}{path}", headers=headers, data=body, timeout=10)
+    return r.json()
+
+def _place_okx_algo_trailing(inst_id: str, side: str, amount: str, callback_ratio: str, pos_side: str) -> dict:
+    """ 使用 OKX REST API 掛移動止損 (Trailing Stop) Algo 單 """
+    now_utc = datetime.now(timezone.utc)
+    ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
+    body = json.dumps({
+        "instId": inst_id, "tdMode": "isolated", "side": side,
+        "ordType": "move_order_stop", "sz": amount, "posSide": pos_side,
+        "callbackRatio": callback_ratio, "activePx": ""
+    })
+    path = "/api/v5/trade/order-algo"
+    sig = _okx_generate_signature(ts, "POST", path, body)
+    headers = {
+        "OK-ACCESS-KEY": OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+    if OKX_DEMO:
+        headers["x-simulated-trading"] = "1"
+    r = requests.post(f"{OKX_BASE}{path}", headers=headers, data=body, timeout=10)
+    return r.json()
+
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
-                              stop_loss: float, tp1: float, tp2: float) -> None:
+                              stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed") -> None:
     """ 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 """
-    global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT
+    global _LIVE_MODE, MAX_LEVERAGE, POSITION_SLOTS
     if not _LIVE_MODE:
         dc_log(f"📝 [紙交易通知] 商品 {symbol_id} 方向 {trade_side} 處於 Paper 模擬模式，跳過交易。")
         return
@@ -646,7 +692,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ **實盤交易中斷**: 可用保證金不足 ({available_usdt:.2f} USDT)")
             return
 
-        allocated_margin = available_usdt * (MARGIN_PCT / 100.0)
+        # 每倉保證金 = 帳戶可用餘額 ÷ POSITION_SLOTS
+        allocated_margin = available_usdt / POSITION_SLOTS
+
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
 
@@ -655,6 +703,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log("⚠️ **風控異常**: 結構止損間距過小，自動拒絕下單以防爆倉。")
             return
 
+        # 槓桿 = min(100 ÷ 止損距離%, MAX_LEVERAGE)
         calculated_leverage = max(1, min(int(100.0 / sl_distance_percentage), MAX_LEVERAGE))
 
         market_structure = ex.market(symbol_id)
@@ -679,11 +728,12 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         is_buy = (trade_side == "long")
         entry_action = "buy" if is_buy else "sell"
         exit_action = "sell" if is_buy else "buy"
+        inst_id = OKX_SWAP.get(symbol_id, symbol_id)
 
         execution_report = [
             f"🚀 **賽克斯實盤下單鏈成功發動**",
             f"商品代號: `{symbol_id}` | 交易方向: `{'做多 LONG' if is_buy else '做空 SHORT'}`",
-            f"配置槓桿: `{calculated_leverage}x` | 下單張數: `{final_order_amount}`"
+            f"配置槓桿: `{calculated_leverage}x` | 下單張數: `{final_order_amount}` | 每倉保證金: `{allocated_margin:.2f} USDT`"
         ]
 
         entry_order = ex.create_market_order(
@@ -695,33 +745,25 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         executed_average_price = entry_order.get("average", current_market_price)
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
 
+        # 止損：OKX algo slTriggerPx 條件單
         try:
-            ex.create_order(
-                symbol=symbol_id,
-                type="market",
-                side=exit_action,
-                amount=final_order_amount,
-                price=stop_loss,
-                params={
-                    "stopLoss": {"triggerPrice": str(stop_loss), "orderPrice": "-1"},
-                    "reduceOnly": True,
-                    "posSide": trade_side
-                }
+            _place_okx_algo_sl(
+                inst_id=inst_id, side=exit_action,
+                amount=str(final_order_amount), sl_trigger_px=str(stop_loss),
+                pos_side=trade_side
             )
-            execution_report.append(f"🛑 條件止損委託已錨定: `{stop_loss}`")
+            execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}`")
         except Exception as sle:
             execution_report.append(f"⚠️ 止損單掛載失敗: {sle}")
 
+        # TP1：固定限價（50%）
         try:
             ex.create_order(
-                symbol=symbol_id,
-                type="limit",
-                side=exit_action,
-                amount=split_half_amount,
-                price=tp1,
+                symbol=symbol_id, type="limit", side=exit_action,
+                amount=split_half_amount, price=tp1,
                 params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
             )
-            execution_report.append(f"🌓 第一目標限價單掛置 (50%): `{tp1}`")
+            execution_report.append(f"🌓 TP1 固定限價單掛置 (50%): `{tp1}`")
         except Exception as tp1e:
             execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
 
@@ -731,18 +773,27 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         else:
             remainder_amount = round(remainder_amount, amount_precision)
 
-        try:
-            ex.create_order(
-                symbol=symbol_id,
-                type="limit",
-                side=exit_action,
-                amount=remainder_amount,
-                price=tp2,
-                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
-            )
-            execution_report.append(f"🌕 第二終點目標限價單掛置 (50%): `{tp2}`")
-        except Exception as tp2e:
-            execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+        # TP2：exit_mode=fixed → 限價；exit_mode=trailing → 追蹤止損 Algo，不掛限價
+        if exit_mode == "trailing":
+            try:
+                _place_okx_algo_trailing(
+                    inst_id=inst_id, side=exit_action,
+                    amount=str(remainder_amount), callback_ratio="0.02",
+                    pos_side=trade_side
+                )
+                execution_report.append(f"🌕 TP2 追蹤止損 Algo 已掛置 (50%) 回撤率: 2%")
+            except Exception as tp2e:
+                execution_report.append(f"⚠️ TP2 追蹤止損委託失敗: {tp2e}")
+        else:
+            try:
+                ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=remainder_amount, price=tp2,
+                    params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                )
+                execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
+            except Exception as tp2e:
+                execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
         dc_log("\n".join(execution_report))
     except Exception as general_error:
@@ -920,7 +971,7 @@ class SykesTradingBot:
 
             # 路由：若開啟自動下單則直通實盤管道
             if AUTO_TRADE.get(tf_id) and cvd_verified:
-                execute_okx_trade_pipeline(okx_swap_symbol, "long", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"])
+                execute_okx_trade_pipeline(okx_swap_symbol, "long", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
             else:
                 # 寫入 PaperPosition 狀態紀錄機
                 pos = PaperPosition()
@@ -972,7 +1023,7 @@ class SykesTradingBot:
         callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
 
         if AUTO_TRADE.get(tf_id) and cvd_verified:
-            execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"])
+            execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
         else:
             pos = PaperPosition()
             pos.open = True; pos.side = "short"; pos.entry = current_close_price
@@ -1030,7 +1081,8 @@ def discord_interactions_webhook():
                 # 異步直通實盤下單模組
                 Thread(target=execute_okx_trade_pipeline, args=(
                     order["symbol"], order["direction"], order["entry"],
-                    order["sl"], order["tp1"], order["tp2"]
+                    order["sl"], order["tp1"], order["tp2"],
+                    order.get("exit_mode", "fixed")
                 )).start()
                 new_status_text = f"✅ **控制中樞已接獲授權**: 已成功向 OKX 發送該筆實盤精密風控委託鏈。"
             else:
@@ -1081,7 +1133,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
         return
@@ -1120,12 +1172,23 @@ def poll_dc_commands():
                         if cmd == "!status":
                             mode = "🟢 LIVE 實盤" if _LIVE_MODE else "🟡 PAPER 模擬"
                             paused = "⏸️ 已暫停" if _PAUSED else "▶️ 全時掃描正常運作中"
-                            positions = 0
+                            per_slot_margin_str = "N/A (模擬模式)"
+                            if _LIVE_MODE:
+                                try:
+                                    ex_tmp = _initialize_ccxt_client()
+                                    bal = ex_tmp.fetch_balance()
+                                    avail = float(bal.get("USDT", {}).get("free", 0.0))
+                                    per_slot = avail / POSITION_SLOTS
+                                    per_slot_margin_str = f"{per_slot:.2f} USDT (餘額 {avail:.2f} ÷ {POSITION_SLOTS} 倉)"
+                                except:
+                                    per_slot_margin_str = "查詢失敗"
                             status_msg = (
                                 f"⚙️ **賽克斯生產級交易核心運行指標系統**\n"
                                 f"大腦監控狀態: {paused}\n"
                                 f"目前工作特徵: **{mode}**\n"
-                                f"單倉保證金配比: `{MARGIN_PCT}%` | 槓桿: `{MAX_LEVERAGE}x`\n"
+                                f"倉位格數: `{POSITION_SLOTS}` 倉 | 最高槓桿上限: `{MAX_LEVERAGE}x`\n"
+                                f"每倉保證金: `{per_slot_margin_str}`\n"
+                                f"槓桿計算公式: `min(100 ÷ 止損距離%, {MAX_LEVERAGE}x)`\n"
                                 f"運作時間: `{uptime_h}` 小時 `{uptime_m}` 分鐘"
                             )
                             dc_log(status_msg)
@@ -1136,7 +1199,8 @@ def poll_dc_commands():
                                 "`!setlive` - 切換為實盤模式\n"
                                 "`!setpaper` - 切換為模擬模式\n"
                                 "`!pause` - 暫停自動交易\n"
-                                "`!resume` - 恢復自動交易"
+                                "`!resume` - 恢復自動交易\n"
+                                "`!setslots [數字]` - 設定倉位格數（例如 `!setslots 10`）"
                             )
                         elif cmd == "!setlive":
                             _LIVE_MODE = True
@@ -1149,6 +1213,13 @@ def poll_dc_commands():
                         elif cmd == "!resume":
                             _PAUSED = False
                             dc_log("▶️ **系統已恢復**，重新開始掃描。")
+                        elif cmd == "!setslots":
+                            parts = content.split()
+                            if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) >= 1:
+                                POSITION_SLOTS = int(parts[1])
+                                dc_log(f"⚙️ **倉位格數已更新**: POSITION_SLOTS = `{POSITION_SLOTS}`，每倉比例 = 1/{POSITION_SLOTS}")
+                            else:
+                                dc_log("⚠️ 用法: `!setslots [正整數]`，例如 `!setslots 10`")
         except Exception as e:
             print(f"[DC] 指令輪詢異常: {e}")
         sleep(5)
