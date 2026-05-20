@@ -457,7 +457,6 @@ def fetch_market_candles(inst_id: str, timeframe_bar: str, fetch_limit: int = WA
     df["ts"] = pd.to_datetime(df["ts"].astype(np.int64), unit="ms", utc=True)
     df.set_index("ts", inplace=True)
     return df.iloc[:-1]
-    return df.iloc[:-1]
 
 def fetch_current_funding_rate(swap_id: str) -> float:
     data_list = _fetch_okx_public_data("/api/v5/public/funding-rate", {"instId": swap_id})
@@ -1184,10 +1183,10 @@ app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "**main**":
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sykes Multi-Timeframe Trading System Engine")
-parser.add_argument("–live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
-parser.add_argument("–demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
+parser.add_argument("--live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
+parser.add_argument("--demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
 args = parser.parse_args()
 
 if args.live:
