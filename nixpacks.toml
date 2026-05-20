@@ -1,0 +1,8 @@
+[phases.setup]
+nixPkgs = ["python311"]
+
+[phases.install]
+cmds = ["pip install requests pandas numpy ccxt flask PyNaCl"]
+
+[start]
+cmd = "python3 main.py"
