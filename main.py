@@ -1156,18 +1156,18 @@ def poll_dc_commands():
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref
-start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
-dc_log(start_alert)
-tg_log(start_alert)
+    start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
+    dc_log(start_alert)
+    tg_log(start_alert)
 
-while True:
-    active_tfs_to_run = synchronise_and_wait_next_candle()
+    while True:
+        active_tfs_to_run = synchronise_and_wait_next_candle()
 
-    if _PAUSED:
-        continue
+        if _PAUSED:
+            continue
 
-    for tf in active_tfs_to_run:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
+        for tf in active_tfs_to_run:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
         for symbol_item in SYMBOLS.values():
             try:
                 _bot_ref.scan_and_process_market(symbol_item, tf)
@@ -1177,9 +1177,9 @@ while True:
 
 def run_embedded_web_server():
     import logging
-werkzeug_logger = logging.getLogger("werkzeug")
-werkzeug_logger.setLevel(logging.ERROR)
-app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
+    werkzeug_logger = logging.getLogger("werkzeug")
+    werkzeug_logger.setLevel(logging.ERROR)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1189,29 +1189,29 @@ app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sykes Multi-Timeframe Trading System Engine")
-parser.add_argument("--live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
-parser.add_argument("--demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
-args = parser.parse_args()
+    parser.add_argument("--live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
+    parser.add_argument("--demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
+    args = parser.parse_args()
 
-if args.live:
-    _LIVE_MODE = True
-if args.demo:
-    OKX_DEMO = True
+    if args.live:
+        _LIVE_MODE = True
+    if args.demo:
+        OKX_DEMO = True
 
-print("=" * 70)
-print(f" 賽克斯全功能智慧交易中樞核心引擎系統啟動中... ")
-print(f" 實盤模式狀態: {'🟢 LIVE 實盤委託對接中' if _LIVE_MODE else '🟡 PAPER 模擬記帳觀察中'}")
-print(f" OKX 環境配置: {'⚠️ 模擬盤 (Sandbox)' if OKX_DEMO else '⚡ 正式實盤節點'}")
-print("=" * 70)
+    print("=" * 70)
+    print(f" 賽克斯全功能智慧交易中樞核心引擎系統啟動中... ")
+    print(f" 實盤模式狀態: {'🟢 LIVE 實盤委託對接中' if _LIVE_MODE else '🟡 PAPER 模擬記帳觀察中'}")
+    print(f" OKX 環境配置: {'⚠️ 模擬盤 (Sandbox)' if OKX_DEMO else '⚡ 正式實盤節點'}")
+    print("=" * 70)
 
 # 1. 異步啟動嵌入式控制台 Web 控制中樞
-web_worker_thread = Thread(target=run_embedded_web_server, daemon=True)
-web_worker_thread.start()
+    web_worker_thread = Thread(target=run_embedded_web_server, daemon=True)
+    web_worker_thread.start()
 
 # 2. 啟動 Discord 指令輪詢執行緒
-dc_cmd_thread = Thread(target=poll_dc_commands, daemon=True)
-dc_cmd_thread.start()
+    dc_cmd_thread = Thread(target=poll_dc_commands, daemon=True)
+    dc_cmd_thread.start()
 
 # 3. 直通主執行緒進入無漂移排程輪詢主迴圈
-main_polling_loop()
+    main_polling_loop()
 #
