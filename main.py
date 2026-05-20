@@ -6,7 +6,7 @@
 賽克斯多時框全功能生產級交易系統 v4 (Production-Grade Multi-Timeframe System)
 支援 40+ 幣種監控 | 15m/30m/1H/4H 四時框輪詢 | QQE MOD 雙軌交叉策略
 CVD 累積成交量背離過濾 | OKX 實盤與模擬盤自動劃轉下單 | Discord 雙向按鈕控制台
-“””
+"""
 
 import sys
 import io
@@ -31,20 +31,20 @@ from typing import Dict, List, Optional, Tuple, Any
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-if hasattr(sys.stdout, “reconfigure”):
-sys.stdout.reconfigure(encoding=“utf-8”, errors=“replace”)
+if hasattr(sys.stdout, "reconfigure"):
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 else:
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=“utf-8”, errors=“replace”)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 # 自動檢查並安裝缺少的第三方套件
 
-REQUIRED_PACKAGES = [“requests”, “pandas”, “numpy”, “ccxt”, “flask”, “pynacl”]
+REQUIRED_PACKAGES = ["requests", "pandas", "numpy", "ccxt", "flask", "pynacl"]
 for pkg in REQUIRED_PACKAGES:
 try:
 **import**(pkg)
 except ImportError:
-print(f”[-] 偵測到缺少必要套件 {pkg}，正在進行背景靜態安裝…”)
-subprocess.check_call([sys.executable, “-m”, “pip”, “install”, pkg, “-q”])
+print(f"[-] 偵測到缺少必要套件 {pkg}，正在進行背景靜態安裝…")
+subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
 
 import requests
 import numpy as np
@@ -58,22 +58,22 @@ from flask import Flask, request, jsonify
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-COINALYZE_API_KEY = “82087740-b30d-479f-8846-5ffb51540b19”
+COINALYZE_API_KEY = "82087740-b30d-479f-8846-5ffb51540b19"
 
 # Discord Bot 配置
 
-DISCORD_TOKEN = os.environ.get(“DISCORD_TOKEN”, “”)
-DISCORD_CHANNEL_ID = os.environ.get(“DISCORD_CHANNEL_ID”, “1505971611042320616”)
-DISCORD_PUBLIC_KEY = os.environ.get(“DISCORD_PUBLIC_KEY”, “79788628a845970d78c0d99d2e85505d9a306bae482459d33eaa8d0f84b6c6d4”)
+DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN", "")
+DISCORD_CHANNEL_ID = os.environ.get("DISCORD_CHANNEL_ID", "1505971611042320616")
+DISCORD_PUBLIC_KEY = os.environ.get("DISCORD_PUBLIC_KEY", "79788628a845970d78c0d99d2e85505d9a306bae482459d33eaa8d0f84b6c6d4")
 
 # Telegram 備用通知管道
 
-TG_BOT_TOKEN = os.environ.get(“TG_BOT_TOKEN”, “”)
-TG_CHAT_ID = os.environ.get(“TG_CHAT_ID”, “”)
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 # OKX 交易所帳戶配置
 
-OKX_API_KEY = os.environ.get(“OKX_API_KEY”, “”)
+OKX_API_KEY = os.environ.get("OKX_API_KEY", "")
 OKX_SECRET = os.environ.get("OKX_SECRET_KEY", "359300E99DD8870F8990CC698BC4F491")
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "Small5017714@")
 OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
@@ -92,7 +92,7 @@ PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 
 # 系統底層控制開關
 
-_LIVE_MODE = True if os.environ.get(“OKX_API_KEY”) else False
+_LIVE_MODE = True if os.environ.get("OKX_API_KEY") else False
 _PAUSED = False
 _BOT_START_TS = time.time()
 _STATE_LOCK = Lock()
@@ -100,17 +100,17 @@ _STATE_LOCK = Lock()
 # 各時框獨立自動下單路由開關
 
 AUTO_TRADE: Dict[str, bool] = {
-“15m”: True,
-“30m”: True,
-“1H”: True,
-“4H”: True
+"15m": True,
+"30m": True,
+"1H": True,
+"4H": True
 }
 
 # API 基本節點網址
 
-OKX_BASE = “https://www.okx.com”
-CONA_BASE = “https://api.coinalyze.net/v1”
-DC_BASE = “https://discord.com/api/v10”
+OKX_BASE = "https://www.okx.com"
+CONA_BASE = "https://api.coinalyze.net/v1"
+DC_BASE = "https://discord.com/api/v10"
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -119,80 +119,80 @@ DC_BASE = “https://discord.com/api/v10”
 # ══════════════════════════════════════════════════════════════════════════════
 
 SYMBOLS: Dict[str, str] = {
-“BTC-USDT-SWAP”: “BTC/USDT”,
-“ETH-USDT-SWAP”: “ETH/USDT”,
-“SOL-USDT-SWAP”: “SOL/USDT”,
-“XRP-USDT-SWAP”: “XRP/USDT”,
-“BNB-USDT-SWAP”: “BNB/USDT”,
-“DOGE-USDT-SWAP”: “DOGE/USDT”,
-“ADA-USDT-SWAP”: “ADA/USDT”,
-“TRX-USDT-SWAP”: “TRX/USDT”,
-“SUI-USDT-SWAP”: “SUI/USDT”,
-“LINK-USDT-SWAP”: “LINK/USDT”,
-“AVAX-USDT-SWAP”: “AVAX/USDT”,
-“TON-USDT-SWAP”: “TON/USDT”,
-“HBAR-USDT-SWAP”: “HBAR/USDT”,
-“XLM-USDT-SWAP”: “XLM/USDT”,
-“BCH-USDT-SWAP”: “BCH/USDT”,
-“LTC-USDT-SWAP”: “LTC/USDT”,
-“DOT-USDT-SWAP”: “DOT/USDT”,
-“UNI-USDT-SWAP”: “UNI/USDT”,
-“TAO-USDT-SWAP”: “TAO/USDT”,
-“NEAR-USDT-SWAP”: “NEAR/USDT”,
-“APT-USDT-SWAP”: “APT/USDT”,
-“ARB-USDT-SWAP”: “ARB/USDT”,
-“ATOM-USDT-SWAP”: “ATOM/USDT”,
-“ETC-USDT-SWAP”: “ETC/USDT”,
-“ICP-USDT-SWAP”: “ICP/USDT”,
-“AAVE-USDT-SWAP”: “AAVE/USDT”,
-“RENDER-USDT-SWAP”: “RENDER/USDT”,
-“FIL-USDT-SWAP”: “FIL/USDT”,
-“ENA-USDT-SWAP”: “ENA/USDT”,
-“ALGO-USDT-SWAP”: “ALGO/USDT”,
-“WLD-USDT-SWAP”: “WLD/USDT”,
-“ONDO-USDT-SWAP”: “ONDO/USDT”,
-“JUP-USDT-SWAP”: “JUP/USDT”,
-“POL-USDT-SWAP”: “POL/USDT”,
-“ZEC-USDT-SWAP”: “ZEC/USDT”,
-“DASH-USDT-SWAP”: “DASH/USDT”,
-“PENGU-USDT-SWAP”: “PENGU/USDT”,
-“MORPHO-USDT-SWAP”: “MORPHO/USDT”,
-“HYPE-USDT-SWAP”: “HYPE/USDT”,
-“SKY-USDT-SWAP”: “SKY/USDT”,
+"BTC-USDT-SWAP": "BTC/USDT",
+"ETH-USDT-SWAP": "ETH/USDT",
+"SOL-USDT-SWAP": "SOL/USDT",
+"XRP-USDT-SWAP": "XRP/USDT",
+"BNB-USDT-SWAP": "BNB/USDT",
+"DOGE-USDT-SWAP": "DOGE/USDT",
+"ADA-USDT-SWAP": "ADA/USDT",
+"TRX-USDT-SWAP": "TRX/USDT",
+"SUI-USDT-SWAP": "SUI/USDT",
+"LINK-USDT-SWAP": "LINK/USDT",
+"AVAX-USDT-SWAP": "AVAX/USDT",
+"TON-USDT-SWAP": "TON/USDT",
+"HBAR-USDT-SWAP": "HBAR/USDT",
+"XLM-USDT-SWAP": "XLM/USDT",
+"BCH-USDT-SWAP": "BCH/USDT",
+"LTC-USDT-SWAP": "LTC/USDT",
+"DOT-USDT-SWAP": "DOT/USDT",
+"UNI-USDT-SWAP": "UNI/USDT",
+"TAO-USDT-SWAP": "TAO/USDT",
+"NEAR-USDT-SWAP": "NEAR/USDT",
+"APT-USDT-SWAP": "APT/USDT",
+"ARB-USDT-SWAP": "ARB/USDT",
+"ATOM-USDT-SWAP": "ATOM/USDT",
+"ETC-USDT-SWAP": "ETC/USDT",
+"ICP-USDT-SWAP": "ICP/USDT",
+"AAVE-USDT-SWAP": "AAVE/USDT",
+"RENDER-USDT-SWAP": "RENDER/USDT",
+"FIL-USDT-SWAP": "FIL/USDT",
+"ENA-USDT-SWAP": "ENA/USDT",
+"ALGO-USDT-SWAP": "ALGO/USDT",
+"WLD-USDT-SWAP": "WLD/USDT",
+"ONDO-USDT-SWAP": "ONDO/USDT",
+"JUP-USDT-SWAP": "JUP/USDT",
+"POL-USDT-SWAP": "POL/USDT",
+"ZEC-USDT-SWAP": "ZEC/USDT",
+"DASH-USDT-SWAP": "DASH/USDT",
+"PENGU-USDT-SWAP": "PENGU/USDT",
+"MORPHO-USDT-SWAP": "MORPHO/USDT",
+"HYPE-USDT-SWAP": "HYPE/USDT",
+"SKY-USDT-SWAP": "SKY/USDT",
 }
 
 OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 
 CONA_SPOT: Dict[str, str] = {
-“BTC/USDT”: “BTCUSDT.A”, “ETH/USDT”: “ETHUSDT.A”, “SOL/USDT”: “SOLUSDT.A”,
-“XRP/USDT”: “XRPUSDT.A”, “BNB/USDT”: “BNBUSDT.A”, “DOGE/USDT”: “DOGEUSDT.A”,
-“ADA/USDT”: “ADAUSDT.A”, “TRX/USDT”: “TRXUSDT.A”, “SUI/USDT”: “SUIUSDT.A”,
-“LINK/USDT”: “LINKUSDT.A”, “AVAX/USDT”: “AVAXUSDT.A”, “TON/USDT”: “TONUSDT.A”,
-“HBAR/USDT”: “HBARUSDT.A”, “XLM/USDT”: “XLMUSDT.A”, “BCH/USDT”: “BCHUSDT.A”,
-“LTC/USDT”: “LTCUSDT.A”, “DOT/USDT”: “DOTUSDT.A”, “UNI/USDT”: “UNIUSDT.A”,
-“NEAR/USDT”: “NEARUSDT.A”, “APT/USDT”: “APTUSDT.A”, “ARB/USDT”: “ARBUSDT.A”,
-“ATOM/USDT”: “ATOMUSDT.A”, “ETC/USDT”: “ETCUSDT.A”, “ICP/USDT”: “ICPUSDT.A”,
-“AAVE/USDT”: “AAVEUSDT.A”, “FIL/USDT”: “FILUSDT.A”, “ENA/USDT”: “ENAUSDT.A”,
-“ALGO/USDT”: “ALGOUSDT.A”, “WLD/USDT”: “WLDUSDT.A”, “ONDO/USDT”: “ONDOUSDT.A”,
+"BTC/USDT": "BTCUSDT.A", "ETH/USDT": "ETHUSDT.A", "SOL/USDT": "SOLUSDT.A",
+"XRP/USDT": "XRPUSDT.A", "BNB/USDT": "BNBUSDT.A", "DOGE/USDT": "DOGEUSDT.A",
+"ADA/USDT": "ADAUSDT.A", "TRX/USDT": "TRXUSDT.A", "SUI/USDT": "SUIUSDT.A",
+"LINK/USDT": "LINKUSDT.A", "AVAX/USDT": "AVAXUSDT.A", "TON/USDT": "TONUSDT.A",
+"HBAR/USDT": "HBARUSDT.A", "XLM/USDT": "XLMUSDT.A", "BCH/USDT": "BCHUSDT.A",
+"LTC/USDT": "LTCUSDT.A", "DOT/USDT": "DOTUSDT.A", "UNI/USDT": "UNIUSDT.A",
+"NEAR/USDT": "NEARUSDT.A", "APT/USDT": "APTUSDT.A", "ARB/USDT": "ARBUSDT.A",
+"ATOM/USDT": "ATOMUSDT.A", "ETC/USDT": "ETCUSDT.A", "ICP/USDT": "ICPUSDT.A",
+"AAVE/USDT": "AAVEUSDT.A", "FIL/USDT": "FILUSDT.A", "ENA/USDT": "ENAUSDT.A",
+"ALGO/USDT": "ALGOUSDT.A", "WLD/USDT": "WLDUSDT.A", "ONDO/USDT": "ONDOUSDT.A",
 }
 
 CONA_PERP: Dict[str, str] = {
-“BTC/USDT”: “BTCUSDT_PERP.A”, “ETH/USDT”: “ETHUSDT_PERP.A”, “SOL/USDT”: “SOLUSDT_PERP.A”,
-“XRP/USDT”: “XRPUSDT_PERP.A”, “BNB/USDT”: “BNBUSDT_PERP.A”, “DOGE/USDT”: “DOGEUSDT_PERP.A”,
-“ADA/USDT”: “ADAUSDT_PERP.A”, “TRX/USDT”: “TRXUSDT_PERP.A”, “SUI/USDT”: “SUIUSDT_PERP.A”,
-“LINK/USDT”: “LINKUSDT_PERP.A”, “AVAX/USDT”: “AVAXUSDT_PERP.A”, “HBAR/USDT”: “HBARUSDT_PERP.A”,
-“XLM/USDT”: “XLMUSDT_PERP.A”, “BCH/USDT”: “BCHUSDT_PERP.A”, “LTC/USDT”: “LTCUSDT_PERP.A”,
-“DOT/USDT”: “DOTUSDT_PERP.A”, “UNI/USDT”: “UNIUSDT_PERP.A”, “NEAR/USDT”: “NEARUSDT_PERP.A”,
-“APT/USDT”: “APTUSDT_PERP.A”, “ARB/USDT”: “ARBUSDT_PERP.A”, “ATOM/USDT”: “ATOMUSDT_PERP.A”,
-“ETC/USDT”: “ETCUSDT_PERP.A”, “ICP/USDT”: “ICPUSDT_PERP.A”, “AAVE/USDT”: “AAVEUSDT_PERP.A”,
-“FIL/USDT”: “FILUSDT_PERP.A”, “ENA/USDT”: “ENAUSDT_PERP.A”, “ALGO/USDT”: “ALGOUSDT_PERP.A”,
-“WLD/USDT”: “WLDUSDT_PERP.A”, “ONDO/USDT”: “ONDOUSDT_PERP.A”,
+"BTC/USDT": "BTCUSDT_PERP.A", "ETH/USDT": "ETHUSDT_PERP.A", "SOL/USDT": "SOLUSDT_PERP.A",
+"XRP/USDT": "XRPUSDT_PERP.A", "BNB/USDT": "BNBUSDT_PERP.A", "DOGE/USDT": "DOGEUSDT_PERP.A",
+"ADA/USDT": "ADAUSDT_PERP.A", "TRX/USDT": "TRXUSDT_PERP.A", "SUI/USDT": "SUIUSDT_PERP.A",
+"LINK/USDT": "LINKUSDT_PERP.A", "AVAX/USDT": "AVAXUSDT_PERP.A", "HBAR/USDT": "HBARUSDT_PERP.A",
+"XLM/USDT": "XLMUSDT_PERP.A", "BCH/USDT": "BCHUSDT_PERP.A", "LTC/USDT": "LTCUSDT_PERP.A",
+"DOT/USDT": "DOTUSDT_PERP.A", "UNI/USDT": "UNIUSDT_PERP.A", "NEAR/USDT": "NEARUSDT_PERP.A",
+"APT/USDT": "APTUSDT_PERP.A", "ARB/USDT": "ARBUSDT_PERP.A", "ATOM/USDT": "ATOMUSDT_PERP.A",
+"ETC/USDT": "ETCUSDT_PERP.A", "ICP/USDT": "ICPUSDT_PERP.A", "AAVE/USDT": "AAVEUSDT_PERP.A",
+"FIL/USDT": "FILUSDT_PERP.A", "ENA/USDT": "ENAUSDT_PERP.A", "ALGO/USDT": "ALGOUSDT_PERP.A",
+"WLD/USDT": "WLDUSDT_PERP.A", "ONDO/USDT": "ONDOUSDT_PERP.A",
 }
 
-BAR_TO_CONA = {“5m”: “5min”, “15m”: “15min”, “30m”: “30min”, “1H”: “1hour”, “4H”: “4hour”}
-BAR_SECONDS = {“5m”: 300, “15m”: 900, “30m”: 1800, “1H”: 3600, “4H”: 14400}
+BAR_TO_CONA = {"5m": "5min", "15m": "15min", "30m": "30min", "1H": "1hour", "4H": "4hour"}
+BAR_SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1H": 3600, "4H": 14400}
 WARMUP = 700
-TIMEFRAMES = [“15m”, “30m”, “1H”, “4H”]
+TIMEFRAMES = ["15m", "30m", "1H", "4H"]
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -215,7 +215,7 @@ BEAR_MIN_BARS = 20
 
 # 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
 
-_dc_last_msg_id = “0”
+_dc_last_msg_id = "0"
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -224,63 +224,63 @@ _dc_last_msg_id = “0”
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-“15m_long”: {
-“tp1_mult”: 1.725, “tp2_intraday_mult”: 1.8, “tp2_swing_mult”: 1.8,
-“sl_atr_buffer”: 0.01, “structure_lookback”: 28, “exit_mode”: “fixed”
+"15m_long": {
+"tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
+"sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed"
 },
-“15m_short”: {
-“tp1_mult”: 2.0, “tp2_intraday_mult”: 3.2, “tp2_swing_mult”: 3.2,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”
+"15m_short": {
+"tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
+"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
 },
-“30m_long”: {
-“tp1_mult”: 1.725, “tp2_intraday_mult”: 1.8, “tp2_swing_mult”: 1.8,
-“sl_atr_buffer”: 0.05, “structure_lookback”: 10, “exit_mode”: “fixed”
+"30m_long": {
+"tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
+"sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed"
 },
-“30m_short”: {
-“tp1_mult”: 2.0, “tp2_intraday_mult”: 3.2, “tp2_swing_mult”: 3.2,
-“sl_atr_buffer”: 0.01, “structure_lookback”: 10, “exit_mode”: “trailing”
+"30m_short": {
+"tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
+"sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing"
 },
-“1H_long”: {
-“tp1_mult”: 1.725, “tp2_intraday_mult”: 2.5, “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.15, “structure_lookback”: 10, “exit_mode”: “fixed”
+"1H_long": {
+"tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
+"sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed"
 },
-“1H_short”: {
-“tp1_mult”: 2.0, “tp2_intraday_mult”: 4.0, “tp2_swing_mult”: 4.0,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”
+"1H_short": {
+"tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
+"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
 },
-“4H_long”: {
-“tp1_mult”: 1.725, “tp2_intraday_mult”: 2.5, “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.03, “structure_lookback”: 10, “exit_mode”: “trailing”
+"4H_long": {
+"tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
+"sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing"
 },
-“4H_short”: {
-“tp1_mult”: 2.0, “tp2_intraday_mult”: 4.0, “tp2_swing_mult”: 4.0,
-“sl_atr_buffer”: 0.05, “structure_lookback”: 30, “exit_mode”: “fixed”
+"4H_short": {
+"tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
+"sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed"
 },
 }
 
-def get_params(tf: str, side: str, base_dir: str = “.”) -> Dict[str, Any]:
-“”” 精確抓取指定時框與多空方向的最佳化回測因子參數 “””
-trade_keys = {“tp1_mult”, “tp2_intraday_mult”, “tp2_swing_mult”, “sl_atr_buffer”, “structure_lookback”, “exit_mode”}
+def get_params(tf: str, side: str, base_dir: str = ".") -> Dict[str, Any]:
+""" 精確抓取指定時框與多空方向的最佳化回測因子參數 """
+trade_keys = {"tp1_mult", "tp2_intraday_mult", "tp2_swing_mult", "sl_atr_buffer", "structure_lookback", "exit_mode"}
 paths = [
-os.path.join(base_dir, f”best_params_{tf.lower()}*{side}.json”),
-os.path.join(base_dir, “final_params_all.json”)
+os.path.join(base_dir, f"best_params_{tf.lower()}*{side}.json"),
+os.path.join(base_dir, "final_params_all.json")
 ]
 for fname in paths:
 if os.path.exists(fname):
 try:
-with open(fname, encoding=“utf-8”) as f:
+with open(fname, encoding="utf-8") as f:
 raw = json.load(f)
-data = raw.get(f”{tf}*{side}”, raw.get(“params”, raw))
+data = raw.get(f"{tf}*{side}", raw.get("params", raw))
 extracted = {k: v for k, v in data.items() if k in trade_keys}
 if len(extracted) >= 4:
-base = BEST_PARAMS.get(f”{tf}*{side}”, {}).copy()
+base = BEST_PARAMS.get(f"{tf}*{side}", {}).copy()
 base.update(extracted)
 return base
 except:
 pass
-return BEST_PARAMS.get(f”{tf}*{side}”, {
-“tp1_mult”: 1.7, “tp2_intraday_mult”: 1.8, “tp2_swing_mult”: 2.5,
-“sl_atr_buffer”: 0.08, “structure_lookback”: 20, “exit_mode”: “fixed”
+return BEST_PARAMS.get(f"{tf}*{side}", {
+"tp1_mult": 1.7, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 2.5,
+"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
 }).copy()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -294,13 +294,13 @@ pending_orders: Dict[str, Dict[str, Any]] = {}
 class PaperPosition:
 def **init**(self):
 self.open: bool = False
-self.side: str = “”
+self.side: str = ""
 self.entry: float = 0.0
 self.sl: float = 0.0
 self.tp1: float = 0.0
 self.tp2: float = 0.0
 self.tp1_hit: bool = False
-self.exit_mode: str = “fixed”
+self.exit_mode: str = "fixed"
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -309,60 +309,60 @@ self.exit_mode: str = “fixed”
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _dc_headers() -> Dict[str, str]:
-return {“Authorization”: f”Bot {DISCORD_TOKEN}”, “Content-Type”: “application/json”}
+return {"Authorization": f"Bot {DISCORD_TOKEN}", "Content-Type": "application/json"}
 
 def dc_log(text: str):
-“”” 標準化 Discord 文字頻道輸出 “””
+""" 標準化 Discord 文字頻道輸出 """
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-print(f”[Console Log] {text}”)
+print(f"[Console Log] {text}")
 return
 try:
-payload = {“content”: str(text)}
-requests.post(f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”, headers=_dc_headers(), json=payload, timeout=10)
+payload = {"content": str(text)}
+requests.post(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=_dc_headers(), json=payload, timeout=10)
 except Exception as e:
-print(f”  [Discord HTTP 異常] {e}”)
+print(f"  [Discord HTTP 異常] {e}")
 
 def tg_log(text: str):
-“”” 備用 Telegram 管道輸出 “””
+""" 備用 Telegram 管道輸出 """
 if not TG_BOT_TOKEN or not TG_CHAT_ID:
 return
 try:
-url = f”https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage”
-requests.post(url, json={“chat_id”: TG_CHAT_ID, “text”: text, “parse_mode”: “Markdown”}, timeout=10)
+url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+requests.post(url, json={"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
 except:
 pass
 
 def dc_embed_send(embed: Dict[str, Any], components: List[Any] = None) -> Optional[str]:
-“”” 發送互動式帶有 UI 按鈕組件的 Embed 進階通知 “””
+""" 發送互動式帶有 UI 按鈕組件的 Embed 進階通知 """
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
 return None
-payload = {“embeds”: [embed]}
+payload = {"embeds": [embed]}
 if components:
-payload[“components”] = components
+payload["components"] = components
 try:
-r = requests.post(f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”, headers=_dc_headers(), json=payload, timeout=10)
-return r.json().get(“id”)
+r = requests.post(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=_dc_headers(), json=payload, timeout=10)
+return r.json().get("id")
 except Exception as e:
-print(f”  [Embed 發送失敗] {e}”)
+print(f"  [Embed 發送失敗] {e}")
 return None
 
 def dc_embed_edit(message_id: str, new_text: str):
-“”” 實時更新交互按鈕的點擊結果狀態，防止二次重複操作 “””
+""" 實時更新交互按鈕的點擊結果狀態，防止二次重複操作 """
 if not DISCORD_TOKEN or not message_id:
 return
 try:
-url = f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}”
-requests.patch(url, headers=_dc_headers(), json={“content”: new_text, “components”: []}, timeout=10)
+url = f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}"
+requests.patch(url, headers=_dc_headers(), json={"content": new_text, "components": []}, timeout=10)
 except Exception as e:
-print(f”  [Embed 狀態更替失敗] {e}”)
+print(f"  [Embed 狀態更替失敗] {e}")
 
 def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok: bool) -> str:
-“”” 建置完全體交互控制台卡片，整合止損比率、盈虧比與手動掛單快取 “””
-side_emoji = “🟢” if sig[“side”] == “long” else “🔴”
-dir_name = “多頭趨勢進場” if sig[“side”] == “long” else “空頭趨勢進場”
-swing_tag = “📐 趨勢波段追蹤” if sig[“is_swing”] else “⚡ 短線日內反彈”
-cvd_tag = “CVD ✅ 動能同步確認” if cvd_ok else “CVD ⚠️ 量能背離過濾”
-card_color = 0x2ecc71 if sig[“side”] == “long” else 0xe74c3c
+""" 建置完全體交互控制台卡片，整合止損比率、盈虧比與手動掛單快取 """
+side_emoji = "🟢" if sig["side"] == "long" else "🔴"
+dir_name = "多頭趨勢進場" if sig["side"] == "long" else "空頭趨勢進場"
+swing_tag = "📐 趨勢波段追蹤" if sig["is_swing"] else "⚡ 短線日內反彈"
+cvd_tag = "CVD ✅ 動能同步確認" if cvd_ok else "CVD ⚠️ 量能背離過濾"
+card_color = 0x2ecc71 if sig["side"] == "long" else 0xe74c3c
 
 ```
 tw_time = datetime.fromisoformat(sig["time"].replace("Z", "").replace("+00:00", "")) + timedelta(hours=8)
@@ -421,35 +421,35 @@ return unique_callback_key
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _okx_generate_signature(timestamp: str, method: str, request_path: str, body: str = “”) -> str:
+def _okx_generate_signature(timestamp: str, method: str, request_path: str, body: str = "") -> str:
 message = timestamp + method + request_path + body
-secret_bytes = OKX_SECRET.encode(“utf-8”)
-signature = hmac.new(secret_bytes, message.encode(“utf-8”), hashlib.sha256).digest()
-return base64.b64encode(signature).decode(“utf-8”)
+secret_bytes = OKX_SECRET.encode("utf-8")
+signature = hmac.new(secret_bytes, message.encode("utf-8"), hashlib.sha256).digest()
+return base64.b64encode(signature).decode("utf-8")
 
 def _fetch_okx_public_data(endpoint_path: str, query_params: dict) -> list:
-“”” 高穩定度原生連接器，負責拉取 K 線與即時費率 “””
+""" 高穩定度原生連接器，負責拉取 K 線與即時費率 """
 try:
-url = f”{OKX_BASE}{endpoint_path}”
+url = f"{OKX_BASE}{endpoint_path}"
 headers = {
-“Content-Type”: “application/json”,
-**({“x-simulated-trading”: “1”} if OKX_DEMO else {})
+"Content-Type": "application/json",
+**({"x-simulated-trading": "1"} if OKX_DEMO else {})
 }
 r = requests.get(url, params=query_params, headers=headers, timeout=12)
 if r.status_code == 200:
 res_json = r.json()
-if res_json.get(“code”) == “0”:
-return res_json.get(“data”, [])
+if res_json.get("code") == "0":
+return res_json.get("data", [])
 return []
 except:
 return []
 
 def fetch_market_candles(inst_id: str, timeframe_bar: str, fetch_limit: int = WARMUP) -> pd.DataFrame:
-“”” 抓取歷史 K 線數據並轉換為精準格式之 Pandas DataFrame “””
-raw_candles = _fetch_okx_public_data(”/api/v5/market/candles”, {
-“instId”: inst_id,
-“bar”: timeframe_bar,
-“limit”: str(min(fetch_limit, 300))
+""" 抓取歷史 K 線數據並轉換為精準格式之 Pandas DataFrame """
+raw_candles = _fetch_okx_public_data("/api/v5/market/candles", {
+"instId": inst_id,
+"bar": timeframe_bar,
+"limit": str(min(fetch_limit, 300))
 })
 if not raw_candles:
 return pd.DataFrame()
@@ -469,10 +469,10 @@ return df.iloc[:-1]
 ```
 
 def fetch_current_funding_rate(swap_id: str) -> float:
-“”” 擷取指定永續合約商品當前秒數之資金費率 “””
-data_list = _fetch_okx_public_data(”/api/v5/public/funding-rate”, {“instId”: swap_id})
+""" 擷取指定永續合約商品當前秒數之資金費率 """
+data_list = _fetch_okx_public_data("/api/v5/public/funding-rate", {"instId": swap_id})
 if data_list:
-return float(data_list[0].get(“fundingRate”, 0.0))
+return float(data_list[0].get("fundingRate", 0.0))
 return 0.0
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -482,30 +482,30 @@ return 0.0
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _execute_coinalyze_request(endpoint: str, query_params: dict) -> list:
-“”” 對接 Coinalyze API 獲取大體量逐筆成交明細累積與未平倉特徵 “””
+""" 對接 Coinalyze API 獲取大體量逐筆成交明細累積與未平倉特徵 """
 if not COINALYZE_API_KEY:
 return []
 try:
-url = f”{CONA_BASE}/{endpoint}”
-req_headers = {“api-key”: COINALYZE_API_KEY}
+url = f"{CONA_BASE}/{endpoint}"
+req_headers = {"api-key": COINALYZE_API_KEY}
 r = requests.get(url, params=query_params, headers=req_headers, timeout=15)
 if r.status_code == 200:
 res_data = r.json()
 if isinstance(res_data, list):
 return res_data
-return res_data.get(“result”, res_data.get(“data”, []))
+return res_data.get("result", res_data.get("data", []))
 return []
 except:
 return []
 
 def calculate_cumulative_volume_delta(cona_symbol: str, cona_interval: str, start_timestamp: int, end_timestamp: int) -> pd.Series:
-“”” 計算出精準的 CVD (累積成交量差額) 指標線 “””
-raw_data = _execute_coinalyze_request(“history”, {
-“symbols”: cona_symbol,
-“interval”: cona_interval,
-“from”: str(start_timestamp // 1000),
-“to”: str(end_timestamp // 1000),
-“convert_to_usd”: “false”
+""" 計算出精準的 CVD (累積成交量差額) 指標線 """
+raw_data = _execute_coinalyze_request("history", {
+"symbols": cona_symbol,
+"interval": cona_interval,
+"from": str(start_timestamp // 1000),
+"to": str(end_timestamp // 1000),
+"convert_to_usd": "false"
 })
 if not raw_data:
 return pd.Series(dtype=float)
@@ -533,12 +533,12 @@ return df["delta"].cumsum()
 ```
 
 def fetch_open_interest_series(cona_symbol: str, cona_interval: str, start_timestamp: int, end_timestamp: int) -> pd.Series:
-“”” 追蹤機構持倉未平倉合約總量 (OI) 走勢 “””
-raw_data = _execute_coinalyze_request(“open-interest-history”, {
-“symbols”: cona_symbol,
-“interval”: cona_interval,
-“from”: str(start_timestamp // 1000),
-“to”: str(end_timestamp // 1000)
+""" 追蹤機構持倉未平倉合約總量 (OI) 走勢 """
+raw_data = _execute_coinalyze_request("open-interest-history", {
+"symbols": cona_symbol,
+"interval": cona_interval,
+"from": str(start_timestamp // 1000),
+"to": str(end_timestamp // 1000)
 })
 if not raw_data:
 return pd.Series(dtype=float)
@@ -566,7 +566,7 @@ return df["oi"]
 # ══════════════════════════════════════════════════════════════════════════════
 
 def calculate_smooth_rsi(series_src: pd.Series, rolling_period: int) -> pd.Series:
-“”” 計算非線性標準化相對強弱指標線 “””
+""" 計算非線性標準化相對強弱指標線 """
 price_delta = series_src.diff()
 up_trends = price_delta.clip(lower=0.0)
 down_trends = -price_delta.clip(upper=0.0)
@@ -576,8 +576,8 @@ rs_value = mean_up / mean_down.replace(0.0, 1e-9)
 return 100.0 - (100.0 / (1.0 + rs_value))
 
 def calculate_full_qqe_mod(data_df: pd.DataFrame, rsi_pd: int = 6, sf_pd: int = 5, factor_mult: float = 4.236) -> Tuple[pd.Series, pd.Series]:
-“”” 完全體 QQE MOD 動態移動區間軌道演算演算法 “””
-src_close = data_df[“close”]
+""" 完全體 QQE MOD 動態移動區間軌道演算演算法 """
+src_close = data_df["close"]
 rsi_series = calculate_smooth_rsi(src_close, rsi_pd)
 rsi_smoothed_ma = rsi_series.ewm(span=sf_pd, adjust=False).mean()
 absolute_rsi_delta = rsi_smoothed_ma.diff().abs()
@@ -606,10 +606,10 @@ return rsi_smoothed_ma, pd.Series(trailing_buffer_list, index=data_df.index)
 ```
 
 def calculate_average_true_range(data_df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
-“”” 計算真實波動幅度均值 (ATR) “””
-high_prices = data_df[“high”]
-low_prices = data_df[“low”]
-previous_closes = data_df[“close”].shift(1)
+""" 計算真實波動幅度均值 (ATR) """
+high_prices = data_df["high"]
+low_prices = data_df["low"]
+previous_closes = data_df["close"].shift(1)
 tr1 = high_prices - low_prices
 tr2 = (high_prices - previous_closes).abs()
 tr3 = (low_prices - previous_closes).abs()
@@ -617,9 +617,9 @@ true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 return true_range.ewm(alpha=1.0 / atr_period, adjust=False).mean()
 
 def calculate_directional_movement_index(data_df: pd.DataFrame, adx_period: int = 14) -> pd.Series:
-“”” 動向指標 (DMI/ADX) 趨勢強度過濾器 “””
-high_diff = data_df[“high”].diff()
-low_diff = -data_df[“low”].diff()
+""" 動向指標 (DMI/ADX) 趨勢強度過濾器 """
+high_diff = data_df["high"].diff()
+low_diff = -data_df["low"].diff()
 plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0.0)
 minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0.0)
 
@@ -640,20 +640,20 @@ return dx_value.ewm(alpha=1.0 / adx_period, adjust=False).mean()
 
 def _initialize_ccxt_client() -> ccxt.okx:
 client = ccxt.okx({
-“apiKey”: OKX_API_KEY,
-“secret”: OKX_SECRET,
-“password”: OKX_PASSPHRASE,
-“options”: {“defaultType”: “swap”}
+"apiKey": OKX_API_KEY,
+"secret": OKX_SECRET,
+"password": OKX_PASSPHRASE,
+"options": {"defaultType": "swap"}
 })
 if OKX_DEMO:
 client.set_sandbox_mode(True)
 return client
 
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float, stop_loss: float, target_tp1: float, target_tp2: float):
-“”” 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 “””
+""" 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 """
 global _LIVE_MODE, MAX_LEVERAGE, MARGIN_PCT
 if not _LIVE_MODE:
-dc_log(f”📝 [紙交易通知] 商品 {symbol_id} 方向 {trade_side} 通過安全審核，當前處於 Paper 模擬模式，跳過交易所劃轉。”)
+dc_log(f"📝 [紙交易通知] 商品 {symbol_id} 方向 {trade_side} 通過安全審核，當前處於 Paper 模擬模式，跳過交易所劃轉。")
 return
 
 ```
@@ -1033,7 +1033,7 @@ _bot_ref = SykesTradingBot()
 app = Flask(**name**)
 
 def verify_discord_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
-“”” Ed25519 靜態無狀態簽章驗證演算法 “””
+""" Ed25519 靜態無狀態簽章驗證演算法 """
 if not DISCORD_PUBLIC_KEY or not signature or not timestamp:
 return False
 try:
@@ -1044,11 +1044,11 @@ return True
 except:
 return False
 
-@app.route(”/interactions”, methods=[“POST”])
+@app.route("/interactions", methods=["POST"])
 def discord_interactions_webhook():
-“”” 接收並解析來自 Discord 互動式 UI 按鈕的異步點擊授權回調 “””
-signature = request.headers.get(“X-Signature-Ed25519”, “”)
-timestamp = request.headers.get(“X-Signature-Timestamp”, “”)
+""" 接收並解析來自 Discord 互動式 UI 按鈕的異步點擊授權回調 """
+signature = request.headers.get("X-Signature-Ed25519", "")
+timestamp = request.headers.get("X-Signature-Timestamp", "")
 raw_body = request.data
 
 ```
@@ -1098,7 +1098,7 @@ return jsonify({"type": 4, "data": {"content": "未知的核心控制碼", "flag
 # ══════════════════════════════════════════════════════════════════════════════
 
 def synchronise_and_wait_next_candle() -> List[str]:
-“”” 無漂移收盤對齊引擎：等待下一個整點/15分收盤 K 棒，返回觸發的時框 “””
+""" 無漂移收盤對齊引擎：等待下一個整點/15分收盤 K 棒，返回觸發的時框 """
 while True:
 now = datetime.now()
 current_minute = now.minute
@@ -1126,81 +1126,81 @@ current_second = now.second
 _dc_last_msg_id = None
 
 def poll_dc_commands():
-“”” 輪詢 Discord 頻道訊息，處理 ! 指令 “””
+""" 輪詢 Discord 頻道訊息，處理 ! 指令 """
 global _PAUSED, _LIVE_MODE, _dc_last_msg_id
 if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
-print(”[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。”)
+print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
 return
-headers = {“Authorization”: f”Bot {DISCORD_TOKEN}”}
-print(”[DC] 指令輪詢已啟動。”)
+headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
+print("[DC] 指令輪詢已啟動。")
 while True:
 try:
-params = {“limit”: 5}
+params = {"limit": 5}
 if _dc_last_msg_id:
-params[“after”] = _dc_last_msg_id
-resp = requests.get(f”{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages”, headers=headers, params=params, timeout=10)
+params["after"] = _dc_last_msg_id
+resp = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=headers, params=params, timeout=10)
 if resp.status_code == 200:
 messages = resp.json()
 if messages:
 # Discord 回傳最新在前，反轉處理
 for msg in reversed(messages):
-msg_id = msg.get(“id”, “”)
-content = msg.get(“content”, “”).strip()
-author = msg.get(“author”, {})
-is_bot = author.get(“bot”, False)
+msg_id = msg.get("id", "")
+content = msg.get("content", "").strip()
+author = msg.get("author", {})
+is_bot = author.get("bot", False)
 if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
 _dc_last_msg_id = msg_id
-if is_bot or not content.startswith(”!”):
+if is_bot or not content.startswith("!"):
 continue
 cmd = content.lower().split()[0]
 uptime_s = int(time.time() - _BOT_START_TS)
 uptime_h = uptime_s // 3600
 uptime_m = (uptime_s % 3600) // 60
-if cmd == “!status”:
-mode = “🟢 LIVE 實盤” if _LIVE_MODE else “🟡 PAPER 模擬”
-paused = “⏸️ 已暫停” if _PAUSED else “▶️ 全時掃描正常運作中”
+if cmd == "!status":
+mode = "🟢 LIVE 實盤" if _LIVE_MODE else "🟡 PAPER 模擬"
+paused = "⏸️ 已暫停" if _PAUSED else "▶️ 全時掃描正常運作中"
 positions = len([p for p in _bot_ref.paper_positions.values() if p.open])
-tf_status = “ | “.join([f”{tf}:{‘✅’ if AUTO_TRADE.get(tf) else ‘❌’}” for tf in AUTO_TRADE])
+tf_status = " | ".join([f"{tf}:{'✅' if AUTO_TRADE.get(tf) else '❌'}" for tf in AUTO_TRADE])
 status_msg = (
-f”⚙️ **賽克斯生產級交易核心運行指標系統**\n”
-f”{‘─’*16}\n”
-f”大腦監控狀態: {paused}\n”
-f”目前工作特徵: **{mode}**\n”
-f”單倉保證金配比: `{MARGIN_PCT}%` | 槓桿安全閾值上限: `{MAX_LEVERAGE}x`\n”
-f”當前內部追蹤持倉數: `{positions}` 倉位\n”
-f”累計連續運作時間: `{uptime_h}` 小時 `{uptime_m}` 分鐘\n”
-f”多維監控規模: `40` 大核心主流幣種 | `4` 大時框同時覆蓋”
+f"⚙️ **賽克斯生產級交易核心運行指標系統**\n"
+f"{'─'*16}\n"
+f"大腦監控狀態: {paused}\n"
+f"目前工作特徵: **{mode}**\n"
+f"單倉保證金配比: `{MARGIN_PCT}%` | 槓桿安全閾值上限: `{MAX_LEVERAGE}x`\n"
+f"當前內部追蹤持倉數: `{positions}` 倉位\n"
+f"累計連續運作時間: `{uptime_h}` 小時 `{uptime_m}` 分鐘\n"
+f"多維監控規模: `40` 大核心主流幣種 | `4` 大時框同時覆蓋"
 )
 dc_log(status_msg)
-elif cmd == “!help”:
+elif cmd == "!help":
 dc_log(
-“📋 **指令列表**\n”
-“`!status` - 查看系統運行狀態\n”
-“`!setlive` - 切換為實盤模式\n”
-“`!setpaper` - 切換為模擬模式\n”
-“`!pause` - 暫停自動交易\n”
-“`!resume` - 恢復自動交易”
+"📋 **指令列表**\n"
+"`!status` - 查看系統運行狀態\n"
+"`!setlive` - 切換為實盤模式\n"
+"`!setpaper` - 切換為模擬模式\n"
+"`!pause` - 暫停自動交易\n"
+"`!resume` - 恢復自動交易"
 )
-elif cmd == “!setlive”:
+elif cmd == "!setlive":
 _LIVE_MODE = True
-dc_log(“🟢 **已切換為實盤模式**，自動下單鏈已啟用。”)
-elif cmd == “!setpaper”:
+dc_log("🟢 **已切換為實盤模式**，自動下單鏈已啟用。")
+elif cmd == "!setpaper":
 _LIVE_MODE = False
-dc_log(“🟡 **已切換為模擬模式**，僅觀察訊號不執行下單。”)
-elif cmd == “!pause”:
+dc_log("🟡 **已切換為模擬模式**，僅觀察訊號不執行下單。")
+elif cmd == "!pause":
 _PAUSED = True
-dc_log(“⏸️ **系統已暫停**，停止掃描與下單。”)
-elif cmd == “!resume”:
+dc_log("⏸️ **系統已暫停**，停止掃描與下單。")
+elif cmd == "!resume":
 _PAUSED = False
-dc_log(“▶️ **系統已恢復**，重新開始掃描。”)
+dc_log("▶️ **系統已恢復**，重新開始掃描。")
 except Exception as e:
-print(f”[DC] 指令輪詢異常: {e}”)
+print(f"[DC] 指令輪詢異常: {e}")
 sleep(5)
 
 def main_polling_loop():
-“”” 交易中樞核心守護進程主迴圈 “””
+""" 交易中樞核心守護進程主迴圈 """
 global _PAUSED, _bot_ref
-start_alert = “🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制…”
+start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制…"
 dc_log(start_alert)
 tg_log(start_alert)
 
@@ -1223,9 +1223,9 @@ while True:
 
 def run_embedded_web_server():
 import logging
-werkzeug_logger = logging.getLogger(“werkzeug”)
+werkzeug_logger = logging.getLogger("werkzeug")
 werkzeug_logger.setLevel(logging.ERROR)
-app.run(host=“0.0.0.0”, port=int(os.environ.get(“PORT”, 3000)), debug=False)
+app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)), debug=False)
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1233,10 +1233,10 @@ app.run(host=“0.0.0.0”, port=int(os.environ.get(“PORT”, 3000)), debug=Fa
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-if **name** == “**main**”:
-parser = argparse.ArgumentParser(description=“Sykes Multi-Timeframe Trading System Engine”)
-parser.add_argument(”–live”, action=“store_true”, help=“強制覆蓋開啟 OKX 實盤下單鏈”)
-parser.add_argument(”–demo”, action=“store_true”, help=“切換至 OKX 模擬盤測試環境”)
+if **name** == "**main**":
+parser = argparse.ArgumentParser(description="Sykes Multi-Timeframe Trading System Engine")
+parser.add_argument("–live", action="store_true", help="強制覆蓋開啟 OKX 實盤下單鏈")
+parser.add_argument("–demo", action="store_true", help="切換至 OKX 模擬盤測試環境")
 args = parser.parse_args()
 
 ```
