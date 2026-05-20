@@ -771,7 +771,7 @@ class SykesProductionCore:
                 return
 
         okx_instrument_id = OKX_SWAP.get(asset_symbol, asset_symbol)
-        market_df = fetch_market_candles(okx_instrument_id, target_tf, limit=WARMUP)
+        market_df = fetch_market_candles(okx_instrument_id, target_tf, WARMUP)
         if market_df.empty or len(market_df) < 250:
             return
 
