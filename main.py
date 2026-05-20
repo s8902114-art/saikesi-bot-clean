@@ -692,7 +692,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             amount=final_order_amount,
             params={"posSide": trade_side, "tdMode": "isolated"}
         )
-        executed_average_price = entry_order.get("average", current_market_price)
+        executed_average_price = entry_order.get("average") or entry_order.get("price") or current_market_price
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
 
         try:
@@ -701,16 +701,37 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 type="market",
                 side=exit_action,
                 amount=final_order_amount,
-                price=stop_loss,
                 params={
-                    "stopLoss": {"triggerPrice": str(stop_loss), "orderPrice": "-1"},
+                    "tdMode": "isolated",
                     "reduceOnly": True,
-                    "posSide": trade_side
+                    "posSide": trade_side,
+                    "tpTriggerPx": None,
+                    "slTriggerPx": str(stop_loss),
+                    "slOrdPx": "-1",
+                    "attachAlgoOrds": [{"attachAlgoClOrdId": "", "slTriggerPx": str(stop_loss), "slOrdPx": "-1", "slTriggerPxType": "last"}]
                 }
             )
             execution_report.append(f"🛑 條件止損委託已錨定: `{stop_loss}`")
         except Exception as sle:
-            execution_report.append(f"⚠️ 止損單掛載失敗: {sle}")
+            # fallback: place stop order separately
+            try:
+                ex.create_order(
+                    symbol=symbol_id,
+                    type="market",
+                    side=exit_action,
+                    amount=final_order_amount,
+                    params={
+                        "ordType": "conditional",
+                        "slTriggerPx": str(stop_loss),
+                        "slOrdPx": "-1",
+                        "reduceOnly": True,
+                        "posSide": trade_side,
+                        "tdMode": "isolated"
+                    }
+                )
+                execution_report.append(f"🛑 條件止損委託已錨定(備援): `{stop_loss}`")
+            except Exception as sle2:
+                execution_report.append(f"⚠️ 止損單掛載失敗: {sle2}")
 
         try:
             ex.create_order(
@@ -719,7 +740,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 side=exit_action,
                 amount=split_half_amount,
                 price=tp1,
-                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                params={"posSide": trade_side, "reduceOnly": True}
             )
             execution_report.append(f"🌓 第一目標限價單掛置 (50%): `{tp1}`")
         except Exception as tp1e:
@@ -728,8 +749,13 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         remainder_amount = final_order_amount - split_half_amount
         if amount_precision == 0:
             remainder_amount = int(remainder_amount)
+            if remainder_amount < 1:
+                remainder_amount = 1
         else:
             remainder_amount = round(remainder_amount, amount_precision)
+            min_amount = round(1.0 / contract_size, amount_precision) if contract_size > 0 else 0.01
+            if remainder_amount < min_amount:
+                remainder_amount = min_amount
 
         try:
             ex.create_order(
@@ -738,7 +764,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 side=exit_action,
                 amount=remainder_amount,
                 price=tp2,
-                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                params={"posSide": trade_side, "reduceOnly": True}
             )
             execution_report.append(f"🌕 第二終點目標限價單掛置 (50%): `{tp2}`")
         except Exception as tp2e:
