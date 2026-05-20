@@ -5,3 +5,4 @@ flask
 watchdog
 PyNaCl
 PyNaCl
+PyNaCl
