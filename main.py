@@ -225,43 +225,45 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
+# TP/SL/exit_mode: 來自 final_params_all.json (master_optimizer_v2, 2026-05-18)
+# qqe_rsi/sf/factor: 各時框多空獨立回測優化值
 "15m_long": {
-"tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
+"tp1_mult": 1.5,   "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed",
 "qqe_rsi": 9, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "15m_short": {
-"tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
+"tp1_mult": 1.7,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_long": {
-"tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
+"tp1_mult": 1.7,   "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_short": {
-"tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
+"tp1_mult": 1.15,  "tp2_intraday_mult": 1.35, "tp2_swing_mult": 2.25,
 "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
 "1H_long": {
-"tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
+"tp1_mult": 1.3,   "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "1H_short": {
-"tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
+"tp1_mult": 1.7,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
-"tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
+"tp1_mult": 1.3,   "tp2_intraday_mult": 1.5,  "tp2_swing_mult": 3.0,
 "sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
-"tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
+"tp1_mult": 1.5,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed",
 "qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
 },
@@ -1186,9 +1188,10 @@ class SykesTradingBot:
     # 5. 空頭趨勢（連續 >= 20 根 EMA144 < EMA576）
         bear_trend = (ema144.iloc[-20:] < ema576.iloc[-20:]).all()
 
-    # 6. QQE MOD（多空各自使用 BEST_PARAMS 獨立參數）
+    # 6. 雙軌 QQE MOD
         p_l = get_params(tf_id, "long")
         p_s = get_params(tf_id, "short")
+        # Primary：各時框各方向獨立參數（從 BEST_PARAMS 載入）
         rsi_ma_l, trail_l = calculate_full_qqe_mod(
             df, rsi_pd=int(p_l.get("qqe_rsi", QQE_RSI)),
             sf_pd=int(p_l.get("qqe_sf", QQE_SF)),
@@ -1199,8 +1202,14 @@ class SykesTradingBot:
             sf_pd=int(p_s.get("qqe_sf", QQE_SF)),
             factor_mult=float(p_s.get("qqe_factor", QQE_FACTOR_P))
         )
+        # Secondary：固定參數（RSI=6, SF=5, Factor=1.61）
+        rsi_ma_sec, trail_sec = calculate_full_qqe_mod(
+            df, rsi_pd=6, sf_pd=5, factor_mult=QQE_FACTOR_S
+        )
+        sec_bull = rsi_ma_sec.iloc[-1] > trail_sec.iloc[-1]   # Secondary 多頭趨勢
+        sec_bear = rsi_ma_sec.iloc[-1] < trail_sec.iloc[-1]   # Secondary 空頭趨勢
 
-    # 7. 進場條件（v3：Vegas 結構 + QQE 穿越 + ADX + Channel + Funding）
+    # 7. 進場條件（v3：Vegas 結構 + 雙軌 QQE 穿越 + ADX + Channel + Funding）
         funding_rate = fetch_current_funding_rate(okx_swap_symbol)
 
         long_C1 = (current_close > large_top and
@@ -1208,7 +1217,8 @@ class SykesTradingBot:
                    df["low"].iloc[-1] < small_bot)
         long_C2 = current_close > ema12.iloc[-1]
         long_C3 = (rsi_ma_l.iloc[-2] <= trail_l.iloc[-2] and
-                   rsi_ma_l.iloc[-1] > trail_l.iloc[-1])
+                   rsi_ma_l.iloc[-1] > trail_l.iloc[-1] and
+                   sec_bull)   # Primary 向上穿越 AND Secondary 也是多頭
         is_long  = (ema144.iloc[-1] > ema576.iloc[-1] and
                     long_C1 and long_C2 and long_C3 and
                     current_adx >= ADX_THR and channel_ok and
@@ -1219,7 +1229,8 @@ class SykesTradingBot:
                     df["high"].iloc[-1] > small_top)
         short_C2 = current_close < ema12.iloc[-1]
         short_C3 = (rsi_ma_s.iloc[-2] >= trail_s.iloc[-2] and
-                    rsi_ma_s.iloc[-1] < trail_s.iloc[-1])
+                    rsi_ma_s.iloc[-1] < trail_s.iloc[-1] and
+                    sec_bear)   # Primary 向下穿越 AND Secondary 也是空頭
         is_short = (bear_trend and
                     short_C1 and short_C2 and short_C3 and
                     current_adx >= ADX_THR and channel_ok and
