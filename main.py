@@ -227,43 +227,53 @@ _dc_last_msg_id = "0"
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 "15m_long": {
 "tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
-"sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed"
+"sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed",
+"qqe_rsi": 9, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "15m_short": {
 "tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
-"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
+"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
+"qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_long": {
 "tp1_mult": 1.725, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 1.8,
-"sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed"
+"sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
+"qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_short": {
 "tp1_mult": 2.0, "tp2_intraday_mult": 3.2, "tp2_swing_mult": 3.2,
-"sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing"
+"sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
+"qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
 "1H_long": {
 "tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
-"sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed"
+"sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
+"qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "1H_short": {
 "tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
-"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
+"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
+"qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
 "tp1_mult": 1.725, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5,
-"sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing"
+"sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
+"qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
 "tp1_mult": 2.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0,
-"sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed"
+"sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed",
+"qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
 },
 }
 
 def get_params(tf: str, side: str, base_dir: str = ".") -> Dict[str, Any]:
     """ 精確抓取指定時框與多空方向的最佳化回測因子參數 """
-    trade_keys = {"tp1_mult", "tp2_intraday_mult", "tp2_swing_mult", "sl_atr_buffer", "structure_lookback", "exit_mode"}
+    param_key = f"{tf}_{side}"
+    trade_keys = {"tp1_mult", "tp2_intraday_mult", "tp2_swing_mult", "sl_atr_buffer",
+                  "structure_lookback", "exit_mode", "qqe_rsi", "qqe_sf", "qqe_factor"}
     paths = [
-        os.path.join(base_dir, f"best_params_{tf.lower()}*{side}.json"),
+        os.path.join(base_dir, f"best_params_{tf.lower()}_{side}.json"),
         os.path.join(base_dir, "final_params_all.json")
     ]
     for fname in paths:
@@ -271,17 +281,18 @@ def get_params(tf: str, side: str, base_dir: str = ".") -> Dict[str, Any]:
             try:
                 with open(fname, encoding="utf-8") as f:
                     raw = json.load(f)
-                data = raw.get(f"{tf}*{side}", raw.get("params", raw))
+                data = raw.get(param_key, raw.get("params", raw))
                 extracted = {k: v for k, v in data.items() if k in trade_keys}
                 if len(extracted) >= 4:
-                    base = BEST_PARAMS.get(f"{tf}*{side}", {}).copy()
+                    base = BEST_PARAMS.get(param_key, {}).copy()
                     base.update(extracted)
                     return base
             except:
                 pass
-    return BEST_PARAMS.get(f"{tf}*{side}", {
+    return BEST_PARAMS.get(param_key, {
         "tp1_mult": 1.7, "tp2_intraday_mult": 1.8, "tp2_swing_mult": 2.5,
-        "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed"
+        "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
+        "qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
     }).copy()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -291,6 +302,10 @@ def get_params(tf: str, side: str, base_dir: str = ".") -> Dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 pending_orders: Dict[str, Dict[str, Any]] = {}
+active_real_trades: Dict[str, Dict[str, Any]] = {}
+# 結構: {trade_key: {"inst_id", "symbol", "direction", "entry_price",
+#                    "sl_algo_id", "tp1_order_id", "tp1_hit",
+#                    "current_sl", "remaining_amount", "pos_side"}}
 
 class PaperPosition:
     def __init__(self):
@@ -674,6 +689,27 @@ def _place_okx_algo_trailing(inst_id: str, side: str, amount: str, callback_rati
     r = requests.post(f"{OKX_BASE}{path}", headers=headers, data=body, timeout=10)
     return r.json()
 
+def _cancel_okx_algo_order(inst_id: str, algo_id: str) -> bool:
+    """ 取消 OKX 條件/止損 Algo 單 """
+    now_utc = datetime.now(timezone.utc)
+    ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
+    body = json.dumps([{"algoId": algo_id, "instId": inst_id}])
+    path = "/api/v5/trade/cancel-algos"
+    sig = _okx_generate_signature(ts, "POST", path, body)
+    headers = {
+        "OK-ACCESS-KEY": OKX_API_KEY, "OK-ACCESS-SIGN": sig,
+        "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": OKX_PASSPHRASE,
+        "Content-Type": "application/json"
+    }
+    if OKX_DEMO:
+        headers["x-simulated-trading"] = "1"
+    try:
+        r = requests.post(f"{OKX_BASE}{path}", headers=headers, data=body, timeout=10)
+        return r.json().get("code") == "0"
+    except Exception as e:
+        print(f"[Trailing] 取消Algo單失敗 {algo_id}: {e}")
+        return False
+
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed") -> None:
     """ 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 """
@@ -766,25 +802,30 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         executed_average_price = entry_order.get("average", current_market_price)
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
 
+        sl_algo_id   = None
+        tp1_order_id = None
+
         # 止損：OKX algo slTriggerPx 條件單
         try:
-            _place_okx_algo_sl(
+            sl_result = _place_okx_algo_sl(
                 inst_id=inst_id, side=exit_action,
                 amount=str(final_order_amount), sl_trigger_px=str(stop_loss),
                 pos_side=trade_side
             )
-            execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}`")
+            sl_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+            execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
         except Exception as sle:
             execution_report.append(f"⚠️ 止損單掛載失敗: {sle}")
 
         # TP1：固定限價（50%）
         try:
-            ex.create_order(
+            tp1_order = ex.create_order(
                 symbol=symbol_id, type="limit", side=exit_action,
                 amount=split_half_amount, price=tp1,
                 params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
             )
-            execution_report.append(f"🌓 TP1 固定限價單掛置 (50%): `{tp1}`")
+            tp1_order_id = tp1_order.get("id")
+            execution_report.append(f"🌓 TP1 固定限價單掛置 (50%): `{tp1}` (ordId: {tp1_order_id})")
         except Exception as tp1e:
             execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
 
@@ -816,10 +857,118 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
+        # exit_mode=trailing：寫入實盤追蹤止損狀態機
+        if exit_mode == "trailing" and sl_algo_id and tp1_order_id:
+            trade_key = f"{inst_id}_{trade_side}_{int(time.time())}"
+            active_real_trades[trade_key] = {
+                "inst_id":          inst_id,
+                "symbol":           symbol_id,
+                "direction":        trade_side,
+                "entry_price":      executed_average_price,
+                "sl_algo_id":       sl_algo_id,
+                "tp1_order_id":     tp1_order_id,
+                "tp1_hit":          False,
+                "current_sl":       stop_loss,
+                "remaining_amount": str(remainder_amount),
+                "pos_side":         trade_side,
+            }
+            execution_report.append(f"📊 追蹤止損狀態機已啟動 (key: {trade_key})")
+
         dc_log("\n".join(execution_report))
     except Exception as general_error:
         dc_log(f"❌ **交易所執行鏈嚴重崩潰**: {general_error}")
 
+
+def check_trailing_stops_for_real():
+    """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
+    if not active_real_trades:
+        return
+    try:
+        ex = _initialize_ccxt_client()
+        ex.load_markets()
+    except Exception as e:
+        print(f"[Trailing] 初始化交易所失敗: {e}")
+        return
+
+    for trade_key in list(active_real_trades.keys()):
+        trade     = active_real_trades[trade_key]
+        symbol    = trade["symbol"]
+        inst_id   = trade["inst_id"]
+        direction = trade["direction"]
+        name      = symbol.split("/")[0]
+
+        try:
+            # 確認倉位是否仍存在
+            positions = ex.fetch_positions([symbol])
+            has_pos = any(
+                p["symbol"] == symbol
+                and abs(float(p.get("contracts") or 0)) > 0
+                and p.get("side") == direction
+                for p in positions
+            )
+            if not has_pos:
+                print(f"[Trailing] {name} 倉位已關閉，移除追蹤")
+                active_real_trades.pop(trade_key, None)
+                continue
+
+            if not trade["tp1_hit"]:
+                # 查詢 TP1 限價單狀態
+                tp1_order = ex.fetch_order(trade["tp1_order_id"], symbol)
+                if tp1_order.get("status") in ("closed", "filled"):
+                    # TP1 成交 → 1. 取消原止損
+                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+
+                    # 2. 掛新止損在成本價（break-even）
+                    be_price  = trade["entry_price"]
+                    exit_side = "sell" if direction == "long" else "buy"
+                    sl_result = _place_okx_algo_sl(
+                        inst_id=inst_id, side=exit_side,
+                        amount=trade["remaining_amount"],
+                        sl_trigger_px=str(round(be_price, 5)),
+                        pos_side=direction
+                    )
+                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                    if new_algo_id:
+                        trade["sl_algo_id"] = new_algo_id
+                        trade["current_sl"] = be_price
+                        trade["tp1_hit"]    = True
+
+                    # 3. DC + TG 通知
+                    msg = f"✅ TP1 已成交，止損移至成本價 {be_price}\n幣種：{name}"
+                    dc_log(msg)
+                    tg_log(msg)
+                    print(f"[Trailing] {name} TP1成交，SL移至成本價 {be_price}")
+
+            else:
+                # TP1 已成交，執行追蹤止損更新
+                close = float(ex.fetch_ticker(symbol).get("last", 0))
+                if direction == "long":
+                    new_sl = max(trade["current_sl"], round(close * 0.98, 5))
+                else:
+                    new_sl = min(trade["current_sl"], round(close * 1.02, 5))
+
+                if new_sl != trade["current_sl"]:
+                    # 取消舊止損，掛新止損
+                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                    exit_side = "sell" if direction == "long" else "buy"
+                    sl_result = _place_okx_algo_sl(
+                        inst_id=inst_id, side=exit_side,
+                        amount=trade["remaining_amount"],
+                        sl_trigger_px=str(new_sl),
+                        pos_side=direction
+                    )
+                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                    if new_algo_id:
+                        trade["sl_algo_id"] = new_algo_id
+                        trade["current_sl"] = new_sl
+
+                    msg = f"🔄 追蹤止損更新至 {new_sl}\n幣種：{name}"
+                    dc_log(msg)
+                    tg_log(msg)
+                    print(f"[Trailing] {name} 追蹤止損更新至 {new_sl}")
+
+        except Exception as e:
+            print(f"[Trailing] {name} 處理失敗: {e}")
 
 class SykesTradingBot:
     def __init__(self):
@@ -904,6 +1053,28 @@ class SykesTradingBot:
                     if new_sl < pos.sl:
                         pos.sl = new_sl
 
+    def _get_4h_swing_flag(self, okx_swap_symbol: str, df_current: pd.DataFrame, tf_id: str) -> bool:
+        """
+        波段判斷三條件（同時符合才算波段）：
+        1. 4H EMA144 > EMA576
+        2. 4H EMA576[-1] > EMA576[-21]（通道有斜率）
+        3. 4H ADX(14) > ADX_THR
+        """
+        if tf_id == "4H":
+            df4h = df_current
+        else:
+            df4h = fetch_market_candles(okx_swap_symbol, "4H")
+            if df4h.empty or len(df4h) < 25:
+                return False
+
+        ema144 = df4h["close"].ewm(span=144, adjust=False).mean()
+        ema576 = df4h["close"].ewm(span=576, adjust=False).mean()
+        cond1  = ema144.iloc[-1] > ema576.iloc[-1]
+        cond2  = len(ema576) > 20 and ema576.iloc[-1] > ema576.iloc[-21]
+        adx4h  = calculate_directional_movement_index(df4h, 14)
+        cond3  = adx4h.iloc[-1] > ADX_THR
+        return cond1 and cond2 and cond3
+
     def scan_and_process_market(self, symbol_item: str, tf_id: str):
         """ 全時框商品訊號矩陣掃描引擎核心 """
         if self.check_circuit_breaker():
@@ -926,7 +1097,12 @@ class SykesTradingBot:
 
     # 2. QQE MOD 與指標訊號計算
         p = get_params(tf_id, "long")  # 預設載入基本結構看盤
-        rsi_ma, trailing_band = calculate_full_qqe_mod(df, QQE_RSI, QQE_SF, QQE_FACTOR_P)
+        rsi_ma, trailing_band = calculate_full_qqe_mod(
+            df,
+            rsi_pd=int(p.get("qqe_rsi", QQE_RSI)),
+            sf_pd=int(p.get("qqe_sf", QQE_SF)),
+            factor_mult=float(p.get("qqe_factor", QQE_FACTOR_P))
+        )
         atr_series = calculate_average_true_range(df, 14)
         adx_series = calculate_directional_movement_index(df, 14)
 
@@ -961,8 +1137,10 @@ class SykesTradingBot:
                 calculated_sl = current_close_price * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
 
+            is_swing  = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
+            tp2_mult  = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             tp1_target = current_close_price + (current_atr * p["tp1_mult"])
-            tp2_target = current_close_price + (current_atr * p["tp2_swing_mult"])
+            tp2_target = current_close_price + (current_atr * tp2_mult)
 
             # 計算盈虧比 (Reward-to-Risk Ratio)
             risk_delta = abs(current_close_price - calculated_sl) or 1e-9
@@ -983,7 +1161,7 @@ class SykesTradingBot:
             signal_payload = {
                 "side": "long", "entry": current_close_price, "sl": round(calculated_sl, 5),
                 "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
-                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": True,
+                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
                 "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
             }
 
@@ -1006,51 +1184,53 @@ class SykesTradingBot:
             if funding_rate < FUNDING_SHORT_MIN:
                 return
 
-        p = get_params(tf_id, "short")
-        lookback = int(p["structure_lookback"])
-        recent_high = df["high"].iloc[-lookback:].max()
-        calculated_sl = recent_high + (current_atr * p["sl_atr_buffer"])
+            p = get_params(tf_id, "short")
+            lookback = int(p["structure_lookback"])
+            recent_high = df["high"].iloc[-lookback:].max()
+            calculated_sl = recent_high + (current_atr * p["sl_atr_buffer"])
 
-        risk_pct = (abs(calculated_sl - current_close_price) / current_close_price)
-        if risk_pct > MAX_SL:
-            calculated_sl = current_close_price * (1.0 + MAX_SL)
-            risk_pct = MAX_SL
+            risk_pct = (abs(calculated_sl - current_close_price) / current_close_price)
+            if risk_pct > MAX_SL:
+                calculated_sl = current_close_price * (1.0 + MAX_SL)
+                risk_pct = MAX_SL
 
-        tp1_target = current_close_price - (current_atr * p["tp1_mult"])
-        tp2_target = current_close_price - (current_atr * p["tp2_swing_mult"])
+            is_swing  = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
+            tp2_mult  = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
+            tp1_target = current_close_price - (current_atr * p["tp1_mult"])
+            tp2_target = current_close_price - (current_atr * tp2_mult)
 
-        risk_delta = abs(calculated_sl - current_close_price) or 1e-9
-        rr1 = abs(current_close_price - tp1_target) / risk_delta
-        rr2 = abs(current_close_price - tp2_target) / risk_delta
+            risk_delta = abs(calculated_sl - current_close_price) or 1e-9
+            rr1 = abs(current_close_price - tp1_target) / risk_delta
+            rr2 = abs(current_close_price - tp2_target) / risk_delta
 
-        cvd_verified = True
-        cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
-        if cona_code:
-            end_ts = int(time.time() * 1000)
-            start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
-            cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
-            if not cvd_line.empty and len(cvd_line) >= 2:
-                if cvd_line.iloc[-1] > cvd_line.iloc[-2]:
-                    cvd_verified = False  # 價跌量增，空頭背離過濾
+            cvd_verified = True
+            cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
+            if cona_code:
+                end_ts = int(time.time() * 1000)
+                start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
+                cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
+                if not cvd_line.empty and len(cvd_line) >= 2:
+                    if cvd_line.iloc[-1] > cvd_line.iloc[-2]:
+                        cvd_verified = False  # 價跌量增，空頭背離過濾
 
-        signal_payload = {
-            "side": "short", "entry": current_close_price, "sl": round(calculated_sl, 5),
-            "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
-            "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": True,
-            "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
-        }
+            signal_payload = {
+                "side": "short", "entry": current_close_price, "sl": round(calculated_sl, 5),
+                "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
+                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
+                "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
+            }
 
-        self.set_cooldown(symbol_item, tf_id)
-        callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
+            self.set_cooldown(symbol_item, tf_id)
+            callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
 
-        if AUTO_TRADE.get(tf_id) and cvd_verified:
-            execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
-        else:
-            pos = PaperPosition()
-            pos.open = True; pos.side = "short"; pos.entry = current_close_price
-            pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
-            pos.exit_mode = p["exit_mode"]
-            self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
+            if AUTO_TRADE.get(tf_id) and cvd_verified:
+                execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
+            else:
+                pos = PaperPosition()
+                pos.open = True; pos.side = "short"; pos.entry = current_close_price
+                pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
+                pos.exit_mode = p["exit_mode"]
+                self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
 
 _bot_ref = SykesTradingBot()
 
@@ -1257,6 +1437,8 @@ def main_polling_loop():
 
         if _PAUSED:
             continue
+
+        check_trailing_stops_for_real()
 
         for tf in active_tfs_to_run:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
