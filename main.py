@@ -103,8 +103,8 @@ _STATE_LOCK = Lock()
 AUTO_TRADE: Dict[str, bool] = {
 "15m": True,
 "30m": True,
-"1H": True,
-"4H": True
+"1H":  True,
+"4H":  False   # 4H 僅發 DC 通知，需手動授權才下單
 }
 
 # API 基本節點網址
@@ -806,11 +806,13 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         tp1_order_id = None
 
         # 止損：OKX algo slTriggerPx 條件單
+        # posSide 必須與倉位方向一致：做多 side=sell/posSide=long，做空 side=buy/posSide=short
         try:
             sl_result = _place_okx_algo_sl(
-                inst_id=inst_id, side=exit_action,
+                inst_id=inst_id,
+                side="sell" if trade_side == "long" else "buy",
                 amount=str(final_order_amount), sl_trigger_px=str(stop_loss),
-                pos_side=trade_side
+                pos_side=trade_side   # "long" or "short"
             )
             sl_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
             execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
@@ -835,27 +837,34 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         else:
             remainder_amount = round(remainder_amount, amount_precision)
 
-        # TP2：exit_mode=fixed → 限價；exit_mode=trailing → 追蹤止損 Algo，不掛限價
-        if exit_mode == "trailing":
-            try:
-                _place_okx_algo_trailing(
-                    inst_id=inst_id, side=exit_action,
-                    amount=str(remainder_amount), callback_ratio="0.02",
-                    pos_side=trade_side
-                )
-                execution_report.append(f"🌕 TP2 追蹤止損 Algo 已掛置 (50%) 回撤率: 2%")
-            except Exception as tp2e:
-                execution_report.append(f"⚠️ TP2 追蹤止損委託失敗: {tp2e}")
+        # TP2 最小下單量檢查
+        _min_amt = float(((market_structure.get("limits") or {}).get("amount") or {}).get("min") or 0)
+        if _min_amt == 0:
+            _min_amt = 1.0 / float(contract_size) if float(contract_size) > 0 else 1.0
+        if remainder_amount <= 0 or remainder_amount < _min_amt:
+            dc_log(f"⚠️ TP2 跳過：剩餘張數 {remainder_amount} 小於最小下單量 {_min_amt}")
         else:
-            try:
-                ex.create_order(
-                    symbol=symbol_id, type="limit", side=exit_action,
-                    amount=remainder_amount, price=tp2,
-                    params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
-                )
-                execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
-            except Exception as tp2e:
-                execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+            # TP2：exit_mode=fixed → 限價；exit_mode=trailing → 追蹤止損 Algo，不掛限價
+            if exit_mode == "trailing":
+                try:
+                    _place_okx_algo_trailing(
+                        inst_id=inst_id, side=exit_action,
+                        amount=str(remainder_amount), callback_ratio="0.02",
+                        pos_side=trade_side
+                    )
+                    execution_report.append(f"🌕 TP2 追蹤止損 Algo 已掛置 (50%) 回撤率: 2%")
+                except Exception as tp2e:
+                    execution_report.append(f"⚠️ TP2 追蹤止損委託失敗: {tp2e}")
+            else:
+                try:
+                    ex.create_order(
+                        symbol=symbol_id, type="limit", side=exit_action,
+                        amount=remainder_amount, price=tp2,
+                        params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                    )
+                    execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
+                except Exception as tp2e:
+                    execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
         # exit_mode=trailing：寫入實盤追蹤止損狀態機
         if exit_mode == "trailing" and sl_algo_id and tp1_order_id:
@@ -970,6 +979,65 @@ def check_trailing_stops_for_real():
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
 
+def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
+                          df: pd.DataFrame, direction: str) -> Tuple[bool, str]:
+    """
+    秋總三層背離吸收確認（三層缺一不可）
+    做多：price<=price[1] + 現貨CVD翻上 + 合約CVD翻上 + OI上升
+    做空：price>=price[1] + 現貨CVD翻下 + 合約CVD翻下 + OI上升
+    """
+    cona_perp = CONA_PERP.get(symbol_item)
+    cona_spot = CONA_SPOT.get(symbol_item)
+
+    if not cona_perp:
+        return True, "無Coinalyze合約數據，略過CVD過濾"
+
+    end_ts   = int(time.time() * 1000)
+    start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
+
+    cvd_perp  = calculate_cumulative_volume_delta(cona_perp, okx_bar_fmt, start_ts, end_ts)
+    cvd_spot  = (calculate_cumulative_volume_delta(cona_spot, okx_bar_fmt, start_ts, end_ts)
+                 if cona_spot else pd.Series(dtype=float))
+    oi_series = fetch_open_interest_series(cona_perp, okx_bar_fmt, start_ts, end_ts)
+
+    if len(cvd_perp) < 2:
+        return True, "合約CVD數據不足，略過"
+
+    current_close = df["close"].iloc[-1]
+    prev_close    = df["close"].iloc[-2]
+    rejects = []
+
+    if direction == "long":
+        if current_close > prev_close:
+            rejects.append("價格上漲（無背離）")
+        if cvd_perp.iloc[-1] <= cvd_perp.iloc[-2]:
+            rejects.append("合約CVD未翻上")
+        if len(cvd_spot) >= 2 and cvd_spot.iloc[-1] <= cvd_spot.iloc[-2]:
+            rejects.append("現貨CVD未翻上")
+        if len(oi_series) >= 2 and oi_series.iloc[-1] <= oi_series.iloc[-2]:
+            rejects.append("OI未上升")
+    else:
+        if current_close < prev_close:
+            rejects.append("價格下跌（無背離）")
+        if cvd_perp.iloc[-1] >= cvd_perp.iloc[-2]:
+            rejects.append("合約CVD未翻下")
+        if len(cvd_spot) >= 2 and cvd_spot.iloc[-1] >= cvd_spot.iloc[-2]:
+            rejects.append("現貨CVD未翻下")
+        if len(oi_series) >= 2 and oi_series.iloc[-1] <= oi_series.iloc[-2]:
+            rejects.append("OI未上升")
+
+    if rejects:
+        return False, "、".join(rejects)
+
+    has_spot = len(cvd_spot) >= 2
+    if direction == "long":
+        reason = ("現貨CVD↑+合約CVD↑+OI↑（三層吸收確認）" if has_spot
+                  else "合約CVD↑+OI↑（無現貨數據）")
+    else:
+        reason = ("現貨CVD↓+合約CVD↓+OI↑（三層吸收確認）" if has_spot
+                  else "合約CVD↓+OI↑（無現貨數據）")
+    return True, reason
+
 class SykesTradingBot:
     def __init__(self):
         self.cooldown_dict: Dict[str, float] = {}
@@ -1076,7 +1144,7 @@ class SykesTradingBot:
         return cond1 and cond2 and cond3
 
     def scan_and_process_market(self, symbol_item: str, tf_id: str):
-        """ 全時框商品訊號矩陣掃描引擎核心 """
+        """ 全時框商品訊號矩陣掃描引擎核心（v3 Vegas+QQE穿越+CVD三層吸收） """
         if self.check_circuit_breaker():
             return
         if self.is_cooldown(symbol_item, tf_id):
@@ -1092,145 +1160,133 @@ class SykesTradingBot:
         if df.empty or len(df) < 100:
             return
 
-        current_close_price = df["close"].iloc[-1]
-        self.update_paper_trailing_and_exits(symbol_item, current_close_price)
+        current_close = df["close"].iloc[-1]
+        self.update_paper_trailing_and_exits(symbol_item, current_close)
 
-    # 2. QQE MOD 與指標訊號計算
-        p = get_params(tf_id, "long")  # 預設載入基本結構看盤
-        rsi_ma, trailing_band = calculate_full_qqe_mod(
-            df,
-            rsi_pd=int(p.get("qqe_rsi", QQE_RSI)),
-            sf_pd=int(p.get("qqe_sf", QQE_SF)),
-            factor_mult=float(p.get("qqe_factor", QQE_FACTOR_P))
-        )
-        atr_series = calculate_average_true_range(df, 14)
-        adx_series = calculate_directional_movement_index(df, 14)
-
-        current_rsi_ma = rsi_ma.iloc[-1]
-        current_band = trailing_band.iloc[-1]
-        prev_rsi_ma = rsi_ma.iloc[-2]
-        prev_band = trailing_band.iloc[-2]
+    # 2. 技術指標
+        atr_series  = calculate_average_true_range(df, 14)
+        adx_series  = calculate_directional_movement_index(df, 14)
         current_atr = atr_series.iloc[-1]
         current_adx = adx_series.iloc[-1]
 
-    # 3. 趨勢強度與多空狀態過濾
-        trend_is_long = current_rsi_ma > current_band
-        trend_just_crossed_long = (prev_rsi_ma <= prev_band) and trend_is_long
-        trend_just_crossed_short = (prev_rsi_ma >= prev_band) and not trend_is_long
+    # 3. Vegas 通道
+        ema12  = df["close"].ewm(span=12,  adjust=False).mean()
+        ema144 = df["close"].ewm(span=144, adjust=False).mean()
+        ema169 = df["close"].ewm(span=169, adjust=False).mean()
+        ema576 = df["close"].ewm(span=576, adjust=False).mean()
+        ema676 = df["close"].ewm(span=676, adjust=False).mean()
+        large_top = max(ema576.iloc[-1], ema676.iloc[-1])
+        large_bot = min(ema576.iloc[-1], ema676.iloc[-1])
+        small_top = max(ema144.iloc[-1], ema169.iloc[-1])
+        small_bot = min(ema144.iloc[-1], ema169.iloc[-1])
 
-    # 資金費率過濾
+    # 4. 通道纏繞過濾（盤整不交易）
+        channel_ok = abs(ema144.iloc[-1] - ema576.iloc[-1]) >= current_atr * 2.0
+
+    # 5. 空頭趨勢（連續 >= 20 根 EMA144 < EMA576）
+        bear_trend = (ema144.iloc[-20:] < ema576.iloc[-20:]).all()
+
+    # 6. QQE MOD（多空各自使用 BEST_PARAMS 獨立參數）
+        p_l = get_params(tf_id, "long")
+        p_s = get_params(tf_id, "short")
+        rsi_ma_l, trail_l = calculate_full_qqe_mod(
+            df, rsi_pd=int(p_l.get("qqe_rsi", QQE_RSI)),
+            sf_pd=int(p_l.get("qqe_sf", QQE_SF)),
+            factor_mult=float(p_l.get("qqe_factor", QQE_FACTOR_P))
+        )
+        rsi_ma_s, trail_s = calculate_full_qqe_mod(
+            df, rsi_pd=int(p_s.get("qqe_rsi", QQE_RSI)),
+            sf_pd=int(p_s.get("qqe_sf", QQE_SF)),
+            factor_mult=float(p_s.get("qqe_factor", QQE_FACTOR_P))
+        )
+
+    # 7. 進場條件（v3：Vegas 結構 + QQE 穿越 + ADX + Channel + Funding）
         funding_rate = fetch_current_funding_rate(okx_swap_symbol)
 
-    # 4. 多頭訊號與進場規劃
-        if trend_just_crossed_long and current_adx >= ADX_THR:
-            if funding_rate > FUNDING_LONG_MAX:
-                return
+        long_C1 = (current_close > large_top and
+                   current_close > small_bot and
+                   df["low"].iloc[-1] < small_bot)
+        long_C2 = current_close > ema12.iloc[-1]
+        long_C3 = (rsi_ma_l.iloc[-2] <= trail_l.iloc[-2] and
+                   rsi_ma_l.iloc[-1] > trail_l.iloc[-1])
+        is_long  = (ema144.iloc[-1] > ema576.iloc[-1] and
+                    long_C1 and long_C2 and long_C3 and
+                    current_adx >= ADX_THR and channel_ok and
+                    (funding_rate is None or funding_rate <= FUNDING_LONG_MAX))
 
-            p = get_params(tf_id, "long")
-            lookback = int(p["structure_lookback"])
-            recent_low = df["low"].iloc[-lookback:].min()
-            calculated_sl = recent_low - (current_atr * p["sl_atr_buffer"])
+        short_C1 = (current_close < large_bot and
+                    current_close < small_top and
+                    df["high"].iloc[-1] > small_top)
+        short_C2 = current_close < ema12.iloc[-1]
+        short_C3 = (rsi_ma_s.iloc[-2] >= trail_s.iloc[-2] and
+                    rsi_ma_s.iloc[-1] < trail_s.iloc[-1])
+        is_short = (bear_trend and
+                    short_C1 and short_C2 and short_C3 and
+                    current_adx >= ADX_THR and channel_ok and
+                    (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN))
 
-            # 確保止損百分比安全
-            risk_pct = (abs(current_close_price - calculated_sl) / current_close_price)
+        if not is_long and not is_short:
+            return
+
+        direction = "long" if is_long else "short"
+
+    # 8. 秋總三層背離吸收 CVD 過濾
+        cvd_pass, cvd_reason = _check_cvd_absorption(
+            symbol_item, tf_id, okx_bar_fmt, df, direction
+        )
+
+    # 9. SL/TP 計算
+        p = p_l if is_long else p_s
+        lookback = int(p["structure_lookback"])
+
+        if is_long:
+            recent_extreme = df["low"].iloc[-lookback:].min()
+            calculated_sl  = recent_extreme - current_atr * p["sl_atr_buffer"]
+            risk_pct       = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
-                calculated_sl = current_close_price * (1.0 - MAX_SL)
+                calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
-
-            is_swing  = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult  = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            tp1_target = current_close_price + (current_atr * p["tp1_mult"])
-            tp2_target = current_close_price + (current_atr * tp2_mult)
-
-            # 計算盈虧比 (Reward-to-Risk Ratio)
-            risk_delta = abs(current_close_price - calculated_sl) or 1e-9
-            rr1 = abs(tp1_target - current_close_price) / risk_delta
-            rr2 = abs(tp2_target - current_close_price) / risk_delta
-
-            # Coinalyze CVD 動能過濾
-            cvd_verified = True
-            cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
-            if cona_code:
-                end_ts = int(time.time() * 1000)
-                start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
-                cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
-                if not cvd_line.empty and len(cvd_line) >= 2:
-                    if cvd_line.iloc[-1] < cvd_line.iloc[-2]:
-                        cvd_verified = False
-
-            signal_payload = {
-                "side": "long", "entry": current_close_price, "sl": round(calculated_sl, 5),
-                "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
-                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
-                "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
-            }
-
-            self.set_cooldown(symbol_item, tf_id)
-            callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
-
-            # 路由：若開啟自動下單則直通實盤管道
-            if AUTO_TRADE.get(tf_id) and cvd_verified:
-                execute_okx_trade_pipeline(okx_swap_symbol, "long", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
-            else:
-                # 寫入 PaperPosition 狀態紀錄機
-                pos = PaperPosition()
-                pos.open = True; pos.side = "long"; pos.entry = current_close_price
-                pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
-                pos.exit_mode = p["exit_mode"]
-                self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
-
-    # 5. 空頭訊號與進場規劃
-        elif trend_just_crossed_short and current_adx >= ADX_THR:
-            if funding_rate < FUNDING_SHORT_MIN:
-                return
-
-            p = get_params(tf_id, "short")
-            lookback = int(p["structure_lookback"])
-            recent_high = df["high"].iloc[-lookback:].max()
-            calculated_sl = recent_high + (current_atr * p["sl_atr_buffer"])
-
-            risk_pct = (abs(calculated_sl - current_close_price) / current_close_price)
+            is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
+            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
+            tp1_target = current_close + current_atr * p["tp1_mult"]
+            tp2_target = current_close + current_atr * tp2_mult
+        else:
+            recent_extreme = df["high"].iloc[-lookback:].max()
+            calculated_sl  = recent_extreme + current_atr * p["sl_atr_buffer"]
+            risk_pct       = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
-                calculated_sl = current_close_price * (1.0 + MAX_SL)
+                calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
+            is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
+            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
+            tp1_target = current_close - current_atr * p["tp1_mult"]
+            tp2_target = current_close - current_atr * tp2_mult
 
-            is_swing  = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult  = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            tp1_target = current_close_price - (current_atr * p["tp1_mult"])
-            tp2_target = current_close_price - (current_atr * tp2_mult)
+        risk_delta = abs(current_close - calculated_sl) or 1e-9
+        rr1 = abs(tp1_target - current_close) / risk_delta
+        rr2 = abs(tp2_target - current_close) / risk_delta
 
-            risk_delta = abs(calculated_sl - current_close_price) or 1e-9
-            rr1 = abs(current_close_price - tp1_target) / risk_delta
-            rr2 = abs(current_close_price - tp2_target) / risk_delta
+        signal_payload = {
+            "side": direction, "entry": current_close, "sl": round(calculated_sl, 5),
+            "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
+            "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
+            "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
+        }
 
-            cvd_verified = True
-            cona_code = CONA_PERP.get(symbol_item, CONA_SPOT.get(symbol_item))
-            if cona_code:
-                end_ts = int(time.time() * 1000)
-                start_ts = end_ts - (BAR_SECONDS[tf_id] * CVD_WINDOW * 1000)
-                cvd_line = calculate_cumulative_volume_delta(cona_code, okx_bar_fmt, start_ts, end_ts)
-                if not cvd_line.empty and len(cvd_line) >= 2:
-                    if cvd_line.iloc[-1] > cvd_line.iloc[-2]:
-                        cvd_verified = False  # 價跌量增，空頭背離過濾
+        self.set_cooldown(symbol_item, tf_id)
+        create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
-            signal_payload = {
-                "side": "short", "entry": current_close_price, "sl": round(calculated_sl, 5),
-                "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
-                "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
-                "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
-            }
-
-            self.set_cooldown(symbol_item, tf_id)
-            callback_id = create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_verified)
-
-            if AUTO_TRADE.get(tf_id) and cvd_verified:
-                execute_okx_trade_pipeline(okx_swap_symbol, "short", current_close_price, signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"])
-            else:
-                pos = PaperPosition()
-                pos.open = True; pos.side = "short"; pos.entry = current_close_price
-                pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
-                pos.exit_mode = p["exit_mode"]
-                self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
+        if AUTO_TRADE.get(tf_id) and cvd_pass:
+            execute_okx_trade_pipeline(
+                okx_swap_symbol, direction, current_close,
+                signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"]
+            )
+        else:
+            pos = PaperPosition()
+            pos.open = True; pos.side = direction; pos.entry = current_close
+            pos.sl = signal_payload["sl"]; pos.tp1 = signal_payload["tp1"]; pos.tp2 = signal_payload["tp2"]
+            pos.exit_mode = p["exit_mode"]
+            self.paper_positions[f"{symbol_item}_{tf_id}"] = pos
 
 _bot_ref = SykesTradingBot()
 
