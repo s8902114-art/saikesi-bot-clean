@@ -167,6 +167,11 @@ SYMBOLS: Dict[str, str] = {
 
 OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 
+# 動態幣種列表狀態
+_SYMBOLS_FALLBACK: Dict[str, str] = dict(SYMBOLS)   # 硬編碼備援
+_SYMBOLS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbols_cache.json")
+_symbols_last_updated: float = 0.0   # UNIX timestamp，0 = 從未更新
+
 CONA_SPOT: Dict[str, str] = {
 "BTC/USDT": "BTCUSDT.A", "ETH/USDT": "ETHUSDT.A", "SOL/USDT": "SOLUSDT.A",
 "XRP/USDT": "XRPUSDT.A", "BNB/USDT": "BNBUSDT.A", "DOGE/USDT": "DOGEUSDT.A",
@@ -1616,10 +1621,108 @@ def poll_dc_commands():
         except Exception as e:
             print(f"[DC] 指令輪詢異常: {e}")
         sleep(5)
+def _fetch_okx_swap_set() -> set:
+    """抓取 OKX 所有上線中的 USDT 永續合約 instId 集合（免 API KEY）"""
+    try:
+        r = requests.get(
+            f"{OKX_BASE}/api/v5/public/instruments",
+            params={"instType": "SWAP", "quoteCcy": "USDT"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            return {d["instId"] for d in r.json().get("data", []) if d.get("state") == "live"}
+    except Exception as e:
+        print(f"[SYMBOLS] OKX 合約列表抓取失敗: {e}", flush=True)
+    return set()
+
+def _fetch_coingecko_top100() -> list:
+    """從 CoinGecko 抓市值前100幣種 symbol 列表（免 API KEY）"""
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={"vs_currency": "usd", "order": "market_cap_desc",
+                    "per_page": 100, "page": 1, "sparkline": "false"},
+            headers={"Accept": "application/json"},
+            timeout=15
+        )
+        if r.status_code == 200:
+            return [c["symbol"].upper() for c in r.json()]
+        print(f"[SYMBOLS] CoinGecko HTTP {r.status_code}", flush=True)
+    except Exception as e:
+        print(f"[SYMBOLS] CoinGecko 抓取失敗: {e}", flush=True)
+    return []
+
+def build_dynamic_symbols() -> bool:
+    """
+    重建 SYMBOLS + OKX_SWAP：
+      CoinGecko 市值前100（排除穩定幣）× OKX 有上線永續合約
+    失敗時回傳 False，SYMBOLS 保持不變。
+    """
+    global SYMBOLS, OKX_SWAP, _symbols_last_updated
+
+    # 1. 載入快取（若此次啟動尚未載入）
+    if _symbols_last_updated == 0.0:
+        try:
+            if os.path.exists(_SYMBOLS_CACHE_FILE):
+                cached = json.load(open(_SYMBOLS_CACHE_FILE, encoding="utf-8"))
+                SYMBOLS = cached["symbols"]
+                OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
+                _symbols_last_updated = cached.get("updated", 1.0)
+                print(f"[SYMBOLS] 快取載入：{len(SYMBOLS)} 個幣種", flush=True)
+        except Exception as e:
+            print(f"[SYMBOLS] 快取讀取失敗: {e}", flush=True)
+
+    print("[SYMBOLS] 向 CoinGecko 抓取市值前100...", flush=True)
+    top100 = _fetch_coingecko_top100()
+    if not top100:
+        print("[SYMBOLS] ⚠️ CoinGecko 失敗，維持現有列表", flush=True)
+        return False
+
+    print("[SYMBOLS] 向 OKX 確認永續合約...", flush=True)
+    okx_swaps = _fetch_okx_swap_set()
+    if not okx_swaps:
+        print("[SYMBOLS] ⚠️ OKX 合約列表失敗，維持現有列表", flush=True)
+        return False
+
+    # 穩定幣排除清單
+    STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDD", "USDP"}
+
+    new_symbols: Dict[str, str] = {}
+    for coin in top100:
+        if coin in STABLECOINS:
+            continue
+        inst_id = f"{coin}-USDT-SWAP"
+        if inst_id in okx_swaps:
+            new_symbols[inst_id] = f"{coin}/USDT"
+
+    if len(new_symbols) < 10:
+        print(f"[SYMBOLS] ⚠️ 動態列表僅 {len(new_symbols)} 個，回退備援列表", flush=True)
+        return False
+
+    SYMBOLS = new_symbols
+    OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
+    _symbols_last_updated = time.time()
+
+    # 儲存快取
+    try:
+        json.dump({"updated": _symbols_last_updated, "symbols": SYMBOLS},
+                  open(_SYMBOLS_CACHE_FILE, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[SYMBOLS] 快取寫入失敗: {e}", flush=True)
+
+    msg = f"🔄 幣種列表已動態更新：市值前100 × OKX 永續，共 **{len(SYMBOLS)}** 個"
+    print(f"[SYMBOLS] ✅ {msg}", flush=True)
+    dc_log(msg)
+    return True
+
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
-    start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
+    # 啟動時動態更新幣種列表（快取優先，失敗用備援）
+    build_dynamic_symbols()
+    n_sym = len(SYMBOLS)
+
+    start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
     dc_log(start_alert)
     tg_log(start_alert)
 
@@ -1643,9 +1746,14 @@ def main_polling_loop():
 
         check_trailing_stops_for_real()
 
+        # 每週自動更新幣種列表（7天 = 604800秒）
+        if time.time() - _symbols_last_updated > 604800:
+            print("[SYMBOLS] 距上次更新超過7天，自動重新抓取...", flush=True)
+            build_dynamic_symbols()
+
         for tf in active_tfs_to_run:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
-        for symbol_item in SYMBOLS.values():
+        for symbol_item in list(SYMBOLS.values()):   # list() 快照，防止週更新期間競態
             try:
                 _bot_ref.scan_and_process_market(symbol_item, tf)
                 sleep(0.25)  # 內部防爆頻率限流阻尼
