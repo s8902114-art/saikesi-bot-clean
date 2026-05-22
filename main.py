@@ -85,8 +85,8 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
-MARGIN_PCT = 10.0          # 單筆交易佔用總可用資金之百分比 (10.0 = 10%)
-POSITION_SLOTS = 10        # 倉位格數，帳戶可用餘額均分格數
+RISK_PCT     = 0.10        # 單筆最大風險金額 = 啟動時總資金 × 10%
+POSITION_SLOTS = 10        # 倉位格數（保留供 !setslots 指令使用）
 SIGNAL_COOLDOWN = 1800     # 同一商品商品相同時框的訊號冷卻時間 (秒)
 MAX_CONSEC_LOSS = 3       # 最大連續虧損次數限制，達標後觸發熔斷
 PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
@@ -96,6 +96,7 @@ PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 _LIVE_MODE = True if os.environ.get("OKX_API_KEY") else False
 _PAUSED = False
 _BOT_START_TS = time.time()
+_INITIAL_BALANCE: Optional[float] = None   # 啟動時抓取一次，固定風險基準
 _STATE_LOCK = Lock()
 
 # 各時框獨立自動下單路由開關
@@ -225,45 +226,44 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-# TP/SL/exit_mode: 來自 final_params_all.json (master_optimizer_v2, 2026-05-18)
-# qqe_rsi/sf/factor: 各時框多空獨立回測優化值
+# 手動設定 2026-05-22；C3 改為 rsiMa 穿越 50 線版本
 "15m_long": {
-"tp1_mult": 1.5,   "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
-"sl_atr_buffer": 0.01, "structure_lookback": 28, "exit_mode": "fixed",
-"qqe_rsi": 9, "qqe_sf": 3, "qqe_factor": 3.0
+"tp1_mult": 1.725,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+"sl_atr_buffer": 0.08, "structure_lookback": 17, "exit_mode": "trailing",
+"qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
 "15m_short": {
-"tp1_mult": 1.7,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
-"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
-"qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
+"tp1_mult": 2.0,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+"sl_atr_buffer": 0.03, "structure_lookback": 20, "exit_mode": "fixed",
+"qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
 "30m_long": {
-"tp1_mult": 1.7,   "tp2_intraday_mult": 2.2,  "tp2_swing_mult": 2.5,
+"tp1_mult": 1.725,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
 "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_short": {
-"tp1_mult": 1.15,  "tp2_intraday_mult": 1.35, "tp2_swing_mult": 2.25,
+"tp1_mult": 2.0,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
 "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
 "1H_long": {
-"tp1_mult": 1.3,   "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 4.0,
+"tp1_mult": 1.725,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "1H_short": {
-"tp1_mult": 1.7,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 2.5,
+"tp1_mult": 2.0,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
-"tp1_mult": 1.3,   "tp2_intraday_mult": 1.5,  "tp2_swing_mult": 3.0,
+"tp1_mult": 1.725,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
-"tp1_mult": 1.5,   "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 4.0,
+"tp1_mult": 2.0,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed",
 "qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
 },
@@ -588,22 +588,25 @@ def calculate_full_qqe_mod(data_df: pd.DataFrame, rsi_pd: int = 6, sf_pd: int = 
     smoothed_atr_rsi = absolute_rsi_delta.ewm(span=2 * rsi_pd - 1, adjust=False).mean()
     dar_trailing_band = smoothed_atr_rsi.ewm(span=2 * rsi_pd - 1, adjust=False).mean() * factor_mult
 
-    trailing_line_value = 0.0
+    trailing_line_value = float('nan')
     trailing_buffer_list = []
     for idx in range(len(rsi_smoothed_ma)):
         current_ma_val = rsi_smoothed_ma.iloc[idx]
-        if idx == 0:
-            trailing_line_value = current_ma_val
+        dar_val = dar_trailing_band.iloc[idx]
+        if idx == 0 or (current_ma_val != current_ma_val) or (dar_val != dar_val):
+            # NaN guard: keep previous or initialize
+            if trailing_line_value != trailing_line_value:
+                trailing_line_value = current_ma_val if (current_ma_val == current_ma_val) else 50.0
         else:
             previous_trailing_value = trailing_line_value
+            if previous_trailing_value != previous_trailing_value:
+                previous_trailing_value = current_ma_val
             if current_ma_val < previous_trailing_value:
-                trailing_line_value = current_ma_val + dar_trailing_band.iloc[idx]
-                if rsi_smoothed_ma.iloc[idx-1] < previous_trailing_value and trailing_line_value < previous_trailing_value:
-                    trailing_line_value = previous_trailing_value
+                # Bear state: trail ratchets down (can only decrease)
+                trailing_line_value = min(previous_trailing_value, current_ma_val + dar_val)
             else:
-                trailing_line_value = current_ma_val - dar_trailing_band.iloc[idx]
-                if rsi_smoothed_ma.iloc[idx-1] > previous_trailing_value and trailing_line_value > previous_trailing_value:
-                    trailing_line_value = previous_trailing_value
+                # Bull state: trail ratchets up (can only increase)
+                trailing_line_value = max(previous_trailing_value, current_ma_val - dar_val)
         trailing_buffer_list.append(trailing_line_value)
     return rsi_smoothed_ma, pd.Series(trailing_buffer_list, index=data_df.index)
 
@@ -713,9 +716,10 @@ def _cancel_okx_algo_order(inst_id: str, algo_id: str) -> bool:
         return False
 
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
-                              stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed") -> None:
+                              stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
+                              tf_id: str = "15m") -> None:
     """ 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 """
-    global _LIVE_MODE, MAX_LEVERAGE, POSITION_SLOTS
+    global _LIVE_MODE, MAX_LEVERAGE, POSITION_SLOTS, _INITIAL_BALANCE
     if not _LIVE_MODE:
         dc_log(f"📝 [紙交易通知] 商品 {symbol_id} 方向 {trade_side} 處於 Paper 模擬模式，跳過交易。")
         return
@@ -730,47 +734,43 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ **實盤交易中斷**: 可用保證金不足 ({available_usdt:.2f} USDT)")
             return
 
-        # 每倉保證金 = 帳戶可用餘額 ÷ POSITION_SLOTS
-        allocated_margin = available_usdt / POSITION_SLOTS
-
-        # ── 下單前安全三項檢查 ──
-        positions_raw = ex.fetch_positions()
-        open_positions_count = len([p for p in positions_raw if float(p.get("contracts", 0) or 0) > 0])
-
-        # 條件 3：已開倉數量 < POSITION_SLOTS
-        if open_positions_count >= POSITION_SLOTS:
-            dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
-            return
-
-        # 條件 1：可用餘額 >= 每倉保證金
-        if available_usdt < allocated_margin:
-            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {allocated_margin:.2f} USDT")
-            return
-
-        # 條件 2：可用餘額 - 每倉保證金 >= 已開倉數量 × 每倉保證金 × 0.1
-        buffer_required = open_positions_count * allocated_margin * 0.1
-        if (available_usdt - allocated_margin) < buffer_required:
-            needed = allocated_margin + buffer_required
-            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {needed:.2f} USDT")
-            return
+        # ── RISK 公式（基於啟動時總資金 × RISK_PCT）──────────────────────────
+        # 若尚未抓到初始餘額，以當前可用餘額作為基準
+        base_funds = _INITIAL_BALANCE if _INITIAL_BALANCE and _INITIAL_BALANCE > 0 else available_usdt
+        risk_usdt = base_funds * RISK_PCT          # 單筆最大風險金額
 
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
 
-        sl_distance_percentage = (abs(current_market_price - stop_loss) / current_market_price) * 100.0
-        if sl_distance_percentage <= 0.01:
+        sl_distance_pct = abs(current_market_price - stop_loss) / current_market_price
+        if sl_distance_pct <= 0.0001:
             dc_log("⚠️ **風控異常**: 結構止損間距過小，自動拒絕下單以防爆倉。")
             return
 
-        # 槓桿 = min(100 ÷ 止損距離%, MAX_LEVERAGE)
-        calculated_leverage = max(1, min(int(100.0 / sl_distance_percentage), MAX_LEVERAGE))
+        # 槓桿 = min(50 ÷ 止損距離%, MAX_LEVERAGE)
+        calculated_leverage = max(1, min(int(50.0 / (sl_distance_pct * 100.0)), MAX_LEVERAGE))
+
+        # 倉位價值 = 風險金額 ÷ 止損距離%；保證金 = 倉位價值 ÷ 槓桿
+        position_value  = risk_usdt / sl_distance_pct
+        allocated_margin = position_value / calculated_leverage
+
+        # 下單前檢查：可用餘額 >= 保證金
+        if available_usdt < allocated_margin:
+            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {allocated_margin:.2f} USDT")
+            return
+
+        # 已開倉數量 < POSITION_SLOTS
+        positions_raw = ex.fetch_positions()
+        open_positions_count = len([p for p in positions_raw if float(p.get("contracts", 0) or 0) > 0])
+        if open_positions_count >= POSITION_SLOTS:
+            dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
+            return
 
         market_structure = ex.market(symbol_id)
         amount_precision = int(market_structure.get("precision", {}).get("amount", 0))
         contract_size = float(market_structure.get("contractSize", 1.0) or 1.0)
 
-        calculated_nominal_value = allocated_margin * calculated_leverage
-        raw_order_amount = calculated_nominal_value / (current_market_price * contract_size)
+        raw_order_amount = position_value / (current_market_price * contract_size)
 
         if amount_precision == 0:
             final_order_amount = max(1, int(raw_order_amount))
@@ -792,7 +792,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         execution_report = [
             f"🚀 **賽克斯實盤下單鏈成功發動**",
             f"商品代號: `{symbol_id}` | 交易方向: `{'做多 LONG' if is_buy else '做空 SHORT'}`",
-            f"配置槓桿: `{calculated_leverage}x` | 下單張數: `{final_order_amount}` | 每倉保證金: `{allocated_margin:.2f} USDT`"
+            f"配置槓桿: `{calculated_leverage}x` | 下單張數: `{final_order_amount}` | 保證金: `{allocated_margin:.2f}` USDT | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
         ]
 
         entry_order = ex.create_market_order(
@@ -882,6 +882,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "current_sl":       stop_loss,
                 "remaining_amount": str(remainder_amount),
                 "pos_side":         trade_side,
+                "tf_id":            tf_id,
             }
             execution_report.append(f"📊 追蹤止損狀態機已啟動 (key: {trade_key})")
 
@@ -951,15 +952,31 @@ def check_trailing_stops_for_real():
                     print(f"[Trailing] {name} TP1成交，SL移至成本價 {be_price}")
 
             else:
-                # TP1 已成交，執行追蹤止損更新
-                close = float(ex.fetch_ticker(symbol).get("last", 0))
+                # TP1 已成交，波浪偵測：當根創近20根新高/低 → 止損移至20根低點/高點
+                tf_wave = trade.get("tf_id", "15m")
+                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
+                if wave_df.empty or len(wave_df) < 20:
+                    continue
+                highs = wave_df["high"].values
+                lows  = wave_df["low"].values
+                cur_high  = highs[-1]
+                cur_low   = lows[-1]
+                prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
+                prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
+
+                new_sl = trade["current_sl"]
                 if direction == "long":
-                    new_sl = max(trade["current_sl"], round(close * 0.98, 5))
+                    # 當根創近20根新高 → 止損移至近20根最低點
+                    if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
+                        candidate = round(float(lows[-20:].min()), 5)
+                        new_sl = max(trade["current_sl"], candidate)
                 else:
-                    new_sl = min(trade["current_sl"], round(close * 1.02, 5))
+                    # 當根創近20根新低 → 止損移至近20根最高點
+                    if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
+                        candidate = round(float(highs[-20:].max()), 5)
+                        new_sl = min(trade["current_sl"], candidate)
 
                 if new_sl != trade["current_sl"]:
-                    # 取消舊止損，掛新止損
                     _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                     exit_side = "sell" if direction == "long" else "buy"
                     sl_result = _place_okx_algo_sl(
@@ -973,10 +990,10 @@ def check_trailing_stops_for_real():
                         trade["sl_algo_id"] = new_algo_id
                         trade["current_sl"] = new_sl
 
-                    msg = f"🔄 追蹤止損更新至 {new_sl}\n幣種：{name}"
+                    msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
                     dc_log(msg)
                     tg_log(msg)
-                    print(f"[Trailing] {name} 追蹤止損更新至 {new_sl}")
+                    print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
@@ -1002,43 +1019,46 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
                  if cona_spot else pd.Series(dtype=float))
     oi_series = fetch_open_interest_series(cona_perp, okx_bar_fmt, start_ts, end_ts)
 
+    # 三層缺一不可 — 任一數據不足直接拒絕
     if len(cvd_perp) < 2:
-        return True, "合約CVD數據不足，略過"
+        return False, "合約CVD數據不足"
+    if len(cvd_spot) < 2:
+        return False, "現貨CVD數據不足"
+    if len(oi_series) < 2:
+        return False, "OI數據不足"
 
     current_close = df["close"].iloc[-1]
     prev_close    = df["close"].iloc[-2]
     rejects = []
 
     if direction == "long":
+        # close <= close[1]：當根無強勢上漲（背離確認）
         if current_close > prev_close:
             rejects.append("價格上漲（無背離）")
         if cvd_perp.iloc[-1] <= cvd_perp.iloc[-2]:
             rejects.append("合約CVD未翻上")
-        if len(cvd_spot) >= 2 and cvd_spot.iloc[-1] <= cvd_spot.iloc[-2]:
+        if cvd_spot.iloc[-1] <= cvd_spot.iloc[-2]:
             rejects.append("現貨CVD未翻上")
-        if len(oi_series) >= 2 and oi_series.iloc[-1] <= oi_series.iloc[-2]:
+        if oi_series.iloc[-1] <= oi_series.iloc[-2]:
             rejects.append("OI未上升")
     else:
+        # close >= close[1]：當根無強勢下跌（背離確認）
         if current_close < prev_close:
             rejects.append("價格下跌（無背離）")
         if cvd_perp.iloc[-1] >= cvd_perp.iloc[-2]:
             rejects.append("合約CVD未翻下")
-        if len(cvd_spot) >= 2 and cvd_spot.iloc[-1] >= cvd_spot.iloc[-2]:
+        if cvd_spot.iloc[-1] >= cvd_spot.iloc[-2]:
             rejects.append("現貨CVD未翻下")
-        if len(oi_series) >= 2 and oi_series.iloc[-1] <= oi_series.iloc[-2]:
+        if oi_series.iloc[-1] <= oi_series.iloc[-2]:
             rejects.append("OI未上升")
 
     if rejects:
         return False, "、".join(rejects)
 
-    has_spot = len(cvd_spot) >= 2
     if direction == "long":
-        reason = ("現貨CVD↑+合約CVD↑+OI↑（三層吸收確認）" if has_spot
-                  else "合約CVD↑+OI↑（無現貨數據）")
+        return True, "現貨CVD↑+合約CVD↑+OI↑（三層吸收確認）"
     else:
-        reason = ("現貨CVD↓+合約CVD↓+OI↑（三層吸收確認）" if has_spot
-                  else "合約CVD↓+OI↑（無現貨數據）")
-    return True, reason
+        return True, "現貨CVD↓+合約CVD↓+OI↑（三層吸收確認）"
 
 class SykesTradingBot:
     def __init__(self):
@@ -1182,8 +1202,7 @@ class SykesTradingBot:
         small_top = max(ema144.iloc[-1], ema169.iloc[-1])
         small_bot = min(ema144.iloc[-1], ema169.iloc[-1])
 
-    # 4. 通道纏繞過濾（盤整不交易）
-        channel_ok = abs(ema144.iloc[-1] - ema576.iloc[-1]) >= current_atr * 2.0
+    # 4. （channel_ok 已移除，不過濾盤整）
 
     # 5. 空頭趨勢（連續 >= 20 根 EMA144 < EMA576）
         bear_trend = (ema144.iloc[-20:] < ema576.iloc[-20:]).all()
@@ -1202,38 +1221,33 @@ class SykesTradingBot:
             sf_pd=int(p_s.get("qqe_sf", QQE_SF)),
             factor_mult=float(p_s.get("qqe_factor", QQE_FACTOR_P))
         )
-        # Secondary：固定參數（RSI=6, SF=5, Factor=1.61）
-        rsi_ma_sec, trail_sec = calculate_full_qqe_mod(
-            df, rsi_pd=6, sf_pd=5, factor_mult=QQE_FACTOR_S
-        )
-        sec_bull = rsi_ma_sec.iloc[-1] > trail_sec.iloc[-1]   # Secondary 多頭趨勢
-        sec_bear = rsi_ma_sec.iloc[-1] < trail_sec.iloc[-1]   # Secondary 空頭趨勢
-
-    # 7. 進場條件（v3：Vegas 結構 + 雙軌 QQE 穿越 + ADX + Channel + Funding）
+    # 7. 進場條件（v9：Vegas 結構 + QQE rsiMa 穿越50線 + ADX）
         funding_rate = fetch_current_funding_rate(okx_swap_symbol)
 
-        long_C1 = (current_close > large_top and
-                   current_close > small_bot and
-                   df["low"].iloc[-1] < small_bot)
-        long_C2 = current_close > ema12.iloc[-1]
-        long_C3 = (rsi_ma_l.iloc[-2] <= trail_l.iloc[-2] and
-                   rsi_ma_l.iloc[-1] > trail_l.iloc[-1] and
-                   sec_bull)   # Primary 向上穿越 AND Secondary 也是多頭
+        current_low  = df["low"].iloc[-1]
+        current_high = df["high"].iloc[-1]
+
+        # C1 當根版本
+        long_C1  = (current_close > large_top and
+                    current_close > small_bot and
+                    current_low   < small_bot)
+        long_C2  = current_close > ema12.iloc[-1]
+        long_C3  = (rsi_ma_l.iloc[-2] < 50 and
+                    rsi_ma_l.iloc[-1] >= 50)   # rsiMa 從 <50 穿越到 >=50（QQE 轉藍）
         is_long  = (ema144.iloc[-1] > ema576.iloc[-1] and
                     long_C1 and long_C2 and long_C3 and
-                    current_adx >= ADX_THR and channel_ok and
+                    current_adx >= ADX_THR and
                     (funding_rate is None or funding_rate <= FUNDING_LONG_MAX))
 
         short_C1 = (current_close < large_bot and
                     current_close < small_top and
-                    df["high"].iloc[-1] > small_top)
+                    current_high  > small_top)
         short_C2 = current_close < ema12.iloc[-1]
-        short_C3 = (rsi_ma_s.iloc[-2] >= trail_s.iloc[-2] and
-                    rsi_ma_s.iloc[-1] < trail_s.iloc[-1] and
-                    sec_bear)   # Primary 向下穿越 AND Secondary 也是空頭
+        short_C3 = (rsi_ma_s.iloc[-2] >= 50 and
+                    rsi_ma_s.iloc[-1] < 50)    # rsiMa 從 >=50 穿越到 <50（QQE 轉紅）
         is_short = (bear_trend and
                     short_C1 and short_C2 and short_C3 and
-                    current_adx >= ADX_THR and channel_ok and
+                    current_adx >= ADX_THR and
                     (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN))
 
         if not is_long and not is_short:
@@ -1290,7 +1304,7 @@ class SykesTradingBot:
         if AUTO_TRADE.get(tf_id) and cvd_pass:
             execute_okx_trade_pipeline(
                 okx_swap_symbol, direction, current_close,
-                signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"]
+                signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
             )
         else:
             pos = PaperPosition()
@@ -1494,10 +1508,22 @@ def poll_dc_commands():
     _PAUSED = False
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
-    global _PAUSED, _bot_ref
+    global _PAUSED, _bot_ref, _INITIAL_BALANCE
     start_alert = "🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已成功對齊 40+ 主流加密商品，開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
     dc_log(start_alert)
     tg_log(start_alert)
+
+    # 啟動時抓取總資金（固定風險基準，僅此一次）
+    if _LIVE_MODE and _INITIAL_BALANCE is None:
+        try:
+            ex_init = _initialize_ccxt_client()
+            bal = ex_init.fetch_balance()
+            total = float(bal.get("USDT", {}).get("total", 0.0))
+            if total > 0:
+                _INITIAL_BALANCE = total
+                dc_log(f"💰 初始總資金已鎖定：`{_INITIAL_BALANCE:.2f} USDT`（單筆風險 = {RISK_PCT*100:.0f}% = `{_INITIAL_BALANCE*RISK_PCT:.2f} USDT`）")
+        except Exception as e:
+            print(f"[INIT] 無法抓取初始餘額: {e}")
 
     while True:
         active_tfs_to_run = synchronise_and_wait_next_candle()
