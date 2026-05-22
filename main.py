@@ -1190,19 +1190,25 @@ class SykesTradingBot:
 
     def scan_and_process_market(self, symbol_item: str, tf_id: str):
         """ 全時框商品訊號矩陣掃描引擎核心（v3 Vegas+QQE穿越+CVD三層吸收） """
+        _dbg = (symbol_item == "DOGE/USDT" and tf_id == "15m")  # debug flag
+
         if self.check_circuit_breaker():
+            if _dbg: print(f"[DBG DOGE/15m] ⛔ circuit_breaker 觸發，跳出", flush=True)
             return
         if self.is_cooldown(symbol_item, tf_id):
+            if _dbg: print(f"[DBG DOGE/15m] ⏳ 冷卻中，跳出", flush=True)
             return
 
         okx_swap_symbol = OKX_SWAP.get(symbol_item)
         if not okx_swap_symbol:
+            if _dbg: print(f"[DBG DOGE/15m] ❌ 找不到 OKX swap 代號", flush=True)
             return
 
     # 1. 行情數據拉取
         okx_bar_fmt = BAR_TO_CONA.get(tf_id, "15min")
         df = fetch_market_candles(okx_swap_symbol, tf_id)
         if df.empty or len(df) < 100:
+            if _dbg: print(f"[DBG DOGE/15m] ❌ K棒數據不足 ({len(df)} bars)", flush=True)
             return
 
         current_close = df["close"].iloc[-1]
@@ -1227,8 +1233,8 @@ class SykesTradingBot:
 
     # 4. （channel_ok 已移除，不過濾盤整）
 
-    # 5. 空頭趨勢（連續 >= 20 根 EMA144 < EMA576）
-        bear_trend = (ema144.iloc[-20:] < ema576.iloc[-20:]).all()
+    # 5. 空頭趨勢（v9：當根 EMA144 < EMA576）
+        bear_trend = ema144.iloc[-1] < ema576.iloc[-1]
 
     # 6. 雙軌 QQE MOD
         p_l = get_params(tf_id, "long")
@@ -1264,10 +1270,43 @@ class SykesTradingBot:
         short_C2 = current_close < ema12.iloc[-1]
         short_C3 = (rsi_ma_s.iloc[-2] >= 50 and
                     rsi_ma_s.iloc[-1] < 50)    # rsiMa 從 >=50 穿越到 <50（QQE 轉紅）
-        is_short = (bear_trend and
-                    short_C1 and short_C2 and short_C3 and
-                    (not ADX_ENABLED or current_adx >= ADX_THR) and
-                    (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN))
+        short_adx_ok = (not ADX_ENABLED or current_adx >= ADX_THR)
+        short_fund_ok = (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)
+        is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
+                    short_adx_ok and short_fund_ok)
+
+        # ── DOGE/15m 詳細 debug log ─────────────────────────────
+        if _dbg:
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"\n[DBG DOGE/15m @ {ts}] ════════════════════════", flush=True)
+            print(f"  close={current_close:.6f}  high={current_high:.6f}  low={current_low:.6f}", flush=True)
+            print(f"  EMA144={ema144.iloc[-1]:.6f}  EMA576={ema576.iloc[-1]:.6f}", flush=True)
+            print(f"  smallTop={small_top:.6f}  smallBot={small_bot:.6f}", flush=True)
+            print(f"  EMA12={ema12.iloc[-1]:.6f}  ADX={current_adx:.2f}  ATR={current_atr:.6f}", flush=True)
+            print(f"  rsiMa_s[-2]={rsi_ma_s.iloc[-2]:.2f}  rsiMa_s[-1]={rsi_ma_s.iloc[-1]:.2f}", flush=True)
+            print(f"  funding_rate={funding_rate}", flush=True)
+            print(f"  ── 做空條件 ──", flush=True)
+            print(f"  bearTrend={bear_trend}  (EMA144={ema144.iloc[-1]:.6f} < EMA576={ema576.iloc[-1]:.6f})", flush=True)
+            print(f"  C1={short_C1}  (close<smallTop={current_close < small_top}  high>smallTop={current_high > small_top})", flush=True)
+            print(f"  C2={short_C2}  (close<EMA12={current_close < ema12.iloc[-1]:.6f})", flush=True)
+            print(f"  C3={short_C3}  (rsiMa[-2]={rsi_ma_s.iloc[-2]:.2f}>=50 AND rsiMa[-1]={rsi_ma_s.iloc[-1]:.2f}<50)", flush=True)
+            print(f"  ADX_ok={short_adx_ok}  (ADX_ENABLED={ADX_ENABLED}, ADX={current_adx:.2f} vs THR={ADX_THR})", flush=True)
+            print(f"  Fund_ok={short_fund_ok}  (funding={funding_rate}, min={FUNDING_SHORT_MIN})", flush=True)
+            print(f"  ➜ is_short={is_short}  is_long={is_long}", flush=True)
+            print(f"  AUTO_TRADE[15m]={AUTO_TRADE.get('15m')}  CVD_ENABLED={CVD_ENABLED}  ADX_ENABLED={ADX_ENABLED}", flush=True)
+            if is_short:
+                print(f"  ✅ 做空條件成立，繼續執行 CVD 過濾...", flush=True)
+            else:
+                blocked = []
+                if not bear_trend:        blocked.append(f"bearTrend(EMA144={ema144.iloc[-1]:.6f} >= EMA576={ema576.iloc[-1]:.6f})")
+                if not short_C1:          blocked.append("C1")
+                if not short_C2:          blocked.append("C2")
+                if not short_C3:          blocked.append("C3")
+                if not short_adx_ok:      blocked.append(f"ADX({current_adx:.1f}<{ADX_THR})")
+                if not short_fund_ok:     blocked.append(f"funding({funding_rate})")
+                print(f"  ❌ 做空被擋住：{' | '.join(blocked) if blocked else '未知'}", flush=True)
+            print(f"[DBG DOGE/15m] ════════════════════════\n", flush=True)
+        # ────────────────────────────────────────────────────────
 
         if not is_long and not is_short:
             return
@@ -1281,6 +1320,9 @@ class SykesTradingBot:
             )
         else:
             cvd_pass, cvd_reason = True, "CVD 已停用"
+
+        if _dbg and (is_long or is_short):
+            print(f"[DBG DOGE/15m] CVD: pass={cvd_pass}  reason={cvd_reason}", flush=True)
 
     # 9. SL/TP 計算（SL 改用 Pivot 結構點，備援為近5根極值）
         p = p_l if is_long else p_s
