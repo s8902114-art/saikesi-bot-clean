@@ -107,7 +107,7 @@ AUTO_TRADE: Dict[str, bool] = {
 "1H":  True,
 "4H":  False   # 4H 僅發 DC 通知，需手動授權才下單
 }
-CVD_ENABLED: bool = True   # 秋總三層 CVD 背離吸收過濾開關
+CVD_ENABLED: bool = False  # 秋總三層 CVD 背離吸收過濾開關（預設關閉，/cvd on 啟用）
 ADX_ENABLED: bool = True   # ADX >= ADX_THR 過濾開關
 
 # API 基本節點網址
