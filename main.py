@@ -759,8 +759,14 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         calculated_leverage = max(1, min(int(50.0 / (sl_distance_pct * 100.0)), MAX_LEVERAGE))
 
         # 倉位價值 = 風險金額 ÷ 止損距離%；保證金 = 倉位價值 ÷ 槓桿
-        position_value  = risk_usdt / sl_distance_pct
+        position_value   = risk_usdt / sl_distance_pct
         allocated_margin = position_value / calculated_leverage
+
+        # ── Fix 3：單倉保證金上限 = 總資產 × RISK_PCT ────────────────────────
+        max_margin = base_funds * RISK_PCT   # e.g. 1000 USDT × 10% = 100 USDT
+        if allocated_margin > max_margin:
+            allocated_margin = max_margin
+            position_value   = allocated_margin * calculated_leverage
 
         # 下單前檢查：可用餘額 >= 保證金
         if available_usdt < allocated_margin:
@@ -776,7 +782,19 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
 
         market_structure = ex.market(symbol_id)
         amount_precision = int(market_structure.get("precision", {}).get("amount", 0))
-        contract_size = float(market_structure.get("contractSize", 1.0) or 1.0)
+        contract_size    = float(market_structure.get("contractSize", 1.0) or 1.0)
+
+        # ── Fix 1：止損加 1 tick（前高/前低 ± 最小價格單位）────────────────────
+        tick_sz_str = str((market_structure.get("info") or {}).get("tickSz", "0"))
+        try:
+            tick_size = float(tick_sz_str)
+        except ValueError:
+            tick_size = 0.0
+        if tick_size > 0:
+            if trade_side == "long":
+                stop_loss = round(stop_loss - tick_size, 8)   # pivot low  - 1 tick
+            else:
+                stop_loss = round(stop_loss + tick_size, 8)   # pivot high + 1 tick
 
         raw_order_amount = position_value / (current_market_price * contract_size)
 
@@ -816,18 +834,31 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         tp1_order_id = None
 
         # 止損：OKX algo slTriggerPx 條件單
-        # posSide 必須與倉位方向一致：做多 side=sell/posSide=long，做空 side=buy/posSide=short
+        # 做多：side=sell / posSide=long
+        # 做空：side=buy  / posSide=short
+        sl_side    = "sell" if trade_side == "long" else "buy"
+        sl_pos     = trade_side   # "long" or "short"
         try:
-            sl_result = _place_okx_algo_sl(
+            sl_result  = _place_okx_algo_sl(
                 inst_id=inst_id,
-                side="sell" if trade_side == "long" else "buy",
-                amount=str(final_order_amount), sl_trigger_px=str(stop_loss),
-                pos_side=trade_side   # "long" or "short"
+                side=sl_side,
+                amount=str(final_order_amount),
+                sl_trigger_px=str(stop_loss),
+                pos_side=sl_pos
             )
             sl_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
-            execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
+            if sl_algo_id:
+                execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
+            else:
+                # API 回應但無 algoId → 掛單實際失敗
+                raise RuntimeError(f"API 回應無 algoId: {sl_result}")
         except Exception as sle:
-            execution_report.append(f"⚠️ 止損單掛載失敗: {sle}")
+            err_msg = (f"🚨 **緊急警告：止損單掛載失敗！**\n"
+                       f"商品: `{symbol_id}` 方向: `{trade_side}`\n"
+                       f"已開倉 {final_order_amount} 張，但目前**無止損保護**！\n"
+                       f"錯誤: `{sle}`\nside={sl_side} posSide={sl_pos} px={stop_loss}")
+            dc_log(err_msg)
+            execution_report.append(f"🚨 止損掛載失敗（已緊急通知）: {sle}")
 
         # TP1：固定限價（50%）
         try:
