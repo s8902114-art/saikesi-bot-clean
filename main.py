@@ -210,8 +210,9 @@ QQE_FACTOR_P = 3.0
 QQE_FACTOR_S = 1.61
 QQE_THRESHOLD = 3
 
-ADX_THR = 25
-MAX_SL = 0.12
+ADX_THR   = 25
+MAX_SL    = 0.12
+PIVOT_LEN = 2     # Pivot 結構點左右各需 N 根確認
 FUNDING_LONG_MAX = 0.0001
 FUNDING_SHORT_MIN = -0.0001
 CVD_WINDOW = 3
@@ -1000,6 +1001,26 @@ def check_trailing_stops_for_real():
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
 
+def _find_pivot_low(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
+    """找最近一個已確認的 pivot low（左右各 pivot_len 根都比它高）"""
+    lows = df["low"].values
+    n = len(lows)
+    for i in range(n - pivot_len - 1, pivot_len - 1, -1):
+        if (all(lows[i] < lows[i - j] for j in range(1, pivot_len + 1)) and
+                all(lows[i] < lows[i + j] for j in range(1, pivot_len + 1))):
+            return float(lows[i])
+    return None
+
+def _find_pivot_high(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
+    """找最近一個已確認的 pivot high（左右各 pivot_len 根都比它低）"""
+    highs = df["high"].values
+    n = len(highs)
+    for i in range(n - pivot_len - 1, pivot_len - 1, -1):
+        if (all(highs[i] > highs[i - j] for j in range(1, pivot_len + 1)) and
+                all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1))):
+            return float(highs[i])
+    return None
+
 def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
                           df: pd.DataFrame, direction: str) -> Tuple[bool, str]:
     """
@@ -1261,14 +1282,13 @@ class SykesTradingBot:
         else:
             cvd_pass, cvd_reason = True, "CVD 已停用"
 
-    # 9. SL/TP 計算
+    # 9. SL/TP 計算（SL 改用 Pivot 結構點，備援為近5根極值）
         p = p_l if is_long else p_s
-        lookback = int(p["structure_lookback"])
 
         if is_long:
-            recent_extreme = df["low"].iloc[-lookback:].min()
-            calculated_sl  = recent_extreme - current_atr * p["sl_atr_buffer"]
-            risk_pct       = abs(current_close - calculated_sl) / current_close
+            pivot_sl      = _find_pivot_low(df, PIVOT_LEN)
+            calculated_sl = pivot_sl if pivot_sl is not None else float(df["low"].iloc[-5:].min())
+            risk_pct      = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
@@ -1277,9 +1297,9 @@ class SykesTradingBot:
             tp1_target = current_close + current_atr * p["tp1_mult"]
             tp2_target = current_close + current_atr * tp2_mult
         else:
-            recent_extreme = df["high"].iloc[-lookback:].max()
-            calculated_sl  = recent_extreme + current_atr * p["sl_atr_buffer"]
-            risk_pct       = abs(calculated_sl - current_close) / current_close
+            pivot_sl      = _find_pivot_high(df, PIVOT_LEN)
+            calculated_sl = pivot_sl if pivot_sl is not None else float(df["high"].iloc[-5:].max())
+            risk_pct      = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
