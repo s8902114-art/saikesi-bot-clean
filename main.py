@@ -107,6 +107,8 @@ AUTO_TRADE: Dict[str, bool] = {
 "1H":  True,
 "4H":  False   # 4H 僅發 DC 通知，需手動授權才下單
 }
+CVD_ENABLED: bool = True   # 秋總三層 CVD 背離吸收過濾開關
+ADX_ENABLED: bool = True   # ADX >= ADX_THR 過濾開關
 
 # API 基本節點網址
 
@@ -734,10 +736,10 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ **實盤交易中斷**: 可用保證金不足 ({available_usdt:.2f} USDT)")
             return
 
-        # ── RISK 公式（基於啟動時總資金 × RISK_PCT）──────────────────────────
-        # 若尚未抓到初始餘額，以當前可用餘額作為基準
-        base_funds = _INITIAL_BALANCE if _INITIAL_BALANCE and _INITIAL_BALANCE > 0 else available_usdt
-        risk_usdt = base_funds * RISK_PCT          # 單筆最大風險金額
+        # ── RISK 公式（動態基準：每次下單重新抓當前總資產含未實現盈虧）─────────
+        total_usdt = float(balance_data.get("USDT", {}).get("total", 0.0))
+        base_funds = total_usdt if total_usdt > 0 else available_usdt
+        risk_usdt  = base_funds * RISK_PCT         # 單筆最大風險金額 = 當前總資產 × RISK_PCT
 
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
@@ -1227,27 +1229,23 @@ class SykesTradingBot:
         current_low  = df["low"].iloc[-1]
         current_high = df["high"].iloc[-1]
 
-        # C1 當根版本
-        long_C1  = (current_close > large_top and
-                    current_close > small_bot and
-                    current_low   < small_bot)
+        # C1 當根版本（v9：移除 largeTop/largeBot 限制）
+        long_C1  = (current_close > small_bot and current_low  < small_bot)
         long_C2  = current_close > ema12.iloc[-1]
         long_C3  = (rsi_ma_l.iloc[-2] < 50 and
                     rsi_ma_l.iloc[-1] >= 50)   # rsiMa 從 <50 穿越到 >=50（QQE 轉藍）
         is_long  = (ema144.iloc[-1] > ema576.iloc[-1] and
                     long_C1 and long_C2 and long_C3 and
-                    current_adx >= ADX_THR and
+                    (not ADX_ENABLED or current_adx >= ADX_THR) and
                     (funding_rate is None or funding_rate <= FUNDING_LONG_MAX))
 
-        short_C1 = (current_close < large_bot and
-                    current_close < small_top and
-                    current_high  > small_top)
+        short_C1 = (current_close < small_top and current_high > small_top)
         short_C2 = current_close < ema12.iloc[-1]
         short_C3 = (rsi_ma_s.iloc[-2] >= 50 and
                     rsi_ma_s.iloc[-1] < 50)    # rsiMa 從 >=50 穿越到 <50（QQE 轉紅）
         is_short = (bear_trend and
                     short_C1 and short_C2 and short_C3 and
-                    current_adx >= ADX_THR and
+                    (not ADX_ENABLED or current_adx >= ADX_THR) and
                     (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN))
 
         if not is_long and not is_short:
@@ -1256,9 +1254,12 @@ class SykesTradingBot:
         direction = "long" if is_long else "short"
 
     # 8. 秋總三層背離吸收 CVD 過濾
-        cvd_pass, cvd_reason = _check_cvd_absorption(
-            symbol_item, tf_id, okx_bar_fmt, df, direction
-        )
+        if CVD_ENABLED:
+            cvd_pass, cvd_reason = _check_cvd_absorption(
+                symbol_item, tf_id, okx_bar_fmt, df, direction
+            )
+        else:
+            cvd_pass, cvd_reason = True, "CVD 已停用"
 
     # 9. SL/TP 計算
         p = p_l if is_long else p_s
@@ -1414,14 +1415,14 @@ def synchronise_and_wait_next_candle() -> List[str]:
 _dc_last_msg_id = None
 
 def poll_dc_commands():
-    """ 輪詢 Discord 頻道訊息，處理 ! 指令 """
+    """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
     global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS
+    global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
         return
     headers = {"Authorization": f"Bot {DISCORD_TOKEN}"}
     print("[DC] 指令輪詢已啟動。")
-    # 啟動時先抓最新訊息ID，避免重複處理舊訊息
     try:
         init_resp = requests.get(f"{DC_BASE}/channels/{DISCORD_CHANNEL_ID}/messages", headers=headers, params={"limit": 1}, timeout=10)
         if init_resp.status_code == 200 and init_resp.json():
@@ -1439,73 +1440,120 @@ def poll_dc_commands():
                 messages = resp.json()
                 if messages:
                     for msg in reversed(messages):
-                        msg_id = msg.get("id", "")
+                        msg_id  = msg.get("id", "")
                         content = msg.get("content", "").strip()
-                        author = msg.get("author", {})
-                        is_bot = author.get("bot", False)
+                        author  = msg.get("author", {})
+                        is_bot  = author.get("bot", False)
                         if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
                             _dc_last_msg_id = msg_id
-                        if is_bot or not content.startswith("!"):
+                        if is_bot or not (content.startswith("!") or content.startswith("/")):
                             continue
-                        cmd = content.lower().split()[0]
+                        parts = content.lower().split()
+                        cmd   = parts[0].lstrip("!/")   # 統一去掉 ! 或 / 前綴
                         uptime_s = int(time.time() - _BOT_START_TS)
                         uptime_h = uptime_s // 3600
                         uptime_m = (uptime_s % 3600) // 60
-                        if cmd == "!status":
-                            mode = "🟢 LIVE 實盤" if _LIVE_MODE else "🟡 PAPER 模擬"
-                            paused = "⏸️ 已暫停" if _PAUSED else "▶️ 全時掃描正常運作中"
+
+                        # ── status ─────────────────────────────────────
+                        if cmd == "status":
+                            mode   = "🟢 LIVE 實盤" if _LIVE_MODE else "🟡 PAPER 模擬"
+                            paused = "⏸️ 已暫停" if _PAUSED else "▶️ 掃描中"
                             per_slot_margin_str = "N/A (模擬模式)"
                             if _LIVE_MODE:
                                 try:
                                     ex_tmp = _initialize_ccxt_client()
-                                    bal = ex_tmp.fetch_balance()
-                                    avail = float(bal.get("USDT", {}).get("free", 0.0))
+                                    bal    = ex_tmp.fetch_balance()
+                                    avail  = float(bal.get("USDT", {}).get("free", 0.0))
                                     per_slot = avail / POSITION_SLOTS
                                     per_slot_margin_str = f"{per_slot:.2f} USDT (餘額 {avail:.2f} ÷ {POSITION_SLOTS} 倉)"
                                 except:
                                     per_slot_margin_str = "查詢失敗"
-                            status_msg = (
-                                f"⚙️ **賽克斯生產級交易核心運行指標系統**\n"
-                                f"大腦監控狀態: {paused}\n"
-                                f"目前工作特徵: **{mode}**\n"
-                                f"倉位格數: `{POSITION_SLOTS}` 倉 | 最高槓桿上限: `{MAX_LEVERAGE}x`\n"
-                                f"每倉保證金: `{per_slot_margin_str}`\n"
-                                f"槓桿計算公式: `min(100 ÷ 止損距離%, {MAX_LEVERAGE}x)`\n"
-                                f"運作時間: `{uptime_h}` 小時 `{uptime_m}` 分鐘"
+                            tf_status = "  ".join(
+                                f"`{k}`:{'✅' if v else '🔕'}" for k, v in AUTO_TRADE.items()
                             )
-                            dc_log(status_msg)
-                        elif cmd == "!help":
                             dc_log(
-                                "📋 **指令列表**\n"
-                                "`!status` - 查看系統運行狀態\n"
-                                "`!setlive` - 切換為實盤模式\n"
-                                "`!setpaper` - 切換為模擬模式\n"
-                                "`!pause` - 暫停自動交易\n"
-                                "`!resume` - 恢復自動交易\n"
-                                "`!setslots [數字]` - 設定倉位格數（例如 `!setslots 10`）"
+                                f"⚙️ **賽克斯系統狀態**\n"
+                                f"狀態: {paused} | 模式: **{mode}**\n"
+                                f"CVD 過濾: {'✅ 開' if CVD_ENABLED else '🔕 關'}  "
+                                f"ADX 過濾: {'✅ 開' if ADX_ENABLED else '🔕 關'}\n"
+                                f"自動下單: {tf_status}\n"
+                                f"倉位格數: `{POSITION_SLOTS}` | 槓桿上限: `{MAX_LEVERAGE}x`\n"
+                                f"每倉保證金: `{per_slot_margin_str}`\n"
+                                f"運作時間: `{uptime_h}h {uptime_m}m`"
                             )
-                        elif cmd == "!setlive":
+
+                        # ── help ───────────────────────────────────────
+                        elif cmd == "help":
+                            dc_log(
+                                "📋 **指令列表**（`!` 或 `/` 前綴皆可）\n"
+                                "`!status` - 系統狀態（CVD/ADX/時框開關）\n"
+                                "`!setlive` / `!setpaper` - 切換實盤/模擬模式\n"
+                                "`!pause` / `!resume` - 暫停/恢復掃描\n"
+                                "`!setslots [數字]` - 設定倉位格數\n"
+                                "`/cvd on|off` - 開關 CVD 過濾\n"
+                                "`/adx on|off` - 開關 ADX 過濾\n"
+                                "`/trade [15m|30m|1h|4h|all] on|off` - 開關自動下單\n"
+                            )
+
+                        # ── setlive / setpaper ─────────────────────────
+                        elif cmd == "setlive":
                             _LIVE_MODE = True
                             dc_log("🟢 **已切換為實盤模式**，自動下單鏈已啟用。")
+                        elif cmd == "setpaper":
                             _LIVE_MODE = False
                             dc_log("🟡 **已切換為模擬模式**，僅觀察訊號不執行下單。")
-                        elif cmd == "!pause":
+
+                        # ── pause / resume ─────────────────────────────
+                        elif cmd == "pause":
                             _PAUSED = True
                             dc_log("⏸️ **系統已暫停**，停止掃描與下單。")
-                        elif cmd == "!resume":
+                        elif cmd == "resume":
                             _PAUSED = False
                             dc_log("▶️ **系統已恢復**，重新開始掃描。")
-                        elif cmd == "!setslots":
-                            parts = content.split()
+
+                        # ── setslots ───────────────────────────────────
+                        elif cmd == "setslots":
                             if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) >= 1:
                                 POSITION_SLOTS = int(parts[1])
-                                dc_log(f"⚙️ **倉位格數已更新**: POSITION_SLOTS = `{POSITION_SLOTS}`，每倉比例 = 1/{POSITION_SLOTS}")
+                                dc_log(f"⚙️ 倉位格數已更新: `{POSITION_SLOTS}` 倉")
                             else:
                                 dc_log("⚠️ 用法: `!setslots [正整數]`，例如 `!setslots 10`")
+
+                        # ── cvd on|off ─────────────────────────────────
+                        elif cmd == "cvd":
+                            if len(parts) >= 2 and parts[1] in ("on", "off"):
+                                CVD_ENABLED = (parts[1] == "on")
+                                dc_log(f"{'✅' if CVD_ENABLED else '🔕'} CVD 過濾已{'啟用' if CVD_ENABLED else '停用'}")
+                            else:
+                                dc_log("⚠️ 用法: `/cvd on` 或 `/cvd off`")
+
+                        # ── adx on|off ─────────────────────────────────
+                        elif cmd == "adx":
+                            if len(parts) >= 2 and parts[1] in ("on", "off"):
+                                ADX_ENABLED = (parts[1] == "on")
+                                dc_log(f"{'✅' if ADX_ENABLED else '🔕'} ADX 過濾已{'啟用' if ADX_ENABLED else '停用'}")
+                            else:
+                                dc_log("⚠️ 用法: `/adx on` 或 `/adx off`")
+
+                        # ── trade [tf] on|off ──────────────────────────
+                        elif cmd == "trade":
+                            TF_MAP = {"15m": "15m", "30m": "30m", "1h": "1H", "4h": "4H", "all": "all"}
+                            if len(parts) >= 3 and parts[1] in TF_MAP and parts[2] in ("on", "off"):
+                                tf_key = TF_MAP[parts[1]]
+                                state  = (parts[2] == "on")
+                                if tf_key == "all":
+                                    for k in AUTO_TRADE:
+                                        AUTO_TRADE[k] = state
+                                    dc_log(f"{'✅' if state else '🔕'} 所有時框自動下單已{'啟用' if state else '停用'}")
+                                else:
+                                    AUTO_TRADE[tf_key] = state
+                                    dc_log(f"{'✅' if state else '🔕'} {tf_key} 自動下單已{'啟用' if state else '停用'}")
+                            else:
+                                dc_log("⚠️ 用法: `/trade [15m|30m|1h|4h|all] [on|off]`")
+
         except Exception as e:
             print(f"[DC] 指令輪詢異常: {e}")
         sleep(5)
-    _PAUSED = False
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
