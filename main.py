@@ -1717,7 +1717,7 @@ _dc_last_msg_id = None
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
     global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS
-    global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE
+    global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
         return
@@ -1859,7 +1859,6 @@ def poll_dc_commands():
 
                         # ── margin isolated|cross ──────────────────────
                         elif cmd == "margin":
-                            global MARGIN_MODE
                             if len(parts) >= 2 and parts[1] in ("isolated", "cross"):
                                 MARGIN_MODE = parts[1]
                                 mode_txt = "逐倉 (isolated)" if MARGIN_MODE == "isolated" else "全倉 (cross)"
