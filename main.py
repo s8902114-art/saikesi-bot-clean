@@ -88,7 +88,7 @@ BINGX_BASE       = "https://open-api.bingx.com"
 
 EXCHANGE_ENABLED: Dict[str, bool] = {
     "okx":   True,
-    "bingx": False  # 預設關閉，/exchange bingx on 啟用
+    "bingx": True  # 預設開啟，/exchange bingx off 才關閉
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1530,10 +1530,12 @@ class SykesTradingBot:
         direction = "long" if is_long else "short"
 
     # 8. 秋總三層背離吸收 CVD 過濾
+        # 永遠獨立抓真實 CVD 結果（供 30m_long override 使用）
+        real_cvd_pass, cvd_reason = _check_cvd_absorption(
+            symbol_item, tf_id, okx_bar_fmt, df, direction
+        )
         if CVD_ENABLED:
-            cvd_pass, cvd_reason = _check_cvd_absorption(
-                symbol_item, tf_id, okx_bar_fmt, df, direction
-            )
+            cvd_pass = real_cvd_pass
         else:
             cvd_pass, cvd_reason = True, "CVD 已停用"
 
@@ -1583,8 +1585,9 @@ class SykesTradingBot:
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
         # CVD 複合信號：30m_long 且 CVD 三層確認 → 特調高回報參數
+        # 注意：永遠用 real_cvd_pass，不受 CVD_ENABLED 開關影響
         use_cvd_override = (
-            tf_id == "30m" and direction == "long" and cvd_pass
+            tf_id == "30m" and direction == "long" and real_cvd_pass
         )
         if use_cvd_override:
             cvd_override = {"tp1_mult": 1.5, "tp2_mult": 2.0, "be_trigger": 1.0}
@@ -1602,7 +1605,7 @@ class SykesTradingBot:
                     okx_swap_symbol, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
                 )
-            if EXCHANGE_ENABLED.get("bingx", False):
+            if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
                     symbol_item, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
@@ -1780,7 +1783,7 @@ def poll_dc_commands():
                                 f"CVD 過濾: {'✅ 開' if CVD_ENABLED else '🔕 關'}  "
                                 f"ADX 過濾: {'✅ 開' if ADX_ENABLED else '🔕 關'}\n"
                                 f"保證金模式: `{'全倉 cross' if MARGIN_MODE == 'cross' else '逐倉 isolated'}`\n"
-                                f"交易所: {ex_status}\n"
+                                f"交易所: OKX {'✅' if EXCHANGE_ENABLED.get('okx') else '🔕'} ({len(SYMBOLS)} 個幣)  BingX {'✅' if EXCHANGE_ENABLED.get('bingx') else '🔕'}\n"
                                 f"自動下單: {tf_status}\n"
                                 f"倉位格數: `{POSITION_SLOTS}` | 槓桿上限: `{MAX_LEVERAGE}x`\n"
                                 f"每倉保證金: `{per_slot_margin_str}`\n"
@@ -1799,6 +1802,7 @@ def poll_dc_commands():
                                 "`/adx on|off` - 開關 ADX 過濾\n"
                                 "`/trade [15m|30m|1h|4h|all] on|off` - 開關自動下單\n"
                                 "`/margin isolated|cross` - 切換逐倉/全倉模式\n"
+                                "`/exchange okx|bingx on|off` - 開關交易所\n"
                             )
 
                         # ── setlive / setpaper ─────────────────────────
