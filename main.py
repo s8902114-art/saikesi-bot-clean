@@ -80,8 +80,8 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 # BingX 交易所帳戶配置
 
-BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "Uzfah277tqWmFLz620zAphYDf89IX3JSnLbMeZV9pCJBlNcduevEb2fnBvx1oMb9HjtMZmRA3cWayVUA")
-BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "FIcvtjbyrA0NEArHIjEIL8UTyjKmS2KiB8UP8mmKbwO5PgLPysrOh26Vh8pEPftswq29SX6t5GKvBqJIA")
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_BASE       = "https://open-api.bingx.com"
 
 # 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
