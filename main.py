@@ -109,6 +109,7 @@ AUTO_TRADE: Dict[str, bool] = {
 }
 CVD_ENABLED: bool = False  # 秋總三層 CVD 背離吸收過濾開關（預設關閉，/cvd on 啟用）
 ADX_ENABLED: bool = True   # ADX >= ADX_THR 過濾開關
+MARGIN_MODE: str  = "isolated"  # 保證金模式：isolated（逐倉）或 cross（全倉）
 
 # API 基本節點網址
 
@@ -665,7 +666,7 @@ def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str,
     now_utc = datetime.now(timezone.utc)
     ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
     body = json.dumps({
-        "instId": inst_id, "tdMode": "isolated", "side": side,
+        "instId": inst_id, "tdMode": MARGIN_MODE, "side": side,
         "ordType": "conditional", "sz": amount, "posSide": pos_side,
         "slTriggerPx": sl_trigger_px, "slOrdPx": "-1",
         "slTriggerPxType": "mark"
@@ -687,7 +688,7 @@ def _place_okx_algo_trailing(inst_id: str, side: str, amount: str, callback_rati
     now_utc = datetime.now(timezone.utc)
     ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
     body = json.dumps({
-        "instId": inst_id, "tdMode": "isolated", "side": side,
+        "instId": inst_id, "tdMode": MARGIN_MODE, "side": side,
         "ordType": "move_order_stop", "sz": amount, "posSide": pos_side,
         "callbackRatio": callback_ratio, "activePx": ""
     })
@@ -842,7 +843,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             symbol=symbol_id,
             side=entry_action,
             amount=final_order_amount,
-            params={"posSide": trade_side, "tdMode": "isolated"}
+            params={"posSide": trade_side, "tdMode": MARGIN_MODE}
         )
         executed_average_price = entry_order.get("average", current_market_price)
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
@@ -882,7 +883,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             tp1_order = ex.create_order(
                 symbol=symbol_id, type="limit", side=exit_action,
                 amount=split_half_amount, price=tp1,
-                params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
             )
             tp1_order_id = tp1_order.get("id")
             execution_report.append(f"🌓 TP1 固定限價單掛置 (50%): `{tp1}` (ordId: {tp1_order_id})")
@@ -918,7 +919,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     ex.create_order(
                         symbol=symbol_id, type="limit", side=exit_action,
                         amount=remainder_amount, price=tp2,
-                        params={"posSide": trade_side, "tdMode": "isolated", "reduceOnly": True}
+                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
                     )
                     execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
                 except Exception as tp2e:
@@ -1622,6 +1623,7 @@ def poll_dc_commands():
                                 f"狀態: {paused} | 模式: **{mode}**\n"
                                 f"CVD 過濾: {'✅ 開' if CVD_ENABLED else '🔕 關'}  "
                                 f"ADX 過濾: {'✅ 開' if ADX_ENABLED else '🔕 關'}\n"
+                                f"保證金模式: `{'全倉 cross' if MARGIN_MODE == 'cross' else '逐倉 isolated'}`\n"
                                 f"自動下單: {tf_status}\n"
                                 f"倉位格數: `{POSITION_SLOTS}` | 槓桿上限: `{MAX_LEVERAGE}x`\n"
                                 f"每倉保證金: `{per_slot_margin_str}`\n"
@@ -1639,6 +1641,7 @@ def poll_dc_commands():
                                 "`/cvd on|off` - 開關 CVD 過濾\n"
                                 "`/adx on|off` - 開關 ADX 過濾\n"
                                 "`/trade [15m|30m|1h|4h|all] on|off` - 開關自動下單\n"
+                                "`/margin isolated|cross` - 切換逐倉/全倉模式\n"
                             )
 
                         # ── setlive / setpaper ─────────────────────────
@@ -1696,6 +1699,16 @@ def poll_dc_commands():
                                     dc_log(f"{'✅' if state else '🔕'} {tf_key} 自動下單已{'啟用' if state else '停用'}")
                             else:
                                 dc_log("⚠️ 用法: `/trade [15m|30m|1h|4h|all] [on|off]`")
+
+                        # ── margin isolated|cross ──────────────────────
+                        elif cmd == "margin":
+                            global MARGIN_MODE
+                            if len(parts) >= 2 and parts[1] in ("isolated", "cross"):
+                                MARGIN_MODE = parts[1]
+                                mode_txt = "逐倉 (isolated)" if MARGIN_MODE == "isolated" else "全倉 (cross)"
+                                dc_log(f"💱 保證金模式已切換為：**{mode_txt}**\n⚠️ 注意：切換前請確認無持倉，新訂單才會套用新模式")
+                            else:
+                                dc_log("⚠️ 用法: `/margin isolated` 或 `/margin cross`")
 
         except Exception as e:
             print(f"[DC] 指令輪詢異常: {e}")
