@@ -78,6 +78,19 @@ OKX_SECRET = os.environ.get("OKX_SECRET_KEY", "359300E99DD8870F8990CC698BC4F491"
 OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "Small5017714@")
 OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
+# BingX 交易所帳戶配置
+
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "Uzfah277tqWmFLz620zAphYDf89IX3JSnLbMeZV9pCJBlNcduevEb2fnBvx1oMb9HjtMZmRA3cWayVUA")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "FIcvtjbyrA0NEArHIjEIL8UTyjKmS2KiB8UP8mmKbwO5PgLPysrOh26Vh8pEPftswq29SX6t5GKvBqJIA")
+BINGX_BASE       = "https://open-api.bingx.com"
+
+# 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
+
+EXCHANGE_ENABLED: Dict[str, bool] = {
+    "okx":   True,
+    "bingx": False  # 預設關閉，/exchange bingx on 啟用
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 策略風控常數與運行狀態機
@@ -949,7 +962,124 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         dc_log(f"❌ **交易所執行鏈嚴重崩潰**: {general_error}")
 
 
-def check_trailing_stops_for_real():
+def _bingx_sign(params: dict, secret: str) -> str:
+    """BingX HMAC-SHA256 簽名"""
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+
+def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
+                                  stop_loss: float, tp1: float, tp2: float,
+                                  exit_mode: str = "fixed", tf_id: str = "15m") -> None:
+    """BingX 永續合約下單"""
+    if not BINGX_API_KEY or not BINGX_SECRET_KEY:
+        dc_log("⚠️ BingX API Key 未設定，跳過 BingX 下單")
+        return
+    try:
+        # 轉換幣種格式：BTC/USDT → BTC-USDT
+        bingx_symbol = symbol_id.replace("/", "-")
+
+        # 取得帳戶餘額
+        ts = str(int(time.time() * 1000))
+        params = {"timestamp": ts}
+        params["signature"] = _bingx_sign(params, BINGX_SECRET_KEY)
+        headers = {"X-BX-APIKEY": BINGX_API_KEY}
+        r = requests.get(f"{BINGX_BASE}/openApi/swap/v2/user/balance",
+                        params=params, headers=headers, timeout=10)
+        bal = r.json().get("data", {}).get("balance", {})
+        total_usdt = float(bal.get("equity", 0) or 0)
+        avail_usdt = float(bal.get("availableMargin", 0) or 0)
+
+        risk_usdt = total_usdt * RISK_PCT
+        sl_dist_pct = abs(entry_price - stop_loss) / entry_price
+        if sl_dist_pct <= 0.0001:
+            dc_log("⚠️ BingX 止損距離過小，跳過下單")
+            return
+
+        leverage = max(1, min(int(50.0 / (sl_dist_pct * 100.0)), MAX_LEVERAGE))
+        position_value = risk_usdt / sl_dist_pct
+        margin = position_value / leverage
+        max_margin = total_usdt * RISK_PCT
+        if margin > max_margin:
+            margin = max_margin
+            position_value = margin * leverage
+
+        if avail_usdt < margin:
+            dc_log(f"⚠️ BingX 保證金不足：可用 {avail_usdt:.2f}，需要 {margin:.2f}")
+            return
+
+        # 設定槓桿
+        ts = str(int(time.time() * 1000))
+        lev_params = {"symbol": bingx_symbol, "side": "LONG" if trade_side == "long" else "SHORT",
+                      "leverage": str(leverage), "timestamp": ts}
+        lev_params["signature"] = _bingx_sign(lev_params, BINGX_SECRET_KEY)
+        requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/leverage",
+                     params=lev_params, headers=headers, timeout=10)
+
+        # 計算張數（BingX 用 USDT 計算）
+        qty = round(position_value / entry_price, 4)
+        side_str = "BUY" if trade_side == "long" else "SELL"
+        pos_side = "LONG" if trade_side == "long" else "SHORT"
+
+        # 市價開倉
+        ts = str(int(time.time() * 1000))
+        order_params = {
+            "symbol": bingx_symbol, "side": side_str, "positionSide": pos_side,
+            "type": "MARKET", "quantity": str(qty), "timestamp": ts
+        }
+        order_params["signature"] = _bingx_sign(order_params, BINGX_SECRET_KEY)
+        r = requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
+                         params=order_params, headers=headers, timeout=10)
+        order_data = r.json()
+        order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
+
+        # 止損單
+        exit_side = "SELL" if trade_side == "long" else "BUY"
+        ts = str(int(time.time() * 1000))
+        sl_params = {
+            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+            "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
+            "quantity": str(qty), "timestamp": ts, "workingType": "MARK_PRICE"
+        }
+        sl_params["signature"] = _bingx_sign(sl_params, BINGX_SECRET_KEY)
+        r = requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
+                         params=sl_params, headers=headers, timeout=10)
+        sl_data = r.json()
+
+        # TP1 限價單（50%）
+        half_qty = round(qty / 2, 4)
+        ts = str(int(time.time() * 1000))
+        tp1_params = {
+            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+            "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
+            "quantity": str(half_qty), "timestamp": ts, "workingType": "MARK_PRICE",
+            "reduceOnly": "true"
+        }
+        tp1_params["signature"] = _bingx_sign(tp1_params, BINGX_SECRET_KEY)
+        requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
+                     params=tp1_params, headers=headers, timeout=10)
+
+        # TP2（fixed 模式）
+        if exit_mode == "fixed":
+            ts = str(int(time.time() * 1000))
+            tp2_params = {
+                "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp2, 5)),
+                "quantity": str(half_qty), "timestamp": ts, "workingType": "MARK_PRICE",
+                "reduceOnly": "true"
+            }
+            tp2_params["signature"] = _bingx_sign(tp2_params, BINGX_SECRET_KEY)
+            requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
+                         params=tp2_params, headers=headers, timeout=10)
+
+        dc_log(f"🚀 **BingX 下單成功**\n{bingx_symbol} {pos_side} {leverage}x\n"
+               f"保證金: {margin:.2f}U | 風險: {risk_usdt:.2f}U\n"
+               f"SL: {stop_loss} | TP1: {tp1} | TP2: {tp2}")
+
+    except Exception as e:
+        dc_log(f"❌ **BingX 下單失敗**: {e}")
+
+
+
     """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
     if not active_real_trades:
         return
@@ -1450,10 +1580,16 @@ class SykesTradingBot:
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
         if AUTO_TRADE.get(tf_id) and cvd_pass:
-            execute_okx_trade_pipeline(
-                okx_swap_symbol, direction, current_close,
-                signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
-            )
+            if EXCHANGE_ENABLED.get("okx", True):
+                execute_okx_trade_pipeline(
+                    okx_swap_symbol, direction, current_close,
+                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
+                )
+            if EXCHANGE_ENABLED.get("bingx", False):
+                execute_bingx_trade_pipeline(
+                    symbol_item, direction, current_close,
+                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
+                )
         else:
             pos = PaperPosition()
             pos.open = True; pos.side = direction; pos.entry = current_close
@@ -1708,6 +1844,16 @@ def poll_dc_commands():
                                 dc_log(f"💱 保證金模式已切換為：**{mode_txt}**\n⚠️ 注意：切換前請確認無持倉，新訂單才會套用新模式")
                             else:
                                 dc_log("⚠️ 用法: `/margin isolated` 或 `/margin cross`")
+
+                        # ── exchange okx|bingx on|off ───────────────────
+                        elif cmd == "exchange":
+                            if len(parts) >= 3 and parts[1] in ("okx", "bingx") and parts[2] in ("on", "off"):
+                                exname = parts[1]
+                                state  = parts[2] == "on"
+                                EXCHANGE_ENABLED[exname] = state
+                                dc_log(f"{'✅' if state else '🔕'} {exname.upper()} 交易所已{'啟用' if state else '停用'}")
+                            else:
+                                dc_log("⚠️ 用法: `/exchange okx|bingx on|off`")
 
         except Exception as e:
             print(f"[DC] 指令輪詢異常: {e}")
