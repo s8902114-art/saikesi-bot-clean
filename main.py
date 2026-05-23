@@ -769,6 +769,22 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             allocated_margin = max_margin
             position_value   = allocated_margin * calculated_leverage
 
+        # ── 維持保證金率保護：帳戶整體維持保證金率 < 350% 時不開新倉 ──────────
+        # 維持保證金率越低代表越危險，< 350% 代表可用保證金太少，不宜再開倉
+        try:
+            margin_info = ex.fetch_balance()
+            mmr = float((margin_info.get("info", {}) or {}).get("mgnRatio", 0) or 0)
+            if mmr == 0:
+                # 備援：用 (total - used) / total 估算
+                total_eq = float(margin_info.get("USDT", {}).get("total", 0) or 0)
+                used_eq  = float(margin_info.get("USDT", {}).get("used",  0) or 0)
+                mmr = (total_eq / used_eq * 100) if used_eq > 0 else 9999
+            if mmr < 350:
+                dc_log(f"⚠️ 帳戶維持保證金率 {mmr:.1f}% < 350%，暫停開新倉")
+                return
+        except Exception as risk_check_err:
+            print(f"[RiskCheck] 維持保證金率檢查失敗: {risk_check_err}")
+
         # 下單前檢查：可用餘額 >= 保證金
         if available_usdt < allocated_margin:
             dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {allocated_margin:.2f} USDT")
@@ -923,6 +939,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "remaining_amount": str(remainder_amount),
                 "pos_side":         trade_side,
                 "tf_id":            tf_id,
+                "risk_dist":        abs(float(executed_average_price) - stop_loss),
             }
             execution_report.append(f"📊 追蹤止損狀態機已啟動 (key: {trade_key})")
 
@@ -990,6 +1007,34 @@ def check_trailing_stops_for_real():
                     dc_log(msg)
                     tg_log(msg)
                     print(f"[Trailing] {name} TP1成交，SL移至成本價 {be_price}")
+                else:
+                    # TP1 未成交：檢查浮盈是否達 1R + 手續費，提前保本
+                    ticker = ex.fetch_ticker(symbol)
+                    cur_price = float(ticker.get("last", 0))
+                    entry  = float(trade["entry_price"])
+                    risk   = float(trade.get("risk_dist", abs(entry - float(trade["current_sl"]))))
+                    fee_buffer = entry * 0.001   # OKX taker 雙邊手續費約 0.1%
+                    breakeven_trigger = risk * 1.0 + fee_buffer
+                    if direction == "long":
+                        float_pnl = cur_price - entry
+                    else:
+                        float_pnl = entry - cur_price
+                    if float_pnl >= breakeven_trigger and trade["current_sl"] != entry:
+                        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                        exit_side = "sell" if direction == "long" else "buy"
+                        sl_result = _place_okx_algo_sl(
+                            inst_id=inst_id, side=exit_side,
+                            amount=trade["remaining_amount"],
+                            sl_trigger_px=str(round(entry, 5)),
+                            pos_side=direction
+                        )
+                        new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                        if new_algo_id:
+                            trade["sl_algo_id"] = new_algo_id
+                            trade["current_sl"] = entry
+                        msg = f"🔒 {name} 浮盈達1R，止損提前移至成本價 {entry}（含手續費保護）"
+                        dc_log(msg)
+                        print(f"[Trailing] {msg}")
 
             else:
                 # TP1 已成交，波浪偵測：當根創近20根新高/低 → 止損移至20根低點/高點
@@ -1227,7 +1272,7 @@ class SykesTradingBot:
 
     def scan_and_process_market(self, symbol_item: str, tf_id: str):
         """ 全時框商品訊號矩陣掃描引擎核心（v3 Vegas+QQE穿越+CVD三層吸收） """
-        _dbg = (symbol_item == "DOGE/USDT" and tf_id == "15m")  # debug flag
+        _dbg = False  # debug flag（已關閉）
 
         if self.check_circuit_breaker():
             if _dbg: print(f"[DBG DOGE/15m] ⛔ circuit_breaker 觸發，跳出", flush=True)
