@@ -1702,7 +1702,6 @@ def poll_dc_commands():
 
                         # ── margin isolated|cross ──────────────────────
                         elif cmd == "margin":
-                            global MARGIN_MODE
                             if len(parts) >= 2 and parts[1] in ("isolated", "cross"):
                                 MARGIN_MODE = parts[1]
                                 mode_txt = "逐倉 (isolated)" if MARGIN_MODE == "isolated" else "全倉 (cross)"
