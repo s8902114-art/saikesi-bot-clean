@@ -985,9 +985,19 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         headers = {"X-BX-APIKEY": BINGX_API_KEY}
         r = requests.get(f"{BINGX_BASE}/openApi/swap/v2/user/balance",
                         params=params, headers=headers, timeout=10)
-        bal = r.json().get("data", {}).get("balance", {})
-        total_usdt = float(bal.get("equity", 0) or 0)
-        avail_usdt = float(bal.get("availableMargin", 0) or 0)
+        bal_resp = r.json()
+        bal = bal_resp.get("data", {})
+        if isinstance(bal, dict) and "balance" in bal:
+            bal = bal["balance"]
+        total_usdt = float(
+            bal.get("equity") or bal.get("balance") or bal.get("totalMarginBalance") or 0
+        )
+        avail_usdt = float(
+            bal.get("availableMargin") or bal.get("available") or bal.get("availableBalance") or total_usdt
+        )
+        if total_usdt <= 0:
+            dc_log(f"⚠️ BingX 餘額讀取異常（返回值: {bal_resp}），跳過下單")
+            return
 
         risk_usdt = total_usdt * RISK_PCT
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
@@ -1217,25 +1227,58 @@ def check_trailing_stops_for_real():
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
 
+def _get_tick_size(df: pd.DataFrame) -> float:
+    """從 K 棒數據自動估算 tick size（最小價格單位）"""
+    closes = df["close"].dropna().values
+    if len(closes) < 2:
+        return 0.01
+    price = float(closes[-1])
+    if price >= 1000:
+        return 0.1
+    elif price >= 100:
+        return 0.01
+    elif price >= 10:
+        return 0.001
+    elif price >= 1:
+        return 0.0001
+    else:
+        return 0.00001
+
 def _find_pivot_low(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
-    """找最近一個已確認的 pivot low（左右各 pivot_len 根都比它高）"""
+    """
+    找最近一個 Swing Low（左右各 pivot_len 根都比它高）
+    找不到則退而求其次取最近 pivot_len*2 根最低點
+    止損 = Swing Low - 1 tick（無 ATR 緩衝）
+    """
     lows = df["low"].values
     n = len(lows)
+    tick = _get_tick_size(df)
+    # 優先：找真正的 Swing Low
     for i in range(n - pivot_len - 1, pivot_len - 1, -1):
         if (all(lows[i] < lows[i - j] for j in range(1, pivot_len + 1)) and
                 all(lows[i] < lows[i + j] for j in range(1, pivot_len + 1))):
-            return float(lows[i])
-    return None
+            return round(float(lows[i]) - tick, 8)
+    # 備援：最近 pivot_len*2 根最低點
+    lookback = min(pivot_len * 2, n)
+    return round(float(lows[-lookback:].min()) - tick, 8)
 
 def _find_pivot_high(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
-    """找最近一個已確認的 pivot high（左右各 pivot_len 根都比它低）"""
+    """
+    找最近一個 Swing High（左右各 pivot_len 根都比它低）
+    找不到則退而求其次取最近 pivot_len*2 根最高點
+    止損 = Swing High + 1 tick（無 ATR 緩衝）
+    """
     highs = df["high"].values
     n = len(highs)
+    tick = _get_tick_size(df)
+    # 優先：找真正的 Swing High
     for i in range(n - pivot_len - 1, pivot_len - 1, -1):
         if (all(highs[i] > highs[i - j] for j in range(1, pivot_len + 1)) and
                 all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1))):
-            return float(highs[i])
-    return None
+            return round(float(highs[i]) + tick, 8)
+    # 備援：最近 pivot_len*2 根最高點
+    lookback = min(pivot_len * 2, n)
+    return round(float(highs[-lookback:].max()) + tick, 8)
 
 def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
                           df: pd.DataFrame, direction: str) -> Tuple[bool, str]:
@@ -1546,27 +1589,27 @@ class SykesTradingBot:
         p = p_l if is_long else p_s
 
         if is_long:
-            pivot_sl      = _find_pivot_low(df, PIVOT_LEN)
-            calculated_sl = pivot_sl if pivot_sl is not None else float(df["low"].iloc[-5:].min())
+            # Swing Low + 1 tick（備援：近N根最低點 + 1 tick）
+            calculated_sl = _find_pivot_low(df, PIVOT_LEN)
             risk_pct      = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            risk_dist  = current_close - calculated_sl          # R = pivot distance
+            risk_dist  = current_close - calculated_sl
             tp1_target = current_close + risk_dist * p["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
-            pivot_sl      = _find_pivot_high(df, PIVOT_LEN)
-            calculated_sl = pivot_sl if pivot_sl is not None else float(df["high"].iloc[-5:].max())
+            # Swing High + 1 tick（備援：近N根最高點 + 1 tick）
+            calculated_sl = _find_pivot_high(df, PIVOT_LEN)
             risk_pct      = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            risk_dist  = calculated_sl - current_close          # R = pivot distance
+            risk_dist  = calculated_sl - current_close
             tp1_target = current_close - risk_dist * p["tp1_mult"]
             tp2_target = current_close - risk_dist * tp2_mult
 
