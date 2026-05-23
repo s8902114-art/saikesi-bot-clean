@@ -1976,21 +1976,8 @@ def build_dynamic_symbols() -> bool:
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
-    # 啟動時優先用快取，超過7天才重新抓
-    cache_age = time.time() - os.path.getmtime(_SYMBOLS_CACHE_FILE) if os.path.exists(_SYMBOLS_CACHE_FILE) else 999999
-    if cache_age > 604800:
-        build_dynamic_symbols()
-    else:
-        # 直接載入快取
-        try:
-            with open(_SYMBOLS_CACHE_FILE, encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached:
-                SYMBOLS.clear()
-                SYMBOLS.update(cached)
-                print(f"[SYMBOLS] 快取載入：共 **{len(SYMBOLS)}** 個幣種（{cache_age/3600:.1f}小時前更新）", flush=True)
-        except Exception:
-            build_dynamic_symbols()
+    # 啟動時永遠重新抓幣單（Railway 容器重啟後快取消失，需重新抓）
+    build_dynamic_symbols()
     n_sym = len(SYMBOLS)
 
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
