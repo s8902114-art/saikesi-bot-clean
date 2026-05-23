@@ -217,7 +217,7 @@ QQE_THRESHOLD = 3
 
 ADX_THR   = 25
 MAX_SL    = 0.12
-PIVOT_LEN = 2     # Pivot 結構點左右各需 N 根確認
+PIVOT_LEN = 5     # Pivot 結構點左右各需 N 根確認
 FUNDING_LONG_MAX = 0.0001
 FUNDING_SHORT_MIN = -0.0001
 CVD_WINDOW = 3
@@ -234,44 +234,44 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-# 手動設定 2026-05-22；C3 改為 rsiMa 穿越 50 線版本
+# 手動設定 2026-05-23；tp1_mult 統一改為 1.7R，PIVOT_LEN=5
 "15m_long": {
-"tp1_mult": 1.725,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
 "sl_atr_buffer": 0.08, "structure_lookback": 17, "exit_mode": "trailing",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
 "15m_short": {
-"tp1_mult": 2.0,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+"tp1_mult": 1.7,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
 "sl_atr_buffer": 0.03, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
 "30m_long": {
-"tp1_mult": 1.725,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
 "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_short": {
-"tp1_mult": 2.0,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+"tp1_mult": 1.7,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
 "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
 "1H_long": {
-"tp1_mult": 1.725,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+"tp1_mult": 1.7,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "1H_short": {
-"tp1_mult": 2.0,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+"tp1_mult": 1.7,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
-"tp1_mult": 1.725,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+"tp1_mult": 1.7,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
 "sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
-"tp1_mult": 2.0,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+"tp1_mult": 1.7,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
 "sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed",
 "qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
 },
@@ -667,7 +667,8 @@ def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str,
     body = json.dumps({
         "instId": inst_id, "tdMode": "isolated", "side": side,
         "ordType": "conditional", "sz": amount, "posSide": pos_side,
-        "slTriggerPx": sl_trigger_px, "slOrdPx": "-1"
+        "slTriggerPx": sl_trigger_px, "slOrdPx": "-1",
+        "slTriggerPxType": "mark"
     })
     path = "/api/v5/trade/order-algo"
     sig = _okx_generate_signature(ts, "POST", path, body)
@@ -1372,8 +1373,9 @@ class SykesTradingBot:
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            tp1_target = current_close + current_atr * p["tp1_mult"]
-            tp2_target = current_close + current_atr * tp2_mult
+            risk_dist  = current_close - calculated_sl          # R = pivot distance
+            tp1_target = current_close + risk_dist * p["tp1_mult"]
+            tp2_target = current_close + risk_dist * tp2_mult
         else:
             pivot_sl      = _find_pivot_high(df, PIVOT_LEN)
             calculated_sl = pivot_sl if pivot_sl is not None else float(df["high"].iloc[-5:].max())
@@ -1383,8 +1385,9 @@ class SykesTradingBot:
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
-            tp1_target = current_close - current_atr * p["tp1_mult"]
-            tp2_target = current_close - current_atr * tp2_mult
+            risk_dist  = calculated_sl - current_close          # R = pivot distance
+            tp1_target = current_close - risk_dist * p["tp1_mult"]
+            tp2_target = current_close - risk_dist * tp2_mult
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
