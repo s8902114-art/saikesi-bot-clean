@@ -1771,12 +1771,16 @@ def poll_dc_commands():
                             tf_status = "  ".join(
                                 f"`{k}`:{'✅' if v else '🔕'}" for k, v in AUTO_TRADE.items()
                             )
+                            ex_status = "  ".join(
+                                f"`{k}`:{'✅' if v else '🔕'}" for k, v in EXCHANGE_ENABLED.items()
+                            )
                             dc_log(
                                 f"⚙️ **賽克斯系統狀態**\n"
                                 f"狀態: {paused} | 模式: **{mode}**\n"
                                 f"CVD 過濾: {'✅ 開' if CVD_ENABLED else '🔕 關'}  "
                                 f"ADX 過濾: {'✅ 開' if ADX_ENABLED else '🔕 關'}\n"
                                 f"保證金模式: `{'全倉 cross' if MARGIN_MODE == 'cross' else '逐倉 isolated'}`\n"
+                                f"交易所: {ex_status}\n"
                                 f"自動下單: {tf_status}\n"
                                 f"倉位格數: `{POSITION_SLOTS}` | 槓桿上限: `{MAX_LEVERAGE}x`\n"
                                 f"每倉保證金: `{per_slot_margin_str}`\n"
@@ -1855,6 +1859,7 @@ def poll_dc_commands():
 
                         # ── margin isolated|cross ──────────────────────
                         elif cmd == "margin":
+                            global MARGIN_MODE
                             if len(parts) >= 2 and parts[1] in ("isolated", "cross"):
                                 MARGIN_MODE = parts[1]
                                 mode_txt = "逐倉 (isolated)" if MARGIN_MODE == "isolated" else "全倉 (cross)"
@@ -1972,8 +1977,21 @@ def build_dynamic_symbols() -> bool:
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
-    # 啟動時動態更新幣種列表（快取優先，失敗用備援）
-    build_dynamic_symbols()
+    # 啟動時優先用快取，超過7天才重新抓
+    cache_age = time.time() - os.path.getmtime(_SYMBOLS_CACHE_FILE) if os.path.exists(_SYMBOLS_CACHE_FILE) else 999999
+    if cache_age > 604800:
+        build_dynamic_symbols()
+    else:
+        # 直接載入快取
+        try:
+            with open(_SYMBOLS_CACHE_FILE, encoding="utf-8") as f:
+                cached = json.load(f)
+            if cached:
+                SYMBOLS.clear()
+                SYMBOLS.update(cached)
+                print(f"[SYMBOLS] 快取載入：共 **{len(SYMBOLS)}** 個幣種（{cache_age/3600:.1f}小時前更新）", flush=True)
+        except Exception:
+            build_dynamic_symbols()
     n_sym = len(SYMBOLS)
 
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
