@@ -248,44 +248,44 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-# 手動設定 2026-05-23；tp1_mult 統一改為 1.7R，PIVOT_LEN=5
+# 大數據回測最優純R倍數 2026-05-24，PIVOT_LEN=5
 "15m_long": {
-"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
 "sl_atr_buffer": 0.08, "structure_lookback": 17, "exit_mode": "trailing",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
 "15m_short": {
-"tp1_mult": 1.7,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
 "sl_atr_buffer": 0.03, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
 "30m_long": {
-"tp1_mult": 1.7,  "tp2_intraday_mult": 1.8,  "tp2_swing_mult": 1.8,
+"tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
 "sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "30m_short": {
-"tp1_mult": 1.7,    "tp2_intraday_mult": 3.2,  "tp2_swing_mult": 3.2,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
 "sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
 "1H_long": {
-"tp1_mult": 1.7,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 5.0,  "tp2_swing_mult": 5.0, "be_trigger": 0.3,
 "sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
 "1H_short": {
-"tp1_mult": 1.7,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+"tp1_mult": 1.5,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 0.3,
 "sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
-"tp1_mult": 1.7,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
 "sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
-"tp1_mult": 1.7,    "tp2_intraday_mult": 4.0,  "tp2_swing_mult": 4.0,
+"tp1_mult": 0.8,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 1.0,
 "sl_atr_buffer": 0.05, "structure_lookback": 30, "exit_mode": "fixed",
 "qqe_rsi": 6, "qqe_sf": 5, "qqe_factor": 3.0
 },
@@ -1079,7 +1079,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         dc_log(f"❌ **BingX 下單失敗**: {e}")
 
 
-
+def check_trailing_stops_for_real():
     """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
     if not active_real_trades:
         return
@@ -1139,13 +1139,16 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
                     tg_log(msg)
                     print(f"[Trailing] {name} TP1成交，SL移至成本價 {be_price}")
                 else:
-                    # TP1 未成交：檢查浮盈是否達 1R + 手續費，提前保本
+                    # TP1 未成交：檢查浮盈是否達 be_trigger × R + 手續費，提前保本
                     ticker = ex.fetch_ticker(symbol)
                     cur_price = float(ticker.get("last", 0))
                     entry  = float(trade["entry_price"])
                     risk   = float(trade.get("risk_dist", abs(entry - float(trade["current_sl"]))))
                     fee_buffer = entry * 0.001   # OKX taker 雙邊手續費約 0.1%
-                    breakeven_trigger = risk * 1.0 + fee_buffer
+                    # 從 BEST_PARAMS 讀取 be_trigger
+                    tf_key = f"{trade.get('tf_id', '15m')}_{direction}"
+                    be_trigger_mult = BEST_PARAMS.get(tf_key, {}).get("be_trigger", 1.0)
+                    breakeven_trigger = risk * be_trigger_mult + fee_buffer
                     if direction == "long":
                         float_pnl = cur_price - entry
                     else:
@@ -1579,7 +1582,21 @@ class SykesTradingBot:
         self.set_cooldown(symbol_item, tf_id)
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
-        if AUTO_TRADE.get(tf_id) and cvd_pass:
+        # CVD 複合信號：30m_long 且 CVD 三層確認 → 特調高回報參數
+        use_cvd_override = (
+            tf_id == "30m" and direction == "long" and cvd_pass
+        )
+        if use_cvd_override:
+            cvd_override = {"tp1_mult": 1.5, "tp2_mult": 2.0, "be_trigger": 1.0}
+            risk_dist_long = abs(current_close - calculated_sl)
+            tp1_target = current_close + risk_dist_long * cvd_override["tp1_mult"]
+            tp2_target = current_close + risk_dist_long * cvd_override["tp2_mult"]
+            signal_payload["tp1"] = round(tp1_target, 5)
+            signal_payload["tp2"] = round(tp2_target, 5)
+            signal_payload["cvd_override"] = True
+            dc_log(f"⚡ CVD 複合信號觸發特調：{symbol_item} 30m_long → tp1=1.5R tp2=2.0R")
+
+        if AUTO_TRADE.get(tf_id):
             if EXCHANGE_ENABLED.get("okx", True):
                 execute_okx_trade_pipeline(
                     okx_swap_symbol, direction, current_close,
