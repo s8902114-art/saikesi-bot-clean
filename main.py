@@ -248,35 +248,41 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-# 大數據回測最優純R倍數 2026-05-24，PIVOT_LEN=5
+# 大數據回測最優純R倍數 2026-05-24，滑動視窗停損版 (v10.5)
+# 15m/long：TP1=0.8 TP2=2.5 BE=1.0 BUF=0.2 PVT=5  EV=+0.048R 成長=160%
 "15m_long": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
-"sl_atr_buffer": 0.08, "structure_lookback": 17, "exit_mode": "trailing",
+"tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
+"sl_atr_buffer": 0.2, "structure_lookback": 5, "exit_mode": "trailing",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
+# 15m/short：EV=-0.023R 負期望，保守參數維持原值
 "15m_short": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
-"sl_atr_buffer": 0.03, "structure_lookback": 20, "exit_mode": "fixed",
+"tp1_mult": 0.8,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 1.0,
+"sl_atr_buffer": 0.2, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
+# 30m/long：TP1=1.2 TP2=2.5 BE=1.0 BUF=0.1 PVT=5  EV=+0.084R 成長=133%
 "30m_long": {
 "tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
-"sl_atr_buffer": 0.05, "structure_lookback": 10, "exit_mode": "fixed",
+"sl_atr_buffer": 0.1, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
+# 30m/short：TP1=0.8 TP2=3.5 BE=1.0 BUF=0.0 PVT=10  EV=+0.072R 翻正
 "30m_short": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
-"sl_atr_buffer": 0.01, "structure_lookback": 10, "exit_mode": "trailing",
+"tp1_mult": 0.8,  "tp2_intraday_mult": 3.5,  "tp2_swing_mult": 3.5, "be_trigger": 1.0,
+"sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
+# 1H/long：TP1=1.0 TP2=2.0 BE=1.0 BUF=0.5 PVT=5   EV=+0.154R 成長=139% 回徹=15.5% TP2打到31%
 "1H_long": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 5.0,  "tp2_swing_mult": 5.0, "be_trigger": 0.3,
-"sl_atr_buffer": 0.15, "structure_lookback": 10, "exit_mode": "fixed",
+"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
+"sl_atr_buffer": 0.5, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
+# 1H/short：TP1=1.0 TP2=3.0 BE=1.0 BUF=0.5 PVT=3   EV=+0.049R
 "1H_short": {
-"tp1_mult": 1.5,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 0.3,
-"sl_atr_buffer": 0.08, "structure_lookback": 20, "exit_mode": "fixed",
+"tp1_mult": 1.0,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 1.0,
+"sl_atr_buffer": 0.5, "structure_lookback": 3, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
 "4H_long": {
@@ -682,7 +688,7 @@ def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str,
     ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
     body = json.dumps({
         "instId": inst_id, "tdMode": MARGIN_MODE, "side": side,
-        "ordType": "conditional", "sz": "0", "posSide": pos_side,
+        "ordType": "conditional", "posSide": pos_side,
         "closeFraction": "1",
         "slTriggerPx": sl_trigger_px, "slOrdPx": "-1",
         "slTriggerPxType": "mark"
@@ -962,9 +968,24 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
 
 
 def _bingx_sign(params: dict, secret: str) -> str:
-    """BingX HMAC-SHA256 簽名（不排序，保持原始順序）"""
-    query = "&".join(f"{k}={v}" for k, v in params.items())
-    return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    """BingX HMAC-SHA256 簽名：timestamp 必須包含在簽名字串內"""
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    return hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+
+def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout: int = 10):
+    """BingX 統一請求：自動計算 signature 並附加到 URL"""
+    ts = str(int(time.time() * 1000))
+    params["timestamp"] = ts
+    sig = _bingx_sign(params, BINGX_SECRET_KEY)
+    # GET：params + signature 全部放 URL query string
+    # POST：params + signature 也放 URL（BingX v2 規範）
+    query = "&".join(f"{k}={v}" for k, v in sorted(params.items())) + f"&signature={sig}"
+    url = f"{BINGX_BASE}{path}?{query}"
+    if method == "GET":
+        return requests.get(url, headers=headers, timeout=timeout)
+    else:
+        # POST body 留空，所有參數都在 URL（BingX swap v2 規範）
+        return requests.post(url, headers=headers, timeout=timeout)
 
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                                   stop_loss: float, tp1: float, tp2: float,
@@ -978,12 +999,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         bingx_symbol = symbol_id.replace("/", "-")
 
         # 取得帳戶餘額
-        ts = str(int(time.time() * 1000))
-        params = {"timestamp": ts}
-        params["signature"] = _bingx_sign(params, BINGX_SECRET_KEY)
         headers = {"X-BX-APIKEY": BINGX_API_KEY}
-        r = requests.get(f"{BINGX_BASE}/openApi/swap/v2/user/balance",
-                        params=params, headers=headers, timeout=10)
+        r = _bingx_request("GET", "/openApi/swap/v2/user/balance", {}, headers)
         bal_resp = r.json()
         bal = bal_resp.get("data", {})
         if isinstance(bal, dict) and "balance" in bal:
@@ -1017,54 +1034,40 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             return
 
         # 設定槓桿
-        ts = str(int(time.time() * 1000))
-        lev_params = {"symbol": bingx_symbol, "side": "LONG" if trade_side == "long" else "SHORT",
-                      "leverage": str(leverage), "timestamp": ts}
-        lev_params["signature"] = _bingx_sign(lev_params, BINGX_SECRET_KEY)
-        requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/leverage",
-                     params=lev_params, headers=headers, timeout=10)
+        _bingx_request("POST", "/openApi/swap/v2/trade/leverage", {
+            "symbol": bingx_symbol,
+            "side": "LONG" if trade_side == "long" else "SHORT",
+            "leverage": str(leverage)
+        }, headers)
 
-        # 計算張數（BingX 用 USDT 計算）
+        # 計算張數
         qty = round(position_value / entry_price, 4)
         side_str = "BUY" if trade_side == "long" else "SELL"
         pos_side = "LONG" if trade_side == "long" else "SHORT"
+        exit_side = "SELL" if trade_side == "long" else "BUY"
 
         # 市價開倉
-        ts = str(int(time.time() * 1000))
-        order_params = {
+        r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": side_str, "positionSide": pos_side,
-            "type": "MARKET", "quantity": str(qty), "timestamp": ts
-        }
-        order_params["signature"] = _bingx_sign(order_params, BINGX_SECRET_KEY)
-        r = requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
-                         params=order_params, headers=headers, timeout=10)
+            "type": "MARKET", "quantity": str(qty)
+        }, headers)
         order_data = r.json()
         order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # 止損單（closePosition=true = 觸發時平掉全部倉位，不依賴張數）
-        exit_side = "SELL" if trade_side == "long" else "BUY"
-        ts = str(int(time.time() * 1000))
-        sl_params = {
+        # 止損單（closePosition=true）
+        r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
-            "closePosition": "true", "timestamp": ts, "workingType": "MARK_PRICE"
-        }
-        sl_params["signature"] = _bingx_sign(sl_params, BINGX_SECRET_KEY)
-        r = requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
-                         params=sl_params, headers=headers, timeout=10)
+            "closePosition": "true", "workingType": "MARK_PRICE"
+        }, headers)
         sl_data = r.json()
         if sl_data.get("code", 0) != 0:
             dc_log(f"🚨 **BingX 止損掛載失敗！正在自動平倉！**\n錯誤: {sl_data}")
             try:
-                flat_ts = str(int(time.time() * 1000))
-                flat_params = {
+                _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                    "type": "MARKET", "quantity": str(qty),
-                    "reduceOnly": "true", "timestamp": flat_ts
-                }
-                flat_params["signature"] = _bingx_sign(flat_params, BINGX_SECRET_KEY)
-                requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
-                             params=flat_params, headers=headers, timeout=10)
+                    "type": "MARKET", "quantity": str(qty), "reduceOnly": "true"
+                }, headers)
                 dc_log(f"🛡️ BingX 止損掛失敗，已自動市價平倉")
             except Exception as flat_err:
                 dc_log(f"🆘 **BingX 自動平倉也失敗！請立即手動處理！** {flat_err}")
@@ -1072,33 +1075,19 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
 
         # TP1 限價單（50%）
         half_qty = round(qty / 2, 4)
-        ts = str(int(time.time() * 1000))
-        tp1_params = {
+        _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
-            "quantity": str(half_qty), "timestamp": ts, "workingType": "MARK_PRICE",
-            "reduceOnly": "true"
-        }
-        tp1_params["signature"] = _bingx_sign(tp1_params, BINGX_SECRET_KEY)
-        requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
-                     params=tp1_params, headers=headers, timeout=10)
+            "quantity": str(half_qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
+        }, headers)
 
         # TP2（fixed 模式）
         if exit_mode == "fixed":
-            ts = str(int(time.time() * 1000))
-            tp2_params = {
+            _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp2, 5)),
-                "quantity": str(half_qty), "timestamp": ts, "workingType": "MARK_PRICE",
-                "reduceOnly": "true"
-            }
-            tp2_params["signature"] = _bingx_sign(tp2_params, BINGX_SECRET_KEY)
-            requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
-                         params=tp2_params, headers=headers, timeout=10)
-
-        dc_log(f"🚀 **BingX 下單成功**\n{bingx_symbol} {pos_side} {leverage}x\n"
-               f"保證金: {margin:.2f}U | 風險: {risk_usdt:.2f}U\n"
-               f"SL: {stop_loss} | TP1: {tp1} | TP2: {tp2}")
+                "quantity": str(half_qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
+            }, headers)
 
     except Exception as e:
         dc_log(f"❌ **BingX 下單失敗**: {e}")
@@ -1259,41 +1248,57 @@ def _get_tick_size(df: pd.DataFrame) -> float:
     else:
         return 0.00001
 
-def _find_pivot_low(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
+def _find_pivot_low(df: pd.DataFrame, pivot_len: int = PIVOT_LEN,
+                    atr_buffer: float = 0.0) -> Optional[float]:
     """
     找最近一個 Swing Low（左右各 pivot_len 根都比它高）
     找不到則退而求其次取最近 pivot_len*2 根最低點
-    止損 = Swing Low - 1 tick（無 ATR 緩衝）
+    止損 = Swing Low - 1 tick - atr_buffer * ATR
+    atr_buffer：ATR 倍數緩衝（0.0 = 僅 1 tick，同原版）
     """
     lows = df["low"].values
     n = len(lows)
     tick = _get_tick_size(df)
+    # ATR 緩衝計算
+    if atr_buffer > 0.0 and "atr" in df.columns:
+        atr_val = float(df["atr"].iloc[-1])
+        extra_buf = atr_val * atr_buffer
+    else:
+        extra_buf = 0.0
     # 優先：找真正的 Swing Low
     for i in range(n - pivot_len - 1, pivot_len - 1, -1):
         if (all(lows[i] < lows[i - j] for j in range(1, pivot_len + 1)) and
                 all(lows[i] < lows[i + j] for j in range(1, pivot_len + 1))):
-            return round(float(lows[i]) - tick, 8)
+            return round(float(lows[i]) - tick - extra_buf, 8)
     # 備援：最近 pivot_len*2 根最低點
     lookback = min(pivot_len * 2, n)
-    return round(float(lows[-lookback:].min()) - tick, 8)
+    return round(float(lows[-lookback:].min()) - tick - extra_buf, 8)
 
-def _find_pivot_high(df: pd.DataFrame, pivot_len: int = PIVOT_LEN) -> Optional[float]:
+def _find_pivot_high(df: pd.DataFrame, pivot_len: int = PIVOT_LEN,
+                     atr_buffer: float = 0.0) -> Optional[float]:
     """
     找最近一個 Swing High（左右各 pivot_len 根都比它低）
     找不到則退而求其次取最近 pivot_len*2 根最高點
-    止損 = Swing High + 1 tick（無 ATR 緩衝）
+    止損 = Swing High + 1 tick + atr_buffer * ATR
+    atr_buffer：ATR 倍數緩衝（0.0 = 僅 1 tick，同原版）
     """
     highs = df["high"].values
     n = len(highs)
     tick = _get_tick_size(df)
+    # ATR 緩衝計算
+    if atr_buffer > 0.0 and "atr" in df.columns:
+        atr_val = float(df["atr"].iloc[-1])
+        extra_buf = atr_val * atr_buffer
+    else:
+        extra_buf = 0.0
     # 優先：找真正的 Swing High
     for i in range(n - pivot_len - 1, pivot_len - 1, -1):
         if (all(highs[i] > highs[i - j] for j in range(1, pivot_len + 1)) and
                 all(highs[i] > highs[i + j] for j in range(1, pivot_len + 1))):
-            return round(float(highs[i]) + tick, 8)
+            return round(float(highs[i]) + tick + extra_buf, 8)
     # 備援：最近 pivot_len*2 根最高點
     lookback = min(pivot_len * 2, n)
-    return round(float(highs[-lookback:].max()) + tick, 8)
+    return round(float(highs[-lookback:].max()) + tick + extra_buf, 8)
 
 def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
                           df: pd.DataFrame, direction: str) -> Tuple[bool, str]:
@@ -1604,8 +1609,8 @@ class SykesTradingBot:
         p = p_l if is_long else p_s
 
         if is_long:
-            # Swing Low + 1 tick（備援：近N根最低點 + 1 tick）
-            calculated_sl = _find_pivot_low(df, PIVOT_LEN)
+            # Swing Low + 1 tick + ATR buffer（備援：近N根最低點 + 同樣緩衝）
+            calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             risk_pct      = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
@@ -1616,8 +1621,8 @@ class SykesTradingBot:
             tp1_target = current_close + risk_dist * p["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
-            # Swing High + 1 tick（備援：近N根最高點 + 1 tick）
-            calculated_sl = _find_pivot_high(df, PIVOT_LEN)
+            # Swing High + 1 tick + ATR buffer（備援：近N根最高點 + 同樣緩衝）
+            calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             risk_pct      = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
