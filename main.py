@@ -80,8 +80,8 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 # BingX 交易所帳戶配置
 
-BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "")
-BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "Uzfah277tqWmFLz620zAphYDf89IX3JSnLbMeZV9pCJBlNcduevEb2fnBvx1oMb9HjtMZmRA3cWayVUA")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "FIcvtjbyrA0NEArHIjEIL8UTyjKmS2KiB8UP8mmKbwO5PgLPysrOh26Vh8pEPftswq29SX6t5GKvBqJIA")
 BINGX_BASE       = "https://open-api.bingx.com"
 
 # 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
@@ -675,12 +675,15 @@ def _initialize_ccxt_client() -> ccxt.okx:
     return client
 
 def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str, pos_side: str) -> dict:
-    """ 使用 OKX REST API 掛條件式止損 Algo 單 (slTriggerPx) """
+    """ 使用 OKX REST API 掛條件式止損 Algo 單 (slTriggerPx)
+        sz 固定傳 "0" + closeFraction="1" = 觸發時平掉該方向全部倉位，不依賴張數
+    """
     now_utc = datetime.now(timezone.utc)
     ts = now_utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now_utc.microsecond // 1000:03d}Z"
     body = json.dumps({
         "instId": inst_id, "tdMode": MARGIN_MODE, "side": side,
-        "ordType": "conditional", "sz": amount, "posSide": pos_side,
+        "ordType": "conditional", "sz": "0", "posSide": pos_side,
+        "closeFraction": "1",
         "slTriggerPx": sl_trigger_px, "slOrdPx": "-1",
         "slTriggerPxType": "mark"
     })
@@ -815,26 +818,13 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         amount_precision = int(market_structure.get("precision", {}).get("amount", 0))
         contract_size    = float(market_structure.get("contractSize", 1.0) or 1.0)
 
-        # ── Fix 1：止損加 1 tick（前高/前低 ± 最小價格單位）────────────────────
-        tick_sz_str = str((market_structure.get("info") or {}).get("tickSz", "0"))
-        try:
-            tick_size = float(tick_sz_str)
-        except ValueError:
-            tick_size = 0.0
-        if tick_size > 0:
-            if trade_side == "long":
-                stop_loss = round(stop_loss - tick_size, 8)   # pivot low  - 1 tick
-            else:
-                stop_loss = round(stop_loss + tick_size, 8)   # pivot high + 1 tick
+        # tick 已在 _find_pivot_high/low 函數內加過，此處不重複處理
 
         raw_order_amount = position_value / (current_market_price * contract_size)
 
-        if amount_precision == 0:
-            final_order_amount = max(1, int(raw_order_amount))
-            split_half_amount = max(1, int(final_order_amount // 2))
-        else:
-            final_order_amount = max(round(1.0 / contract_size, amount_precision), round(raw_order_amount, amount_precision))
-            split_half_amount = round(final_order_amount / 2.0, amount_precision)
+        # 張數強制整數（OKX 要求 lot size 必須為整數倍）
+        final_order_amount = max(1, int(raw_order_amount))
+        split_half_amount  = max(1, int(final_order_amount // 2))
 
         try:
             ex.set_leverage(calculated_leverage, symbol_id, params={"posSide": trade_side})
@@ -884,12 +874,21 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 # API 回應但無 algoId → 掛單實際失敗
                 raise RuntimeError(f"API 回應無 algoId: {sl_result}")
         except Exception as sle:
-            err_msg = (f"🚨 **緊急警告：止損單掛載失敗！**\n"
+            err_msg = (f"🚨 **緊急警告：止損單掛載失敗！正在自動平倉！**\n"
                        f"商品: `{symbol_id}` 方向: `{trade_side}`\n"
-                       f"已開倉 {final_order_amount} 張，但目前**無止損保護**！\n"
                        f"錯誤: `{sle}`\nside={sl_side} posSide={sl_pos} px={stop_loss}")
             dc_log(err_msg)
-            execution_report.append(f"🚨 止損掛載失敗（已緊急通知）: {sle}")
+            # 止損失敗 → 立即市價平倉保護資金
+            try:
+                ex.create_market_order(
+                    symbol=symbol_id, side=exit_action,
+                    amount=final_order_amount,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                )
+                dc_log(f"🛡️ 止損掛失敗，已自動市價平倉 {final_order_amount} 張")
+            except Exception as flat_err:
+                dc_log(f"🆘 **自動平倉也失敗！請立即手動處理！** {flat_err}")
+            return
 
         # TP1：固定限價（50%）
         try:
@@ -963,8 +962,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
 
 
 def _bingx_sign(params: dict, secret: str) -> str:
-    """BingX HMAC-SHA256 簽名"""
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    """BingX HMAC-SHA256 簽名（不排序，保持原始順序）"""
+    query = "&".join(f"{k}={v}" for k, v in params.items())
     return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
@@ -1042,18 +1041,34 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         order_data = r.json()
         order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # 止損單
+        # 止損單（closePosition=true = 觸發時平掉全部倉位，不依賴張數）
         exit_side = "SELL" if trade_side == "long" else "BUY"
         ts = str(int(time.time() * 1000))
         sl_params = {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
-            "quantity": str(qty), "timestamp": ts, "workingType": "MARK_PRICE"
+            "closePosition": "true", "timestamp": ts, "workingType": "MARK_PRICE"
         }
         sl_params["signature"] = _bingx_sign(sl_params, BINGX_SECRET_KEY)
         r = requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
                          params=sl_params, headers=headers, timeout=10)
         sl_data = r.json()
+        if sl_data.get("code", 0) != 0:
+            dc_log(f"🚨 **BingX 止損掛載失敗！正在自動平倉！**\n錯誤: {sl_data}")
+            try:
+                flat_ts = str(int(time.time() * 1000))
+                flat_params = {
+                    "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                    "type": "MARKET", "quantity": str(qty),
+                    "reduceOnly": "true", "timestamp": flat_ts
+                }
+                flat_params["signature"] = _bingx_sign(flat_params, BINGX_SECRET_KEY)
+                requests.post(f"{BINGX_BASE}/openApi/swap/v2/trade/order",
+                             params=flat_params, headers=headers, timeout=10)
+                dc_log(f"🛡️ BingX 止損掛失敗，已自動市價平倉")
+            except Exception as flat_err:
+                dc_log(f"🆘 **BingX 自動平倉也失敗！請立即手動處理！** {flat_err}")
+            return
 
         # TP1 限價單（50%）
         half_qty = round(qty / 2, 4)
