@@ -255,7 +255,7 @@ BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 #    TP1=1.2 TP2=2.5 BE=1.2 BUF=0.0 PVT=10
 "15m_long": {
 "tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.2,
-"sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "trailing",
+"sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
 # ✅ 15m/short：WF 訓練+0.028→驗證+0.124，驗證更好，強力採用
@@ -295,7 +295,7 @@ BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 },
 "4H_long": {
 "tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
-"sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "trailing",
+"sl_atr_buffer": 0.03, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 6, "qqe_sf": 3, "qqe_factor": 3.0
 },
 "4H_short": {
@@ -929,45 +929,18 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         if remainder_amount <= 0 or remainder_amount < _min_amt:
             dc_log(f"⚠️ TP2 跳過：剩餘張數 {remainder_amount} 小於最小下單量 {_min_amt}")
         else:
-            # TP2：exit_mode=fixed → 限價；exit_mode=trailing → 追蹤止損 Algo，不掛限價
-            if exit_mode == "trailing":
-                try:
-                    _place_okx_algo_trailing(
-                        inst_id=inst_id, side=exit_action,
-                        amount=str(remainder_amount), callback_ratio="0.02",
-                        pos_side=trade_side
-                    )
-                    execution_report.append(f"🌕 TP2 追蹤止損 Algo 已掛置 (50%) 回撤率: 2%")
-                except Exception as tp2e:
-                    execution_report.append(f"⚠️ TP2 追蹤止損委託失敗: {tp2e}")
-            else:
-                try:
-                    ex.create_order(
-                        symbol=symbol_id, type="limit", side=exit_action,
-                        amount=remainder_amount, price=tp2,
-                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                    )
-                    execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
-                except Exception as tp2e:
-                    execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+            # TP2：固定限價單（移除移動停損，統一用 fixed 避免與保本機制衝突）
+            try:
+                ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=remainder_amount, price=tp2,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                )
+                execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
+            except Exception as tp2e:
+                execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
-        # exit_mode=trailing：寫入實盤追蹤止損狀態機
-        if exit_mode == "trailing" and sl_algo_id and tp1_order_id:
-            trade_key = f"{inst_id}_{trade_side}_{int(time.time())}"
-            active_real_trades[trade_key] = {
-                "inst_id":          inst_id,
-                "symbol":           symbol_id,
-                "direction":        trade_side,
-                "entry_price":      executed_average_price,
-                "sl_algo_id":       sl_algo_id,
-                "tp1_order_id":     tp1_order_id,
-                "tp1_hit":          False,
-                "current_sl":       stop_loss,
-                "remaining_amount": str(remainder_amount),
-                "pos_side":         trade_side,
-                "tf_id":            tf_id,
-                "risk_dist":        abs(float(executed_average_price) - stop_loss),
-            }
+        # trailing 狀態機已移除，統一使用固定止損 + 1R 保本機制
             execution_report.append(f"📊 追蹤止損狀態機已啟動 (key: {trade_key})")
 
         dc_log("\n".join(execution_report))
@@ -1038,6 +1011,21 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 保證金不足：可用 {avail_usdt:.2f}，需要 {margin:.2f}")
             return
 
+        # ── BingX 風險率保護 ──────────────────────────────────────────────────
+        # BingX 風險率 = 已用保證金 / 帳戶淨值，越高越危險，接近 100% 會爆倉
+        # 公式：used_margin = equity - availableMargin
+        # 新倉開完後估算風險率，超過閾值就不開
+        BINGX_MAX_RISK_RATE = 0.70   # 最高允許風險率 70%（超過就不開新倉）
+        equity        = float(bal.get("equity") or total_usdt)
+        used_margin   = equity - avail_usdt
+        # 加上這筆新倉的保證金後，估算風險率
+        projected_used = used_margin + margin
+        projected_risk_rate = projected_used / equity if equity > 0 else 1.0
+        if projected_risk_rate > BINGX_MAX_RISK_RATE:
+            dc_log(f"⚠️ BingX 風險率預估 {projected_risk_rate:.1%} > {BINGX_MAX_RISK_RATE:.0%}，"
+                   f"暫停開新倉（已用 {used_margin:.2f} + 新倉 {margin:.2f} / 淨值 {equity:.2f}）")
+            return
+
         # 設定槓桿（全倉模式）
         _bingx_request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": bingx_symbol,
@@ -1060,11 +1048,11 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         order_data = r.json()
         order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # 止損單（closePosition=true）
+        # 止損單（傳 quantity，BingX 不支援單獨 closePosition）
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
-            "closePosition": "true", "workingType": "MARK_PRICE"
+            "quantity": str(qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
         }, headers)
         sl_data = r.json()
         if sl_data.get("code", 0) != 0:
