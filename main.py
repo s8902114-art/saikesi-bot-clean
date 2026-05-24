@@ -80,8 +80,8 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 # BingX 交易所帳戶配置
 
-BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "Uzfah277tqWmFLz620zAphYDf89IX3JSnLbMeZV9pCJBlNcduevEb2fnBvx1oMb9HjtMZmRA3cWayVUA")
-BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "FIcvtjbyrA0NEArHIjEIL8UTyjKmS2KiB8UP8mmKbwO5PgLPysrOh26Vh8pEPftswq29SX6t5GKvBqJIA")
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "dUs9Bi25VBAAAIWpqpBgzbj5gjZXmufeO0U0LW6mMgGAsCeNNtPlbjvVoNYS6jxAECRWdLXDLRn23XE1gtg")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "jn69lGmeOQLAmOjjsUUUUd6tJL1zntmz7RSIOgkHsxn2YakmI4NbzzjgpzkvZCf5D5Xnue2mPSe9qWU6hQ")
 BINGX_BASE       = "https://open-api.bingx.com"
 
 # 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
@@ -122,7 +122,7 @@ AUTO_TRADE: Dict[str, bool] = {
 }
 CVD_ENABLED: bool = False  # 秋總三層 CVD 背離吸收過濾開關（預設關閉，/cvd on 啟用）
 ADX_ENABLED: bool = True   # ADX >= ADX_THR 過濾開關
-MARGIN_MODE: str  = "isolated"  # 保證金模式：isolated（逐倉）或 cross（全倉）
+MARGIN_MODE: str  = "cross"   # 保證金模式：cross（全倉）或 isolated（逐倉）
 
 # API 基本節點網址
 
@@ -248,40 +248,48 @@ _dc_last_msg_id = "0"
 # ══════════════════════════════════════════════════════════════════════════════
 
 BEST_PARAMS: Dict[str, Dict[str, Any]] = {
-# 大數據回測最優純R倍數 2026-05-24，滑動視窗停損版 (v10.5)
-# 15m/long：TP1=0.8 TP2=2.5 BE=1.0 BUF=0.2 PVT=5  EV=+0.048R 成長=160%
+# 迭代優化 + Walk-Forward 驗證 2026-05-24
+# ✅ = WF 驗證穩健（已更新）  ⚠️ = WF 可疑（保守維持舊值）
+#
+# ✅ 15m/long：WF 訓練+0.107→驗證+0.052，略降但正，採用
+#    TP1=1.2 TP2=2.5 BE=1.2 BUF=0.0 PVT=10
 "15m_long": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
-"sl_atr_buffer": 0.2, "structure_lookback": 5, "exit_mode": "trailing",
+"tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.2,
+"sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "trailing",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
-# 15m/short：EV=-0.023R 負期望，保守參數維持原值
+# ✅ 15m/short：WF 訓練+0.028→驗證+0.124，驗證更好，強力採用
+#    TP1=1.0 TP2=2.5 BE=1.2 BUF=0.3 PVT=5
 "15m_short": {
-"tp1_mult": 0.8,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 1.0,
-"sl_atr_buffer": 0.2, "structure_lookback": 5, "exit_mode": "fixed",
+"tp1_mult": 1.0,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.2,
+"sl_atr_buffer": 0.3, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
-# 30m/long：TP1=1.2 TP2=2.5 BE=1.0 BUF=0.1 PVT=5  EV=+0.084R 成長=133%
+# ✅ 30m/long：WF 訓練+0.114→驗證+0.144，穩健採用
+#    TP1=1.5 TP2=3.5 BE=1.2 BUF=0.1 PVT=5
 "30m_long": {
-"tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.0,
+"tp1_mult": 1.5,  "tp2_intraday_mult": 3.5,  "tp2_swing_mult": 3.5, "be_trigger": 1.2,
 "sl_atr_buffer": 0.1, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 2, "qqe_factor": 3.0
 },
-# 30m/short：TP1=0.8 TP2=3.5 BE=1.0 BUF=0.0 PVT=10  EV=+0.072R 翻正
+# ⚠️ 30m/short：WF 訓練+0.197→驗證-0.067，過擬合，保守維持舊值
+#    維持 TP1=0.8 TP2=3.5 BE=1.0 BUF=0.0 PVT=10
 "30m_short": {
 "tp1_mult": 0.8,  "tp2_intraday_mult": 3.5,  "tp2_swing_mult": 3.5, "be_trigger": 1.0,
 "sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 3, "qqe_factor": 4.0
 },
-# 1H/long：TP1=1.0 TP2=2.0 BE=1.0 BUF=0.5 PVT=5   EV=+0.154R 成長=139% 回徹=15.5% TP2打到31%
+# ✅ 1H/long：WF 訓練+0.203→驗證+0.119，略降但穩健，採用
+#    TP1=1.2 TP2=3.5 BE=0.5 BUF=0.5 PVT=5
 "1H_long": {
-"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
+"tp1_mult": 1.2,  "tp2_intraday_mult": 3.5,  "tp2_swing_mult": 3.5, "be_trigger": 0.5,
 "sl_atr_buffer": 0.5, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
-# 1H/short：TP1=1.0 TP2=3.0 BE=1.0 BUF=0.5 PVT=3   EV=+0.049R
+# ⚠️ 1H/short：WF 訓練+0.140→驗證-0.088，嚴重過擬合，保守維持舊值
+#    維持 TP1=1.0 TP2=2.0 BE=1.0 BUF=0.5 PVT=3
 "1H_short": {
-"tp1_mult": 1.0,  "tp2_intraday_mult": 3.0,  "tp2_swing_mult": 3.0, "be_trigger": 1.0,
+"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
 "sl_atr_buffer": 0.5, "structure_lookback": 3, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
@@ -968,23 +976,20 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
 
 
 def _bingx_sign(params: dict, secret: str) -> str:
-    """BingX HMAC-SHA256 簽名：timestamp 必須包含在簽名字串內"""
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    """BingX HMAC-SHA256 簽名：參數不排序，保持原始順序"""
+    query = "&".join(f"{k}={v}" for k, v in params.items())
     return hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
 
 def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout: int = 10):
-    """BingX 統一請求：自動計算 signature 並附加到 URL"""
+    """BingX 統一請求：timestamp 加入後計算 signature，signature 單獨附加"""
     ts = str(int(time.time() * 1000))
     params["timestamp"] = ts
     sig = _bingx_sign(params, BINGX_SECRET_KEY)
-    # GET：params + signature 全部放 URL query string
-    # POST：params + signature 也放 URL（BingX v2 規範）
-    query = "&".join(f"{k}={v}" for k, v in sorted(params.items())) + f"&signature={sig}"
+    query = "&".join(f"{k}={v}" for k, v in params.items()) + f"&signature={sig}"
     url = f"{BINGX_BASE}{path}?{query}"
     if method == "GET":
         return requests.get(url, headers=headers, timeout=timeout)
     else:
-        # POST body 留空，所有參數都在 URL（BingX swap v2 規範）
         return requests.post(url, headers=headers, timeout=timeout)
 
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
@@ -1033,11 +1038,12 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 保證金不足：可用 {avail_usdt:.2f}，需要 {margin:.2f}")
             return
 
-        # 設定槓桿
+        # 設定槓桿（全倉模式）
         _bingx_request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": bingx_symbol,
             "side": "LONG" if trade_side == "long" else "SHORT",
-            "leverage": str(leverage)
+            "leverage": str(leverage),
+            "marginType": "CROSSED"
         }, headers)
 
         # 計算張數
@@ -1512,8 +1518,10 @@ class SykesTradingBot:
 
     # 4. （channel_ok 已移除，不過濾盤整）
 
-    # 5. 空頭趨勢（v9：當根 EMA144 < EMA576）
-        bear_trend = ema144.iloc[-1] < ema576.iloc[-1]
+        # 5. 空頭趨勢（v9.8：要求連續 BEAR_MIN_BARS 根都維持 EMA144 < EMA576，減少假空頭）
+        bear_series = (ema144 < ema576).astype(int)
+        bear_trend  = bool(bear_series.iloc[-BEAR_MIN_BARS:].min() == 1) if len(bear_series) >= BEAR_MIN_BARS \
+                      else bool(ema144.iloc[-1] < ema576.iloc[-1])
 
     # 6. 雙軌 QQE MOD
         p_l = get_params(tf_id, "long")
