@@ -239,7 +239,7 @@ BEAR_MIN_BARS = 20
 
 # 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
 
-_dc_last_msg_id = "0"
+# Discord 訊息 ID 追蹤（在 poll_dc_commands 中初始化）
 
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -1925,9 +1925,10 @@ def poll_dc_commands():
                                 try:
                                     ex_tmp = _initialize_ccxt_client()
                                     bal    = ex_tmp.fetch_balance()
-                                    avail  = float(bal.get("USDT", {}).get("free", 0.0))
-                                    per_slot = avail / POSITION_SLOTS
-                                    per_slot_margin_str = f"{per_slot:.2f} USDT (餘額 {avail:.2f} ÷ {POSITION_SLOTS} 倉)"
+                                    total  = float(bal.get("USDT", {}).get("total", 0.0) or
+                                                   bal.get("info", {}).get("totalEq", 0.0) or 0.0)
+                                    risk_per_trade = total * RISK_PCT
+                                    per_slot_margin_str = f"{risk_per_trade:.2f} USDT (總資產 {total:.2f} × {RISK_PCT*100:.0f}%)"
                                 except:
                                     per_slot_margin_str = "查詢失敗"
                             tf_status = "  ".join(
