@@ -1040,48 +1040,97 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         pos_side = "LONG" if trade_side == "long" else "SHORT"
         exit_side = "SELL" if trade_side == "long" else "BUY"
 
+        # ★ 先驗證止損參數是否合法，再開倉
+        # BingX stopPrice 必須：做多 < 當前價；做空 > 當前價
+        price_check = _bingx_request("GET", "/openApi/swap/v2/quote/price", {
+            "symbol": bingx_symbol
+        }, headers).json()
+        current_px = float((price_check.get("data") or {}).get("price") or entry_price)
+
+        if trade_side == "long" and stop_loss >= current_px:
+            dc_log(f"⚠️ BingX 止損價 {stop_loss} ≥ 當前價 {current_px}，參數無效，取消下單")
+            return
+        if trade_side == "short" and stop_loss <= current_px:
+            dc_log(f"⚠️ BingX 止損價 {stop_loss} ≤ 當前價 {current_px}，參數無效，取消下單")
+            return
+        if qty < 0.001:
+            dc_log(f"⚠️ BingX 下單量 {qty} 過小，取消下單")
+            return
+
         # 市價開倉
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": side_str, "positionSide": pos_side,
             "type": "MARKET", "quantity": str(qty)
         }, headers)
         order_data = r.json()
+        if order_data.get("code", 0) != 0:
+            dc_log(f"⚠️ BingX 開倉失敗：{order_data}")
+            return
         order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # 止損單（傳 quantity，BingX 不支援單獨 closePosition）
+        # 止損單（開倉後立刻掛，失敗就平倉）
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
-            "quantity": str(qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
+            "quantity": str(qty), "workingType": "MARK_PRICE"
         }, headers)
         sl_data = r.json()
         if sl_data.get("code", 0) != 0:
-            dc_log(f"🚨 **BingX 止損掛載失敗！正在自動平倉！**\n錯誤: {sl_data}")
+            # 參數驗證過了還是失敗（罕見）→ 平掉剛開的倉
+            dc_log(f"⚠️ BingX 止損掛載失敗，平倉保護\n錯誤: {sl_data}")
             try:
                 _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                    "type": "MARKET", "quantity": str(qty), "reduceOnly": "true"
+                    "type": "MARKET", "quantity": str(qty)
                 }, headers)
-                dc_log(f"🛡️ BingX 止損掛失敗，已自動市價平倉")
+                dc_log(f"🛡️ BingX 止損掛失敗，已取消倉位（市價平倉）")
             except Exception as flat_err:
-                dc_log(f"🆘 **BingX 自動平倉也失敗！請立即手動處理！** {flat_err}")
+                dc_log(f"🆘 **BingX 取消倉位也失敗！請立即手動處理！** {flat_err}")
             return
+        bingx_sl_order_id = sl_data.get("data", {}).get("order", {}).get("orderId", "")
 
         # TP1 限價單（50%）
         half_qty = round(qty / 2, 4)
-        _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+        tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
-            "quantity": str(half_qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
+            "quantity": str(half_qty), "workingType": "MARK_PRICE"
         }, headers)
+        bingx_tp1_order_id = tp1_r.json().get("data", {}).get("order", {}).get("orderId", "")
 
         # TP2（fixed 模式）
         if exit_mode == "fixed":
             _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp2, 5)),
-                "quantity": str(half_qty), "workingType": "MARK_PRICE", "reduceOnly": "true"
+                "quantity": str(half_qty), "workingType": "MARK_PRICE"
             }, headers)
+
+        # ★ 存入 active_real_trades 供保本機制追蹤
+        # 手續費：BingX taker 約 0.05%，雙邊 0.1%
+        fee_buffer_bingx = float(entry_price) * 0.001
+        be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
+                           else float(entry_price) - fee_buffer_bingx
+        trade_key = f"bingx_{bingx_symbol}_{trade_side}_{int(time.time())}"
+        active_real_trades[trade_key] = {
+            "exchange":         "bingx",
+            "inst_id":          bingx_symbol,
+            "symbol":           symbol_id,
+            "direction":        trade_side,
+            "entry_price":      str(entry_price),
+            "sl_order_id":      bingx_sl_order_id,
+            "tp1_order_id":     bingx_tp1_order_id,
+            "tp1_hit":          False,
+            "current_sl":       stop_loss,
+            "be_price":         be_price_bingx,   # 保本價（含手續費）
+            "remaining_qty":    str(half_qty),
+            "pos_side":         pos_side,
+            "exit_side":        exit_side,
+            "headers":          headers,
+            "risk_dist":        abs(float(entry_price) - stop_loss),
+            "tf_id":            tf_id if 'tf_id' in dir() else "15m",
+        }
+        dc_log(f"📋 BingX 倉位已加入保本追蹤：{bingx_symbol} {trade_side} SL={stop_loss}")
 
     except Exception as e:
         dc_log(f"❌ **BingX 下單失敗**: {e}")
@@ -1126,13 +1175,16 @@ def check_trailing_stops_for_real():
                     # TP1 成交 → 1. 取消原止損
                     _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
 
-                    # 2. 掛新止損在成本價（break-even）
-                    be_price  = trade["entry_price"]
+                    # 2. 掛新止損在成本價 + 手續費（保本價略高於進場價）
+                    entry    = float(trade["entry_price"])
+                    fee_buf  = entry * 0.001   # taker 雙邊 0.1%
+                    be_price = entry + fee_buf if direction == "long" else entry - fee_buf
+                    be_price = round(be_price, 5)
                     exit_side = "sell" if direction == "long" else "buy"
                     sl_result = _place_okx_algo_sl(
                         inst_id=inst_id, side=exit_side,
                         amount=trade["remaining_amount"],
-                        sl_trigger_px=str(round(be_price, 5)),
+                        sl_trigger_px=str(be_price),
                         pos_side=direction
                     )
                     new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
@@ -1142,10 +1194,10 @@ def check_trailing_stops_for_real():
                         trade["tp1_hit"]    = True
 
                     # 3. DC + TG 通知
-                    msg = f"✅ TP1 已成交，止損移至成本價 {be_price}\n幣種：{name}"
+                    msg = f"✅ TP1 已成交，止損移至保本價 {be_price}（含手續費）\n幣種：{name}"
                     dc_log(msg)
                     tg_log(msg)
-                    print(f"[Trailing] {name} TP1成交，SL移至成本價 {be_price}")
+                    print(f"[Trailing] {name} TP1成交，SL移至保本價 {be_price}")
                 else:
                     # TP1 未成交：檢查浮盈是否達 be_trigger × R + 手續費，提前保本
                     ticker = ex.fetch_ticker(symbol)
@@ -1224,6 +1276,54 @@ def check_trailing_stops_for_real():
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
+
+    # ── BingX 保本追蹤 ──────────────────────────────────────────────────────
+    for trade_key in list(active_real_trades.keys()):
+        trade = active_real_trades[trade_key]
+        if trade.get("exchange") != "bingx": continue
+        try:
+            bingx_symbol = trade["inst_id"]
+            direction    = trade["direction"]
+            entry        = float(trade["entry_price"])
+            be_price     = float(trade["be_price"])
+            headers      = trade["headers"]
+            exit_side    = trade["exit_side"]
+            pos_side     = trade["pos_side"]
+            remaining    = trade["remaining_qty"]
+            sl_order_id  = trade["sl_order_id"]
+
+            if trade["tp1_hit"]: continue  # 已保本，跳過
+
+            # 查詢 TP1 是否成交
+            tp1_r = _bingx_request("GET", "/openApi/swap/v2/trade/order", {
+                "symbol": bingx_symbol, "orderId": trade["tp1_order_id"]
+            }, headers)
+            tp1_data = tp1_r.json().get("data", {}).get("order", {})
+            if tp1_data.get("status") in ("FILLED", "filled"):
+                # TP1 成交 → 取消原止損，掛保本止損
+                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder", {
+                    "symbol": bingx_symbol, "orderId": sl_order_id
+                }, headers)
+                # 新止損掛在保本價（含手續費）
+                new_sl_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                    "type": "STOP_MARKET", "stopPrice": str(round(be_price, 5)),
+                    "quantity": str(remaining), "workingType": "MARK_PRICE"
+                }, headers)
+                new_sl_data = new_sl_r.json()
+                if new_sl_data.get("code", 0) == 0:
+                    new_sl_id = new_sl_data.get("data", {}).get("order", {}).get("orderId", "")
+                    trade["sl_order_id"] = new_sl_id
+                    trade["current_sl"]  = be_price
+                    trade["tp1_hit"]     = True
+                    msg = f"✅ BingX TP1 成交，止損移至保本價 {be_price}（含手續費）\n幣種：{bingx_symbol}"
+                    dc_log(msg)
+                    print(f"[BingX Trailing] {msg}")
+                else:
+                    dc_log(f"⚠️ BingX 保本止損掛載失敗：{new_sl_data}")
+
+        except Exception as be_err:
+            print(f"[BingX Trailing] {trade_key} 處理失敗: {be_err}")
 
 def _get_tick_size(df: pd.DataFrame) -> float:
     """從 K 棒數據自動估算 tick size（最小價格單位）"""
