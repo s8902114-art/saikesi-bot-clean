@@ -1878,7 +1878,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -1957,7 +1957,7 @@ def poll_dc_commands():
                                 "`!status` - 系統狀態（CVD/ADX/時框開關）\n"
                                 "`!setlive` / `!setpaper` - 切換實盤/模擬模式\n"
                                 "`!pause` / `!resume` - 暫停/恢復掃描\n"
-                                "`!setslots [數字]` - 設定倉位格數\n"
+                                "`!risk [%]` - 設定每倉風險百分比（如 !risk 10）\n"
                                 "`/cvd on|off` - 開關 CVD 過濾\n"
                                 "`/adx on|off` - 開關 ADX 過濾\n"
                                 "`/trade [15m|30m|1h|4h|all] on|off` - 開關自動下單\n"
@@ -1981,13 +1981,23 @@ def poll_dc_commands():
                             _PAUSED = False
                             dc_log("▶️ **系統已恢復**，重新開始掃描。")
 
-                        # ── setslots ───────────────────────────────────
-                        elif cmd == "setslots":
-                            if len(parts) >= 2 and parts[1].isdigit() and int(parts[1]) >= 1:
-                                POSITION_SLOTS = int(parts[1])
-                                dc_log(f"⚙️ 倉位格數已更新: `{POSITION_SLOTS}` 倉")
+                        # ── risk / setslots ────────────────────────────
+                        elif cmd in ("risk", "setslots"):
+                            if len(parts) >= 2:
+                                val = parts[1].replace("%", "")
+                                if val.replace(".", "").isdigit():
+                                    v = float(val)
+                                    # 判斷輸入：> 1 視為百分比（如 20 = 20%），≤ 1 視為小數（如 0.2）
+                                    if v > 1:
+                                        RISK_PCT = round(v / 100, 4)
+                                    else:
+                                        RISK_PCT = round(v, 4)
+                                    POSITION_SLOTS = max(1, round(1.0 / RISK_PCT))
+                                    dc_log(f"⚙️ 風險已更新: 每倉 `{RISK_PCT*100:.1f}%`，對應倉位格數: `{POSITION_SLOTS}` 倉")
+                                else:
+                                    dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
                             else:
-                                dc_log("⚠️ 用法: `!setslots [正整數]`，例如 `!setslots 10`")
+                                dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
 
                         # ── cvd on|off ─────────────────────────────────
                         elif cmd == "cvd":
