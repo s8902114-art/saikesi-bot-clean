@@ -940,8 +940,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
-        # trailing 狀態機已移除，統一使用固定止損 + 1R 保本機制
-            execution_report.append(f"📊 追蹤止損狀態機已啟動 (key: {trade_key})")
+        # 固定止損 + 1R 保本機制（由 check_trailing_stops_for_real 處理）
 
         dc_log("\n".join(execution_report))
     except Exception as general_error:
@@ -1056,6 +1055,13 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         if qty < 0.001:
             dc_log(f"⚠️ BingX 下單量 {qty} 過小，取消下單")
             return
+
+        # 倉位價值不得超過可用保證金 × 槓桿（防止 110424）
+        max_position_value = avail_usdt * leverage * 0.95   # 留 5% 緩衝
+        if position_value > max_position_value:
+            position_value = max_position_value
+            qty = round(position_value / entry_price, 4)
+            dc_log(f"⚠️ BingX 倉位縮減至可用上限：{position_value:.2f} USDT，qty={qty}")
 
         # 市價開倉
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
