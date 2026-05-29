@@ -434,8 +434,10 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     "exit_mode": sig.get("exit_mode", "fixed")
     }
 
+    source_tag = sig.get("source_tag", "C3")
+    source_label = f" 【{source_tag}】" if source_tag else ""
     embed_payload = {
-    "title": f"{side_emoji} {coin_name} [{tf} - {dir_name}]",
+    "title": f"{side_emoji} {coin_name} [{tf} - {dir_name}]{source_label}",
     "description": f"**環境特徵:** {swing_tag} | {cvd_tag}",
     "color": int(card_color, 16) if isinstance(card_color, str) else card_color,
     "fields": [
@@ -1342,6 +1344,168 @@ def _get_tick_size(df: pd.DataFrame) -> float:
     else:
         return 0.00001
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 雙底 / 雙頂動能衰減進場偵測 (Double Bottom / Top Pattern)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 各時框雙底/雙頂參數（Walk-Forward 驗證最佳）
+_DOUBLE_PARAMS: Dict[str, Dict[str, Any]] = {
+    "15m": {"pivot_len": 2, "neck_expand": 1.5, "price_tol": 0.01},
+    "30m": {"pivot_len": 2, "neck_expand": 1.5, "price_tol": 0.01},
+    "1H":  {"pivot_len": 5, "neck_expand": 2.0, "price_tol": 0.01},
+    "4H":  {"pivot_len": 5, "neck_expand": 2.0, "price_tol": 0.01},
+}
+_DOUBLE_SEARCH_WIN = 60   # 往回找雙點的最大窗口（根數）
+
+
+def _find_pattern_pivots_low(lo: np.ndarray, i: int, pivot_len: int, window: int):
+    """在 [i-window, i-pivot_len] 找所有擺動低點索引"""
+    pivots = []
+    start = max(pivot_len, i - window)
+    end   = i - pivot_len
+    for j in range(start, end + 1):
+        left  = lo[j - pivot_len:j]
+        right = lo[j + 1:j + pivot_len + 1]
+        if len(left) < pivot_len or len(right) < pivot_len:
+            continue
+        if lo[j] <= left.min() and lo[j] <= right.min():
+            pivots.append(j)
+    return pivots
+
+
+def _find_pattern_pivots_high(hi: np.ndarray, i: int, pivot_len: int, window: int):
+    """在 [i-window, i-pivot_len] 找所有擺動高點索引"""
+    pivots = []
+    start = max(pivot_len, i - window)
+    end   = i - pivot_len
+    for j in range(start, end + 1):
+        left  = hi[j - pivot_len:j]
+        right = hi[j + 1:j + pivot_len + 1]
+        if len(left) < pivot_len or len(right) < pivot_len:
+            continue
+        if hi[j] >= left.max() and hi[j] >= right.max():
+            pivots.append(j)
+    return pivots
+
+
+def check_double_bottom(df: pd.DataFrame, tf_id: str) -> bool:
+    """
+    雙底偵測：
+    1. e144 > e576（多頭趨勢）
+    2. 找最後兩個擺動低點，價差 < price_tol
+    3. 第二底成交量 < 第一底（動能衰減）
+    4. 第二底實體 < 第一底實體 × 0.8
+    5. 當根收盤突破頸線 + 放量 > 近20根均量 × neck_expand
+    """
+    if len(df) < _DOUBLE_SEARCH_WIN + 10:
+        return False
+    params   = _DOUBLE_PARAMS.get(tf_id, _DOUBLE_PARAMS["1H"])
+    pvt_len  = params["pivot_len"]
+    neck_x   = params["neck_expand"]
+    price_tol = params["price_tol"]
+
+    hi   = df["high"].values
+    lo   = df["low"].values
+    cl   = df["close"].values
+    op   = df["open"].values
+    vol  = df["vol"].values if "vol" in df.columns else np.ones(len(df))
+    ema144 = df["close"].ewm(span=144, adjust=False).mean().values
+    ema576 = df["close"].ewm(span=576, adjust=False).mean().values
+
+    i = len(df) - 2   # 最後一根已收盤的K棒
+
+    if ema144[i] <= ema576[i]:
+        return False
+
+    pivots = _find_pattern_pivots_low(lo, i, pvt_len, _DOUBLE_SEARCH_WIN)
+    if len(pivots) < 2:
+        return False
+
+    p1, p2 = pivots[-2], pivots[-1]
+    if p2 - p1 < pvt_len * 2:
+        return False
+
+    v1, v2 = lo[p1], lo[p2]
+    if abs(v2 - v1) / max(v1, 1e-9) > price_tol:
+        return False
+    if vol[p2] >= vol[p1]:
+        return False
+    body1 = abs(cl[p1] - op[p1])
+    body2 = abs(cl[p2] - op[p2])
+    if body1 > 0 and body2 >= body1 * 0.8:
+        return False
+
+    neckline  = hi[p1:p2 + 1].max()
+    if cl[i] <= neckline:
+        return False
+
+    vol_avg20 = vol[max(0, i - 20):i].mean()
+    if vol_avg20 <= 0 or vol[i] < vol_avg20 * neck_x:
+        return False
+
+    return True
+
+
+def check_double_top(df: pd.DataFrame, tf_id: str) -> bool:
+    """
+    雙頂偵測：
+    1. 連續20根 e144 < e576（嚴格空頭趨勢）
+    2. 找最後兩個擺動高點，價差 < price_tol
+    3. 第二頂成交量 < 第一頂（動能衰減）
+    4. 第二頂實體 < 第一頂實體 × 0.8
+    5. 當根收盤跌破頸線 + 放量 > 近20根均量 × neck_expand
+    """
+    if len(df) < _DOUBLE_SEARCH_WIN + 10:
+        return False
+    params   = _DOUBLE_PARAMS.get(tf_id, _DOUBLE_PARAMS["1H"])
+    pvt_len  = params["pivot_len"]
+    neck_x   = params["neck_expand"]
+    price_tol = params["price_tol"]
+
+    hi   = df["high"].values
+    lo   = df["low"].values
+    cl   = df["close"].values
+    op   = df["open"].values
+    vol  = df["vol"].values if "vol" in df.columns else np.ones(len(df))
+    ema144 = df["close"].ewm(span=144, adjust=False).mean().values
+    ema576 = df["close"].ewm(span=576, adjust=False).mean().values
+
+    i = len(df) - 2
+
+    # 嚴格空頭：連續20根
+    bear_win = min(20, i + 1)
+    if not all(ema144[i - k] < ema576[i - k] for k in range(bear_win)):
+        return False
+
+    pivots = _find_pattern_pivots_high(hi, i, pvt_len, _DOUBLE_SEARCH_WIN)
+    if len(pivots) < 2:
+        return False
+
+    p1, p2 = pivots[-2], pivots[-1]
+    if p2 - p1 < pvt_len * 2:
+        return False
+
+    v1, v2 = hi[p1], hi[p2]
+    if abs(v2 - v1) / max(v1, 1e-9) > price_tol:
+        return False
+    if vol[p2] >= vol[p1]:
+        return False
+    body1 = abs(cl[p1] - op[p1])
+    body2 = abs(cl[p2] - op[p2])
+    if body1 > 0 and body2 >= body1 * 0.8:
+        return False
+
+    neckline  = lo[p1:p2 + 1].min()
+    if cl[i] >= neckline:
+        return False
+
+    vol_avg20 = vol[max(0, i - 20):i].mean()
+    if vol_avg20 <= 0 or vol[i] < vol_avg20 * neck_x:
+        return False
+
+    return True
+
+
 def _find_pivot_low(df: pd.DataFrame, pivot_len: int = PIVOT_LEN,
                     atr_buffer: float = 0.0) -> Optional[float]:
     """
@@ -1693,10 +1857,35 @@ class SykesTradingBot:
             print(f"[DBG DOGE/15m] ════════════════════════\n", flush=True)
         # ────────────────────────────────────────────────────────
 
-        if not is_long and not is_short:
+        # ── 雙底/雙頂第二套訊號（OR 邏輯，獨立觸發）───────────────────────
+        is_double_bottom = check_double_bottom(df, tf_id)
+        is_double_top    = check_double_top(df, tf_id)
+
+        # 合併：C3 或 雙底/雙頂任一成立即可觸發
+        combined_long  = is_long  or is_double_bottom
+        combined_short = is_short or is_double_top
+
+        if not combined_long and not combined_short:
             return
 
-        direction = "long" if is_long else "short"
+        # 方向優先：C3 長多 > 雙底 > C3 空 > 雙頂
+        if combined_long and combined_short:
+            direction = "long"
+        elif combined_long:
+            direction = "long"
+        else:
+            direction = "short"
+
+        # 記錄訊號來源（供 Discord 顯示）
+        if direction == "long":
+            _signal_source = []
+            if is_long:          _signal_source.append("C3")
+            if is_double_bottom: _signal_source.append("雙底")
+        else:
+            _signal_source = []
+            if is_short:         _signal_source.append("C3")
+            if is_double_top:    _signal_source.append("雙頂")
+        signal_source_tag = "+".join(_signal_source)
 
     # 8. 秋總三層背離吸收 CVD 過濾
         # 永遠獨立抓真實 CVD 結果（供 30m_long override 使用）
@@ -1708,13 +1897,13 @@ class SykesTradingBot:
         else:
             cvd_pass, cvd_reason = True, "CVD 已停用"
 
-        if _dbg and (is_long or is_short):
+        if _dbg and (combined_long or combined_short):
             print(f"[DBG DOGE/15m] CVD: pass={cvd_pass}  reason={cvd_reason}", flush=True)
 
     # 9. SL/TP 計算（SL 改用 Pivot 結構點，備援為近5根極值）
-        p = p_l if is_long else p_s
+        p = p_l if direction == "long" else p_s
 
-        if is_long:
+        if direction == "long":
             calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             # 多單止損必須在當前價下方，否則用 MIN_SL 保護
             if calculated_sl >= current_close:
@@ -1751,7 +1940,8 @@ class SykesTradingBot:
             "side": direction, "entry": current_close, "sl": round(calculated_sl, 5),
             "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
             "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
-            "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat()
+            "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat(),
+            "source_tag": signal_source_tag,
         }
 
         self.set_cooldown(symbol_item, tf_id)
