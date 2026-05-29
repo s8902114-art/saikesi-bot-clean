@@ -804,14 +804,14 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 維持保證金率越低代表越危險，< 350% 代表可用保證金太少，不宜再開倉
         try:
             margin_info = ex.fetch_balance()
-            mmr = float((margin_info.get("info", {}) or {}).get("mgnRatio", 0) or 0)
-            if mmr == 0:
-                # 備援：用 (total - used) / total 估算
-                total_eq = float(margin_info.get("USDT", {}).get("total", 0) or 0)
-                used_eq  = float(margin_info.get("USDT", {}).get("used",  0) or 0)
+            mmr_raw = float((margin_info.get("info", {}) or {}).get("mgnRatio", 0) or 0)
+            if mmr_raw > 0:
+                # OKX 回傳小數（如 10.5 = 1050%），若 < 50 視為小數需 ×100
+                mmr = mmr_raw * 100 if mmr_raw < 50 else mmr_raw
+            else:
                 mmr = (total_eq / used_eq * 100) if used_eq > 0 else 9999
-            if mmr < 350:
-                dc_log(f"⚠️ 帳戶維持保證金率 {mmr:.1f}% < 350%，暫停開新倉")
+            if mmr < 300:
+                dc_log(f"⚠️ OKX 維持保證金率 {mmr:.1f}% < {OKX_MIN_MMR}%，暫停開新倉")
                 return
         except Exception as risk_check_err:
             print(f"[RiskCheck] 維持保證金率檢查失敗: {risk_check_err}")
@@ -862,7 +862,16 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             amount=final_order_amount,
             params={"posSide": trade_side, "tdMode": MARGIN_MODE}
         )
-        executed_average_price = entry_order.get("average", current_market_price)
+        # 等待成交均價（市價單可能需要短暫延遲才有 average）
+        executed_average_price = entry_order.get("average") or entry_order.get("price")
+        if not executed_average_price or float(executed_average_price or 0) == 0:
+            time.sleep(0.5)
+            try:
+                filled = ex.fetch_order(entry_order["id"], symbol_id)
+                executed_average_price = filled.get("average") or filled.get("price") or current_market_price
+            except:
+                executed_average_price = current_market_price
+        executed_average_price = float(executed_average_price)
         execution_report.append(f"交易所實際成交均價: `{executed_average_price}`")
 
         sl_algo_id   = None
@@ -888,20 +897,11 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 # API 回應但無 algoId → 掛單實際失敗
                 raise RuntimeError(f"API 回應無 algoId: {sl_result}")
         except Exception as sle:
-            err_msg = (f"🚨 **緊急警告：止損單掛載失敗！正在自動平倉！**\n"
+            err_msg = (f"🚨 **止損單掛載失敗，請立即手動設定止損！**\n"
                        f"商品: `{symbol_id}` 方向: `{trade_side}`\n"
-                       f"錯誤: `{sle}`\nside={sl_side} posSide={sl_pos} px={stop_loss}")
+                       f"倉位已開，止損價: `{stop_loss}`\n"
+                       f"錯誤: `{sle}`")
             dc_log(err_msg)
-            # 止損失敗 → 立即市價平倉保護資金
-            try:
-                ex.create_market_order(
-                    symbol=symbol_id, side=exit_action,
-                    amount=final_order_amount,
-                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                )
-                dc_log(f"🛡️ 止損掛失敗，已自動市價平倉 {final_order_amount} 張")
-            except Exception as flat_err:
-                dc_log(f"🆘 **自動平倉也失敗！請立即手動處理！** {flat_err}")
             return
 
         # TP1：固定限價（50%）
@@ -1047,11 +1047,11 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         current_px = float((price_check.get("data") or {}).get("price") or entry_price)
 
         if trade_side == "long" and stop_loss >= current_px:
-            dc_log(f"⚠️ BingX 止損價 {stop_loss} ≥ 當前價 {current_px}，參數無效，取消下單")
-            return
+            dc_log(f"⚠️ BingX 止損 {stop_loss} ≥ 當前價 {current_px}，自動調整至當前價下方 0.5%")
+            stop_loss = round(current_px * 0.995, 5)
         if trade_side == "short" and stop_loss <= current_px:
-            dc_log(f"⚠️ BingX 止損價 {stop_loss} ≤ 當前價 {current_px}，參數無效，取消下單")
-            return
+            dc_log(f"⚠️ BingX 止損 {stop_loss} ≤ 當前價 {current_px}，自動調整至當前價上方 0.5%")
+            stop_loss = round(current_px * 1.005, 5)
         if qty < 0.001:
             dc_log(f"⚠️ BingX 下單量 {qty} 過小，取消下單")
             return
@@ -1082,16 +1082,10 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         }, headers)
         sl_data = r.json()
         if sl_data.get("code", 0) != 0:
-            # 參數驗證過了還是失敗（罕見）→ 平掉剛開的倉
-            dc_log(f"⚠️ BingX 止損掛載失敗，平倉保護\n錯誤: {sl_data}")
-            try:
-                _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-                    "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                    "type": "MARKET", "quantity": str(qty)
-                }, headers)
-                dc_log(f"🛡️ BingX 止損掛失敗，已取消倉位（市價平倉）")
-            except Exception as flat_err:
-                dc_log(f"🆘 **BingX 取消倉位也失敗！請立即手動處理！** {flat_err}")
+            dc_log(f"🚨 **BingX 止損掛載失敗，請立即手動設定止損！**\n"
+                   f"商品: {bingx_symbol} 方向: {trade_side}\n"
+                   f"倉位已開，止損價: {stop_loss}\n"
+                   f"錯誤: {sl_data}")
             return
         bingx_sl_order_id = sl_data.get("data", {}).get("order", {}).get("orderId", "")
 
@@ -1465,6 +1459,7 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
 class SykesTradingBot:
     def __init__(self):
         self.cooldown_dict: Dict[str, float] = {}
+        self.last_bar_ts:   Dict[str, int]   = {}   # K棒去重：同一根K棒不重複觸發
         self.consec_losses = 0
         self.circuit_break_until: Optional[float] = None
         self.paper_positions: Dict[str, PaperPosition] = {}
@@ -1590,6 +1585,15 @@ class SykesTradingBot:
             if _dbg: print(f"[DBG DOGE/15m] ❌ K棒數據不足 ({len(df)} bars)", flush=True)
             return
 
+        # ── K棒去重：同一根K棒不重複觸發訊號 ──────────────────────────────
+        try:
+            bar_ts  = int(df.index[-2].timestamp()) if hasattr(df.index[-2], 'timestamp') else 0
+        except:
+            bar_ts = 0
+        bar_key = f"{symbol_item}_{tf_id}"
+        if bar_ts != 0 and self.last_bar_ts.get(bar_key) == bar_ts:
+            return
+
         current_close = df["close"].iloc[-1]
         self.update_paper_trailing_and_exits(symbol_item, current_close)
 
@@ -1711,9 +1715,11 @@ class SykesTradingBot:
         p = p_l if is_long else p_s
 
         if is_long:
-            # Swing Low + 1 tick + ATR buffer（備援：近N根最低點 + 同樣緩衝）
             calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            risk_pct      = abs(current_close - calculated_sl) / current_close
+            # 多單止損必須在當前價下方，否則用 MIN_SL 保護
+            if calculated_sl >= current_close:
+                calculated_sl = current_close * (1.0 - 0.005)
+            risk_pct = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
@@ -1723,9 +1729,11 @@ class SykesTradingBot:
             tp1_target = current_close + risk_dist * p["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
-            # Swing High + 1 tick + ATR buffer（備援：近N根最高點 + 同樣緩衝）
             calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            risk_pct      = abs(calculated_sl - current_close) / current_close
+            # 空單止損必須在當前價上方，否則用 MIN_SL 保護
+            if calculated_sl <= current_close:
+                calculated_sl = current_close * (1.0 + 0.005)
+            risk_pct = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
@@ -1747,6 +1755,8 @@ class SykesTradingBot:
         }
 
         self.set_cooldown(symbol_item, tf_id)
+        if bar_ts != 0:
+            self.last_bar_ts[bar_key] = bar_ts
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
         # CVD 複合信號：30m_long 且 CVD 三層確認 → 特調高回報參數
@@ -2177,26 +2187,31 @@ def main_polling_loop():
             print(f"[INIT] 無法抓取初始餘額: {e}")
 
     while True:
-        active_tfs_to_run = synchronise_and_wait_next_candle()
+        try:
+            active_tfs_to_run = synchronise_and_wait_next_candle()
 
-        if _PAUSED:
-            continue
+            if _PAUSED:
+                continue
 
-        check_trailing_stops_for_real()
+            check_trailing_stops_for_real()
 
-        # 每週自動更新幣種列表（7天 = 604800秒）
-        if time.time() - _symbols_last_updated > 604800:
-            print("[SYMBOLS] 距上次更新超過7天，自動重新抓取...", flush=True)
-            build_dynamic_symbols()
+            # 每週自動更新幣種列表（7天 = 604800秒）
+            if time.time() - _symbols_last_updated > 604800:
+                print("[SYMBOLS] 距上次更新超過7天，自動重新抓取...", flush=True)
+                build_dynamic_symbols()
 
-        for tf in active_tfs_to_run:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
-        for symbol_item in list(SYMBOLS.values()):   # list() 快照，防止週更新期間競態
-            try:
-                _bot_ref.scan_and_process_market(symbol_item, tf)
-                sleep(0.25)  # 內部防爆頻率限流阻尼
-            except Exception as loop_exception:
-                print(f"  ❌ 商品 {symbol_item} 於時框 [{tf}] 處理時發生系統例外: {loop_exception}")
+            for tf in active_tfs_to_run:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
+            for symbol_item in list(SYMBOLS.values()):
+                try:
+                    _bot_ref.scan_and_process_market(symbol_item, tf)
+                    sleep(0.25)
+                except Exception as loop_exception:
+                    print(f"  ❌ 商品 {symbol_item} 於時框 [{tf}] 處理時發生系統例外: {loop_exception}")
+
+        except Exception as outer_err:
+            print(f"[MAIN LOOP] 主循環例外，繼續運行: {outer_err}")
+            sleep(5)
 
 def run_embedded_web_server():
     import logging
