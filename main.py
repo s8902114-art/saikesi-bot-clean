@@ -2042,7 +2042,13 @@ class SykesTradingBot:
             is_double_bottom = False
         is_double_top = False   # M頭做空回測全賠，停用（保留 check_double_top 供日後回測）
 
-        # 合併：C3 或 雙底/雙頂任一成立即可觸發
+        # ── C3 1H/多 停用：回測 EV −0.024 負期望（backtest_c3_bias.py）──────────
+        # 1H 的多單改由雙底(W底, +0.265) 觸發；C3 做多僅保留 15m（+0.133）。
+        # 1H 的 C3 做空（+0.073）與 15m C3 多空不受影響。
+        if tf_id == "1H":
+            is_long = False
+
+        # 合併：C3 或 雙底任一成立即可觸發
         combined_long  = is_long  or is_double_bottom
         combined_short = is_short or is_double_top
 
