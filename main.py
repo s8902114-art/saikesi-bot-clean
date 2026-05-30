@@ -99,6 +99,7 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 RISK_PCT     = 0.10        # 單筆最大風險金額 = 啟動時總資金 × 10%
+RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
 POSITION_SLOTS = 10        # 倉位格數（保留供 !setslots 指令使用）
 SIGNAL_COOLDOWN = 1800     # 同一商品相同時框的訊號冷卻時間 (秒)
 DIR_SIGNAL_COOLDOWN = 3600 # 同幣同方向跨時框去重：1 小時內只下一次（避免 15m/30m/1H 整點同時觸發）
@@ -909,18 +910,15 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 contract_notional = current_market_price * ct_val     # 1 張名義價值(USDT)
                 # 張數 = 倉位USDT ÷ 1張名義，無條件捨去取整數張
                 total_contracts = int(position_value / contract_notional)
-                # ★ 風控核心：絕不放大。若連 1 張都超過風險預算，直接拒單
-                #   （否則「最少 1 張」會讓大面值幣種的停損遠超 risk_usdt，例如 SKY 虧 5U）
+                # 不足 1 張時進位成 1 張（最小可下單量）
                 if total_contracts < 1:
-                    worst_loss_1ct = contract_notional * sl_distance_pct
-                    dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：1 張名義 {contract_notional:.2f}U，"
-                           f"觸損將虧 {worst_loss_1ct:.2f}U > 風險預算 {risk_usdt:.2f}U（本金太小無法承接此幣）")
-                    return
-                # 二次保險：實際張數的停損虧損不得超過風險預算 ×1.1
+                    total_contracts = 1
+                # ★ 風控核心：停損虧損上限 = 風險預算 × RISK_TOLERANCE_MULT（容忍 2 倍）
+                #   超過才拒單；2 倍內可接受（例如 1U 預算允許停損到 2U）
                 worst_loss = total_contracts * contract_notional * sl_distance_pct
-                if worst_loss > risk_usdt * 1.1:
+                if worst_loss > risk_usdt * RISK_TOLERANCE_MULT:
                     dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：預估停損虧損 {worst_loss:.2f}U "
-                           f"> 風險預算 {risk_usdt:.2f}U，拒絕超額下單")
+                           f"> 風險預算 {risk_usdt:.2f}U × {RISK_TOLERANCE_MULT}（上限 {risk_usdt*RISK_TOLERANCE_MULT:.2f}U），拒絕超額下單")
                     return
                 dc_log(f"ℹ️ [{symbol_id}] 不支援 tgtCcy=quote_ccy（59110），"
                        f"自動降級用張數下單：{total_contracts} 張（ctVal={ct_val}，預估觸損 {worst_loss:.2f}U）")
