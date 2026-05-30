@@ -906,12 +906,24 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 fallback_to_contracts = True
                 mkt    = ex.market(symbol_id)
                 ct_val = float(mkt.get("contractSize", 1.0) or 1.0)   # 合約面值
-                # 張數 = 倉位USDT ÷ (價格 × ctVal)，無條件捨去取整數張
-                total_contracts = int(position_value / (current_market_price * ct_val))
+                contract_notional = current_market_price * ct_val     # 1 張名義價值(USDT)
+                # 張數 = 倉位USDT ÷ 1張名義，無條件捨去取整數張
+                total_contracts = int(position_value / contract_notional)
+                # ★ 風控核心：絕不放大。若連 1 張都超過風險預算，直接拒單
+                #   （否則「最少 1 張」會讓大面值幣種的停損遠超 risk_usdt，例如 SKY 虧 5U）
                 if total_contracts < 1:
-                    total_contracts = 1
+                    worst_loss_1ct = contract_notional * sl_distance_pct
+                    dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：1 張名義 {contract_notional:.2f}U，"
+                           f"觸損將虧 {worst_loss_1ct:.2f}U > 風險預算 {risk_usdt:.2f}U（本金太小無法承接此幣）")
+                    return
+                # 二次保險：實際張數的停損虧損不得超過風險預算 ×1.1
+                worst_loss = total_contracts * contract_notional * sl_distance_pct
+                if worst_loss > risk_usdt * 1.1:
+                    dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：預估停損虧損 {worst_loss:.2f}U "
+                           f"> 風險預算 {risk_usdt:.2f}U，拒絕超額下單")
+                    return
                 dc_log(f"ℹ️ [{symbol_id}] 不支援 tgtCcy=quote_ccy（59110），"
-                       f"自動降級用張數下單：{total_contracts} 張（ctVal={ct_val}）")
+                       f"自動降級用張數下單：{total_contracts} 張（ctVal={ct_val}，預估觸損 {worst_loss:.2f}U）")
                 entry_order = ex.create_market_order(
                     symbol=symbol_id,
                     side=entry_action,
