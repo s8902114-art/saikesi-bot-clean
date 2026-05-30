@@ -1192,6 +1192,14 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             qty = round(position_value / entry_price, 4)
             dc_log(f"⚠️ BingX 倉位縮減至可用上限：{position_value:.2f} USDT，qty={qty}")
 
+        # ★ 風控防呆：qty 經四捨五入/縮減後，預估停損不得超過風險預算 × 容忍倍數
+        #   （與 OKX 一致；BingX 精度高通常 ≈ risk_usdt，此為防呆上限，只拒單不放大）
+        worst_loss = qty * entry_price * sl_dist_pct
+        if worst_loss > risk_usdt * RISK_TOLERANCE_MULT:
+            dc_log(f"⚠️ BingX 跳過 [{symbol_id}]：預估停損虧損 {worst_loss:.2f}U "
+                   f"> 風險預算 {risk_usdt:.2f}U × {RISK_TOLERANCE_MULT}（上限 {risk_usdt*RISK_TOLERANCE_MULT:.2f}U），拒絕超額下單")
+            return
+
         # 市價開倉
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": side_str, "positionSide": pos_side,
