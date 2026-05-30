@@ -839,9 +839,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 # 預估加入新倉後維持保證金率：新倉佔用保證金降低權益緩衝
                 if mmr_now > 0 and total_eq > 0:
                     projected_mmr = mmr_now * max(total_eq - allocated_margin, 0) / total_eq
-                    if projected_mmr < 150:
+                    if projected_mmr < 350:
                         dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：維持保證金率不足"
-                               f"（預估 {projected_mmr:.1f}% < 150%）")
+                               f"（預估 {projected_mmr:.1f}% < 350%）")
                         return
             except Exception as risk_check_err:
                 print(f"[RiskCheck] OKX 維持保證金率檢查失敗: {risk_check_err}")
