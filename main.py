@@ -759,8 +759,11 @@ def _cancel_okx_algo_order(inst_id: str, algo_id: str) -> bool:
 
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
-                              tf_id: str = "15m") -> None:
-    """ 實盤訂單路由模組：整合動態槓桿、精密合約張數轉換、市價與限價單組合 """
+                              tf_id: str = "15m", position_scale: float = 1.0) -> None:
+    """
+    實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
+    position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
+    """
     global _LIVE_MODE, MAX_LEVERAGE, POSITION_SLOTS, _INITIAL_BALANCE
     if not _LIVE_MODE:
         dc_log(f"📝 [紙交易通知] 商品 {symbol_id} 方向 {trade_side} 處於 Paper 模擬模式，跳過交易。")
@@ -802,6 +805,12 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             allocated_margin = max_margin
             position_value   = allocated_margin * calculated_leverage
 
+        # ── 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）──────────
+        # 弱訊號（score 30~59）：倉位縮小 50%
+        if position_scale < 1.0:
+            position_value   = round(position_value   * position_scale, 2)
+            allocated_margin = round(allocated_margin * position_scale, 2)
+
         # ── 維持保證金率保護：帳戶整體維持保證金率 < 350% 時不開新倉 ──────────
         # 維持保證金率越低代表越危險，< 350% 代表可用保證金太少，不宜再開倉
         try:
@@ -830,39 +839,39 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
             return
 
-        market_structure = ex.market(symbol_id)
-        amount_precision = int(market_structure.get("precision", {}).get("amount", 0))
-        contract_size    = float(market_structure.get("contractSize", 1.0) or 1.0)
-
-        # tick 已在 _find_pivot_high/low 函數內加過，此處不重複處理
-
-        raw_order_amount = position_value / (current_market_price * contract_size)
-
-        # 張數強制整數（OKX 要求 lot size 必須為整數倍）
-        final_order_amount = max(1, int(raw_order_amount))
-        split_half_amount  = max(1, int(final_order_amount // 2))
-
         try:
             ex.set_leverage(calculated_leverage, symbol_id, params={"posSide": trade_side})
         except:
             pass
 
-        is_buy = (trade_side == "long")
-        entry_action = "buy" if is_buy else "sell"
-        exit_action = "sell" if is_buy else "buy"
-        inst_id = OKX_SWAP.get(symbol_id, symbol_id)
+        is_buy       = (trade_side == "long")
+        entry_action = "buy"  if is_buy else "sell"
+        exit_action  = "sell" if is_buy else "buy"
+        inst_id      = OKX_SWAP.get(symbol_id, symbol_id)
+
+        # ── USDT 單位下單（tgtCcy=quote_ccy）─────────────────────────────────
+        # OKX 支援以報價幣（USDT）指定倉位大小，完全迴避張數轉換問題
+        # position_value = 實際倉位名義價值（USDT）
+        # TP1 / TP2 各拆 50%，同樣用 USDT 金額指定（reduceOnly=True）
+        half_usdt = round(position_value * 0.5, 2)
 
         execution_report = [
             f"🚀 **賽克斯實盤下單鏈成功發動**",
             f"商品代號: `{symbol_id}` | 交易方向: `{'做多 LONG' if is_buy else '做空 SHORT'}`",
-            f"配置槓桿: `{calculated_leverage}x` | 下單張數: `{final_order_amount}` | 保證金: `{allocated_margin:.2f}` USDT | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
+            f"配置槓桿: `{calculated_leverage}x` | 倉位價值: `{position_value:.2f}` USDT"
+            f" | 保證金: `{allocated_margin:.2f}` USDT | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
         ]
 
+        # 市價開倉（USDT 單位）
         entry_order = ex.create_market_order(
             symbol=symbol_id,
             side=entry_action,
-            amount=final_order_amount,
-            params={"posSide": trade_side, "tdMode": MARGIN_MODE}
+            amount=position_value,          # USDT 名義值
+            params={
+                "posSide":  trade_side,
+                "tdMode":   MARGIN_MODE,
+                "tgtCcy":   "quote_ccy",    # 告訴 OKX 用報價幣（USDT）計量
+            }
         )
         # 等待成交均價（市價單可能需要短暫延遲才有 average）
         executed_average_price = entry_order.get("average") or entry_order.get("price")
@@ -879,16 +888,14 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         sl_algo_id   = None
         tp1_order_id = None
 
-        # 止損：OKX algo slTriggerPx 條件單
-        # 做多：side=sell / posSide=long
-        # 做空：side=buy  / posSide=short
-        sl_side    = "sell" if trade_side == "long" else "buy"
-        sl_pos     = trade_side   # "long" or "short"
+        # 止損：OKX algo slTriggerPx 條件單（closeFraction=1 平全倉，無需指定張數）
+        sl_side = "sell" if trade_side == "long" else "buy"
+        sl_pos  = trade_side
         try:
             sl_result  = _place_okx_algo_sl(
                 inst_id=inst_id,
                 side=sl_side,
-                amount=str(final_order_amount),
+                amount="0",                  # closeFraction=1 時 sz 傳 0
                 sl_trigger_px=str(stop_loss),
                 pos_side=sl_pos
             )
@@ -896,53 +903,48 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             if sl_algo_id:
                 execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
             else:
-                # API 回應但無 algoId → 掛單實際失敗
                 raise RuntimeError(f"API 回應無 algoId: {sl_result}")
         except Exception as sle:
-            err_msg = (f"🚨 **止損單掛載失敗，請立即手動設定止損！**\n"
-                       f"商品: `{symbol_id}` 方向: `{trade_side}`\n"
-                       f"倉位已開，止損價: `{stop_loss}`\n"
-                       f"錯誤: `{sle}`")
-            dc_log(err_msg)
+            dc_log(
+                f"🚨 **止損單掛載失敗，請立即手動設定止損！**\n"
+                f"商品: `{symbol_id}` 方向: `{trade_side}`\n"
+                f"倉位已開，止損價: `{stop_loss}`\n"
+                f"錯誤: `{sle}`"
+            )
             return
 
-        # TP1：固定限價（50%）
+        # TP1：USDT 金額限價單（50%）
         try:
             tp1_order = ex.create_order(
                 symbol=symbol_id, type="limit", side=exit_action,
-                amount=split_half_amount, price=tp1,
-                params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                amount=half_usdt, price=tp1,
+                params={
+                    "posSide":    trade_side,
+                    "tdMode":     MARGIN_MODE,
+                    "reduceOnly": True,
+                    "tgtCcy":     "quote_ccy",
+                }
             )
             tp1_order_id = tp1_order.get("id")
-            execution_report.append(f"🌓 TP1 固定限價單掛置 (50%): `{tp1}` (ordId: {tp1_order_id})")
+            execution_report.append(f"🌓 TP1 限價單 (50% = {half_usdt:.2f} USDT): `{tp1}` (ordId: {tp1_order_id})")
         except Exception as tp1e:
             execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
 
-        remainder_amount = final_order_amount - split_half_amount
-        if amount_precision == 0:
-            remainder_amount = int(remainder_amount)
-        else:
-            remainder_amount = round(remainder_amount, amount_precision)
-
-        # TP2 最小下單量檢查
-        _min_amt = float(((market_structure.get("limits") or {}).get("amount") or {}).get("min") or 0)
-        if _min_amt == 0:
-            _min_amt = 1.0 / float(contract_size) if float(contract_size) > 0 else 1.0
-        if remainder_amount <= 0 or remainder_amount < _min_amt:
-            dc_log(f"⚠️ TP2 跳過：剩餘張數 {remainder_amount} 小於最小下單量 {_min_amt}")
-        else:
-            # TP2：固定限價單（移除移動停損，統一用 fixed 避免與保本機制衝突）
-            try:
-                ex.create_order(
-                    symbol=symbol_id, type="limit", side=exit_action,
-                    amount=remainder_amount, price=tp2,
-                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                )
-                execution_report.append(f"🌕 TP2 固定限價單掛置 (50%): `{tp2}`")
-            except Exception as tp2e:
-                execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
-
-        # 固定止損 + 1R 保本機制（由 check_trailing_stops_for_real 處理）
+        # TP2：USDT 金額限價單（50%）—— 不再依賴張數，根本解決 TP2=0 問題
+        try:
+            ex.create_order(
+                symbol=symbol_id, type="limit", side=exit_action,
+                amount=half_usdt, price=tp2,
+                params={
+                    "posSide":    trade_side,
+                    "tdMode":     MARGIN_MODE,
+                    "reduceOnly": True,
+                    "tgtCcy":     "quote_ccy",
+                }
+            )
+            execution_report.append(f"🌕 TP2 限價單 (50% = {half_usdt:.2f} USDT): `{tp2}`")
+        except Exception as tp2e:
+            execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
 
         dc_log("\n".join(execution_report))
     except Exception as general_error:
@@ -968,8 +970,12 @@ def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout:
 
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                                   stop_loss: float, tp1: float, tp2: float,
-                                  exit_mode: str = "fixed", tf_id: str = "15m") -> None:
-    """BingX 永續合約下單"""
+                                  exit_mode: str = "fixed", tf_id: str = "15m",
+                                  position_scale: float = 1.0) -> None:
+    """
+    BingX 永續合約下單
+    position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
+    """
     if not BINGX_API_KEY or not BINGX_SECRET_KEY:
         dc_log("⚠️ BingX API Key 未設定，跳過 BingX 下單")
         return
@@ -994,7 +1000,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 餘額讀取異常（返回值: {bal_resp}），跳過下單")
             return
 
-        risk_usdt = total_usdt * RISK_PCT
+        # 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）
+        risk_usdt = total_usdt * RISK_PCT * position_scale
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
         if sl_dist_pct <= 0.0001:
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
@@ -1076,11 +1083,23 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             return
         order_id = order_data.get("data", {}).get("order", {}).get("orderId", "")
 
+        # ── BingX 止損單：使用開倉實際成交數量，避免 size 超過帳戶餘額限制 ──
+        # 優先從回傳結果取 executedQty（已成交量）或 origQty（委託量），備援用計算 qty
+        order_detail = order_data.get("data", {}).get("order", {})
+        actual_qty   = float(
+            order_detail.get("executedQty")
+            or order_detail.get("origQty")
+            or order_detail.get("quantity")
+            or qty
+        )
+        if actual_qty <= 0:
+            actual_qty = qty   # 備援：用原始計算值
+
         # 止損單（開倉後立刻掛，失敗就平倉）
         r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "STOP_MARKET", "stopPrice": str(round(stop_loss, 5)),
-            "quantity": str(qty), "workingType": "MARK_PRICE"
+            "quantity": str(round(actual_qty, 4)), "workingType": "MARK_PRICE"
         }, headers)
         sl_data = r.json()
         if sl_data.get("code", 0) != 0:
@@ -1091,8 +1110,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             return
         bingx_sl_order_id = sl_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # TP1 限價單（50%）
-        half_qty = round(qty / 2, 4)
+        # TP1/TP2 均使用實際成交數量的各半（避免超過帳戶可用量）
+        half_qty = round(actual_qty / 2, 4)
         tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
             "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
             "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
@@ -1109,7 +1128,6 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             }, headers)
 
         # ★ 存入 active_real_trades 供保本機制追蹤
-        # 手續費：BingX taker 約 0.05%，雙邊 0.1%
         fee_buffer_bingx = float(entry_price) * 0.001
         be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
                            else float(entry_price) - fee_buffer_bingx
@@ -1124,15 +1142,15 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             "tp1_order_id":     bingx_tp1_order_id,
             "tp1_hit":          False,
             "current_sl":       stop_loss,
-            "be_price":         be_price_bingx,   # 保本價（含手續費）
-            "remaining_qty":    str(half_qty),
+            "be_price":         be_price_bingx,
+            "remaining_qty":    str(half_qty),      # 實際成交量的一半
             "pos_side":         pos_side,
             "exit_side":        exit_side,
             "headers":          headers,
             "risk_dist":        abs(float(entry_price) - stop_loss),
-            "tf_id":            tf_id if 'tf_id' in dir() else "15m",
+            "tf_id":            tf_id,
         }
-        dc_log(f"📋 BingX 倉位已加入保本追蹤：{bingx_symbol} {trade_side} SL={stop_loss}")
+        dc_log(f"📋 BingX 倉位已加入保本追蹤：{bingx_symbol} {trade_side} SL={stop_loss} qty={actual_qty:.4f}")
 
     except Exception as e:
         dc_log(f"❌ **BingX 下單失敗**: {e}")
@@ -1620,6 +1638,227 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
     else:
         return True, "現貨CVD↓+合約CVD↓+OI↑（三層吸收確認）"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# 模組一：訊號評分引擎 filter_signals()
+# 輸入：各指標布林值與數值
+# 輸出：signal_score (0~100 整數)
+# 評分邏輯：CVD確認25分 + ADX強度25分 + K棒結構25分 + OI/資費方向25分
+# ══════════════════════════════════════════════════════════════════════════════
+
+def filter_signals(
+    direction: str,
+    is_c3: bool,
+    is_pattern: bool,          # 雙底/雙頂等第二套訊號
+    cvd_pass: bool,
+    current_adx: float,
+    c1_ok: bool,
+    c2_ok: bool,
+    c3_ok: bool,
+    funding_rate: Optional[float],
+) -> int:
+    """
+    訊號評分引擎：將各過濾條件量化為 0~100 整數評分。
+    四維評分：
+      A. CVD 動能確認    (0~25)
+      B. ADX 趨勢強度    (0~25)
+      C. K棒結構完整度   (0~25)
+      D. 資費/OI 方向    (0~25)
+
+    回傳值供 dynamic_sl_tp() 與 CircuitBreaker.check() 使用。
+    """
+    score = 0
+
+    # ── A. CVD 動能確認（25分）────────────────────────────────────────
+    # CVD 三層確認通過：+25；僅有結構訊號無 CVD 資料：+10（給予部分分數）
+    if cvd_pass:
+        score += 25
+    elif is_c3 or is_pattern:
+        score += 10  # 無 CVD 但有結構形態，給基礎分
+
+    # ── B. ADX 趨勢強度（25分）────────────────────────────────────────
+    # ADX < 25：0分；25~39：12分；40~54：20分；≥55：25分
+    if current_adx >= 55:
+        score += 25
+    elif current_adx >= 40:
+        score += 20
+    elif current_adx >= 25:
+        score += 12
+    # else: 0分（趨勢太弱）
+
+    # ── C. K棒結構完整度（25分）──────────────────────────────────────
+    # C3 三條件全中：25分；兩條件：15分；一條件：8分；僅雙底/雙頂：12分
+    if is_c3:
+        c3_count = sum([c1_ok, c2_ok, c3_ok])
+        if c3_count == 3:
+            score += 25
+        elif c3_count == 2:
+            score += 15
+        else:
+            score += 8
+    elif is_pattern:
+        # 雙底/雙頂形態完整（頸線+量能衰減+放量突破）：給12分
+        score += 12
+
+    # ── D. 資費/OI 方向一致性（25分）─────────────────────────────────
+    # 做多：資費 ≤ 0 → 空方負擔成本，對多頭有利 → +25；資費輕微正（0~0.0001）：+15
+    # 做空：資費 ≥ 0 → 多方負擔成本，對空頭有利 → +25；資費輕微負（-0.0001~0）：+15
+    fr = funding_rate or 0.0
+    if direction == "long":
+        if fr <= 0:
+            score += 25
+        elif fr <= FUNDING_LONG_MAX:
+            score += 15
+        # else: 0分（資費過高，不利多頭）
+    else:
+        if fr >= 0:
+            score += 25
+        elif fr >= FUNDING_SHORT_MIN:
+            score += 15
+
+    return min(100, max(0, score))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 模組二：動態 SL/TP 調整器 dynamic_sl_tp()
+# 輸入：signal_score、base_params（BEST_PARAMS 原始值）
+# 輸出：Dict 含 tp1_mult、tp2_mult、be_trigger、position_scale
+# 四個等級處理邏輯：
+#   ≥90（強趨勢）：止損寬 1.2x、保本觸發 1.5R、TP2 倍率 +20%
+#   60~89（普通）：維持原參數不調整
+#   30~59（弱訊號）：倉位縮 50%，SL/TP 不動
+#   <30（極弱）：position_scale=0（外層判斷直接跳過下單）
+# ══════════════════════════════════════════════════════════════════════════════
+
+def dynamic_sl_tp(
+    signal_score: int,
+    base_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    根據 signal_score 動態調整出場參數與倉位比例。
+    回傳 dict 包含：
+      - tp1_mult       : TP1 風報比倍率
+      - tp2_mult       : TP2 風報比倍率（由 is_swing 決定 intraday/swing 已在外層處理）
+      - be_trigger     : 保本觸發 R 倍數
+      - sl_scale       : 止損距離乘數（>1.0 代表放寬）
+      - position_scale : 倉位比例（1.0=正常，0.5=半倉，0.0=不下單）
+    """
+    tp1  = float(base_params.get("tp1_mult", 1.2))
+    tp2i = float(base_params.get("tp2_intraday_mult", 2.5))
+    tp2s = float(base_params.get("tp2_swing_mult", 2.5))
+    be   = float(base_params.get("be_trigger", 1.0))
+
+    if signal_score >= 90:
+        # 強趨勢：放寬止損給呼吸空間，TP2 上調 20%，保本延後到 1.5R
+        return {
+            "tp1_mult":            tp1,
+            "tp2_intraday_mult":   round(tp2i * 1.2, 3),
+            "tp2_swing_mult":      round(tp2s * 1.2, 3),
+            "be_trigger":          max(be, 1.5),
+            "sl_scale":            1.2,
+            "position_scale":      1.0,
+        }
+    elif signal_score >= 60:
+        # 普通訊號：完全沿用 BEST_PARAMS，不做調整
+        return {
+            "tp1_mult":            tp1,
+            "tp2_intraday_mult":   tp2i,
+            "tp2_swing_mult":      tp2s,
+            "be_trigger":          be,
+            "sl_scale":            1.0,
+            "position_scale":      1.0,
+        }
+    elif signal_score >= 30:
+        # 弱訊號：半倉，出場參數不變
+        return {
+            "tp1_mult":            tp1,
+            "tp2_intraday_mult":   tp2i,
+            "tp2_swing_mult":      tp2s,
+            "be_trigger":          be,
+            "sl_scale":            1.0,
+            "position_scale":      0.5,
+        }
+    else:
+        # 極弱：不下單（position_scale=0 由外層判斷）
+        return {
+            "tp1_mult":            tp1,
+            "tp2_intraday_mult":   tp2i,
+            "tp2_swing_mult":      tp2s,
+            "be_trigger":          be,
+            "sl_scale":            1.0,
+            "position_scale":      0.0,
+        }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 模組三：防洗盤熔斷機制 CircuitBreaker
+# 記錄最近5筆交易結果（win=True / loss=False）
+# 連續3筆虧損 → 熔斷1小時，signal_score 門檻提高至85
+# 熔斷解除後 DC 通知，自動恢復正常門檻
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CircuitBreaker:
+    """
+    防洗盤熔斷機制：
+      - record(win: bool)    : 記錄一筆交易結果
+      - check(score: int)    : 回傳有效的最終 signal_score（熔斷期間強制最低門檻85）
+      - is_active() -> bool  : 是否處於熔斷狀態
+    """
+
+    WINDOW           = 5     # 追蹤最近 N 筆交易
+    CONSEC_LOSS_MAX  = 3     # 連續虧損超過此數觸發熔斷
+    COOLDOWN_SECS    = 3600  # 熔斷持續時間（秒）
+    BREAKER_SCORE    = 85    # 熔斷期間最低有效 signal_score
+
+    def __init__(self):
+        self._results: List[bool] = []          # True=獲利 / False=虧損
+        self._break_until: Optional[float] = None   # 熔斷解除的 UNIX timestamp
+
+    def record(self, win: bool) -> None:
+        """記錄一筆交易結果，超過 WINDOW 則移除最舊筆。"""
+        self._results.append(win)
+        if len(self._results) > self.WINDOW:
+            self._results.pop(0)
+
+        # 連續虧損計數（從最新往前數）
+        consec = 0
+        for r in reversed(self._results):
+            if not r:
+                consec += 1
+            else:
+                break
+
+        if consec >= self.CONSEC_LOSS_MAX and not self.is_active():
+            self._break_until = time.time() + self.COOLDOWN_SECS
+            dc_log(
+                f"⚠️ **熔斷啟動**：近期連虧 {consec} 筆，"
+                f"過濾器收緊1小時（門檻提高至 score≥{self.BREAKER_SCORE}）"
+            )
+
+    def is_active(self) -> bool:
+        """回傳目前是否處於熔斷狀態，超時則自動解除。"""
+        if self._break_until is None:
+            return False
+        if time.time() >= self._break_until:
+            self._break_until = None
+            dc_log("✅ **熔斷解除**：恢復正常過濾條件")
+            return False
+        return True
+
+    def check(self, score: int) -> int:
+        """
+        傳入原始 signal_score，回傳最終有效分數。
+        熔斷期間：若 score < BREAKER_SCORE，強制回傳 0（外層判斷為極弱，不下單）。
+        正常期間：直接回傳原始 score。
+        """
+        if self.is_active() and score < self.BREAKER_SCORE:
+            return 0   # 熔斷濾除低品質訊號
+        return score
+
+
+# 全局熔斷器實例（跨所有幣種共享）
+_circuit_breaker = CircuitBreaker()
+
+
 class SykesTradingBot:
     def __init__(self):
         self.cooldown_dict: Dict[str, float] = {}
@@ -1900,48 +2139,87 @@ class SykesTradingBot:
         if _dbg and (combined_long or combined_short):
             print(f"[DBG DOGE/15m] CVD: pass={cvd_pass}  reason={cvd_reason}", flush=True)
 
-    # 9. SL/TP 計算（SL 改用 Pivot 結構點，備援為近5根極值）
-        p = p_l if direction == "long" else p_s
+    # 8.5 訊號評分（模組一 filter_signals）────────────────────────────────
+    #   輸入：CVD確認、ADX值、K棒結構條件、資費方向
+    #   輸出：0~100 整數評分，再經熔斷器過濾後決定是否下單與倉位大小
+        raw_score = filter_signals(
+            direction      = direction,
+            is_c3          = (is_long if direction == "long" else is_short),
+            is_pattern     = (is_double_bottom if direction == "long" else is_double_top),
+            cvd_pass       = cvd_pass,
+            current_adx    = current_adx,
+            c1_ok          = (long_C1  if direction == "long" else short_C1),
+            c2_ok          = (long_C2  if direction == "long" else short_C2),
+            c3_ok          = (long_C3  if direction == "long" else short_C3),
+            funding_rate   = funding_rate,
+        )
+        # 熔斷器過濾（模組三 CircuitBreaker.check）
+        # 熔斷期間低品質訊號會被強制降為 0
+        final_score = _circuit_breaker.check(raw_score)
+
+        if final_score < 30:
+            # 極弱訊號或熔斷中：直接跳過，不發通知、不下單
+            return
+
+    # 9. 動態 SL/TP 調整（模組二 dynamic_sl_tp）────────────────────────────
+    #   根據 final_score 取得調整後的倍率與倉位比例
+        p        = p_l if direction == "long" else p_s
+        dyn      = dynamic_sl_tp(final_score, p)
+        pos_scale = dyn["position_scale"]   # 1.0=正常倉位，0.5=半倉
+        sl_scale  = dyn["sl_scale"]         # 1.0=正常，1.2=放寬止損
 
         if direction == "long":
             calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            # 多單止損必須在當前價下方，否則用 MIN_SL 保護
             if calculated_sl >= current_close:
                 calculated_sl = current_close * (1.0 - 0.005)
+            # 強趨勢模式：止損寬 sl_scale 倍（給更大呼吸空間）
+            if sl_scale > 1.0:
+                risk_raw  = current_close - calculated_sl
+                calculated_sl = current_close - risk_raw * sl_scale
             risk_pct = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
+            tp2_mult   = dyn["tp2_swing_mult"] if is_swing else dyn["tp2_intraday_mult"]
             risk_dist  = current_close - calculated_sl
-            tp1_target = current_close + risk_dist * p["tp1_mult"]
+            tp1_target = current_close + risk_dist * dyn["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
             calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            # 空單止損必須在當前價上方，否則用 MIN_SL 保護
             if calculated_sl <= current_close:
                 calculated_sl = current_close * (1.0 + 0.005)
+            if sl_scale > 1.0:
+                risk_raw  = calculated_sl - current_close
+                calculated_sl = current_close + risk_raw * sl_scale
             risk_pct = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
+            tp2_mult   = dyn["tp2_swing_mult"] if is_swing else dyn["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
-            tp1_target = current_close - risk_dist * p["tp1_mult"]
+            tp1_target = current_close - risk_dist * dyn["tp1_mult"]
             tp2_target = current_close - risk_dist * tp2_mult
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
         rr2 = abs(tp2_target - current_close) / risk_delta
 
+        # 評分等級標籤（供 Discord 顯示）
+        score_label = (
+            "🔥強趨勢" if final_score >= 90 else
+            "✅普通"   if final_score >= 60 else
+            "⚡弱訊號"
+        )
+        pos_label = f"半倉({pos_scale*100:.0f}%)" if pos_scale < 1.0 else "正常倉位"
+
         signal_payload = {
             "side": direction, "entry": current_close, "sl": round(calculated_sl, 5),
             "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
             "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
             "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat(),
-            "source_tag": signal_source_tag,
+            "source_tag": f"{signal_source_tag} | {score_label} score={final_score} {pos_label}",
         }
 
         self.set_cooldown(symbol_item, tf_id)
@@ -1950,10 +2228,7 @@ class SykesTradingBot:
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
 
         # CVD 複合信號：30m_long 且 CVD 三層確認 → 特調高回報參數
-        # 注意：永遠用 real_cvd_pass，不受 CVD_ENABLED 開關影響
-        use_cvd_override = (
-            tf_id == "30m" and direction == "long" and real_cvd_pass
-        )
+        use_cvd_override = (tf_id == "30m" and direction == "long" and real_cvd_pass)
         if use_cvd_override:
             cvd_override = {"tp1_mult": 1.5, "tp2_mult": 2.0, "be_trigger": 1.0}
             risk_dist_long = abs(current_close - calculated_sl)
@@ -1968,12 +2243,16 @@ class SykesTradingBot:
             if EXCHANGE_ENABLED.get("okx", True):
                 execute_okx_trade_pipeline(
                     okx_swap_symbol, direction, current_close,
-                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
+                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
+                    p["exit_mode"], tf_id,
+                    position_scale=pos_scale,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
                     symbol_item, direction, current_close,
-                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"], p["exit_mode"], tf_id
+                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
+                    p["exit_mode"], tf_id,
+                    position_scale=pos_scale,
                 )
         else:
             pos = PaperPosition()
