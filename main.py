@@ -2031,14 +2031,16 @@ class SykesTradingBot:
             print(f"[DBG DOGE/15m] ════════════════════════\n", flush=True)
         # ────────────────────────────────────────────────────────
 
-        # ── 雙底/雙頂第二套訊號（OR 邏輯，獨立觸發）───────────────────────
-        # WF 驗證：僅 1H 雙正期望（多 +0.174 / 空 +0.221），15m/30m 可疑或負期望，故僅限 1H
+        # ── 雙底(W底)第二套訊號（OR 邏輯，獨立觸發）──────────────────────
+        # 回測結論（backtest_wm_variants.py）：
+        #   W底做多：1H +0.265、15m +0.068（C現狀版穩健）→ 僅 1H 啟用，與 WF 一致
+        #   M頭做空：四版兩時框幾乎全賠（1H/C 僅 +0.057，15m 三版全負）→ 整個關閉
+        # 故：雙底僅 1H 做多；雙頂(M頭)做空已停用。
         if tf_id == "1H":
             is_double_bottom = check_double_bottom(df, tf_id)
-            is_double_top    = check_double_top(df, tf_id)
         else:
             is_double_bottom = False
-            is_double_top    = False
+        is_double_top = False   # M頭做空回測全賠，停用（保留 check_double_top 供日後回測）
 
         # 合併：C3 或 雙底/雙頂任一成立即可觸發
         combined_long  = is_long  or is_double_bottom
