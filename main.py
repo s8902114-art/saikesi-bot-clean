@@ -100,7 +100,8 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 RISK_PCT     = 0.10        # 單筆最大風險金額 = 啟動時總資金 × 10%
 POSITION_SLOTS = 10        # 倉位格數（保留供 !setslots 指令使用）
-SIGNAL_COOLDOWN = 1800     # 同一商品商品相同時框的訊號冷卻時間 (秒)
+SIGNAL_COOLDOWN = 1800     # 同一商品相同時框的訊號冷卻時間 (秒)
+DIR_SIGNAL_COOLDOWN = 3600 # 同幣同方向跨時框去重：1 小時內只下一次（避免 15m/30m/1H 整點同時觸發）
 MAX_CONSEC_LOSS = 3       # 最大連續虧損次數限制，達標後觸發熔斷
 PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 
@@ -1971,6 +1972,7 @@ _circuit_breaker = CircuitBreaker()
 class SykesTradingBot:
     def __init__(self):
         self.cooldown_dict: Dict[str, float] = {}
+        self.dir_cooldown:  Dict[str, float] = {}   # 跨時框同幣同向去重（key=symbol_direction）
         self.last_bar_ts:   Dict[str, int]   = {}   # K棒去重：同一根K棒不重複觸發
         self.consec_losses = 0
         self.circuit_break_until: Optional[float] = None
@@ -2206,8 +2208,13 @@ class SykesTradingBot:
         # ────────────────────────────────────────────────────────
 
         # ── 雙底/雙頂第二套訊號（OR 邏輯，獨立觸發）───────────────────────
-        is_double_bottom = check_double_bottom(df, tf_id)
-        is_double_top    = check_double_top(df, tf_id)
+        # WF 驗證：僅 1H 雙正期望（多 +0.174 / 空 +0.221），15m/30m 可疑或負期望，故僅限 1H
+        if tf_id == "1H":
+            is_double_bottom = check_double_bottom(df, tf_id)
+            is_double_top    = check_double_top(df, tf_id)
+        else:
+            is_double_bottom = False
+            is_double_top    = False
 
         # 合併：C3 或 雙底/雙頂任一成立即可觸發
         combined_long  = is_long  or is_double_bottom
@@ -2234,6 +2241,14 @@ class SykesTradingBot:
             if is_short:         _signal_source.append("C3")
             if is_double_top:    _signal_source.append("雙頂")
         signal_source_tag = "+".join(_signal_source)
+
+        # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
+        # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
+        # 避免 15m/30m/1H 整點同時收盤造成「一小時內同向三次訊號」。
+        dir_key = f"{symbol_item}_{direction}"
+        if time.time() - self.dir_cooldown.get(dir_key, 0.0) < DIR_SIGNAL_COOLDOWN:
+            if _dbg: print(f"[DBG] {dir_key} 同向冷卻中，跳出", flush=True)
+            return
 
     # 8. 秋總三層背離吸收 CVD 過濾
         # 永遠獨立抓真實 CVD 結果（供 30m_long override 使用）
@@ -2295,6 +2310,7 @@ class SykesTradingBot:
         }
 
         self.set_cooldown(symbol_item, tf_id)
+        self.dir_cooldown[f"{symbol_item}_{direction}"] = time.time()   # 記錄同向去重時戳
         if bar_ts != 0:
             self.last_bar_ts[bar_key] = bar_ts
         create_interactive_signal(signal_payload, symbol_item, tf_id, cvd_pass)
