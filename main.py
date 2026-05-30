@@ -881,17 +881,47 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             f" | 保證金: `{allocated_margin:.2f}` USDT | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
         ]
 
-        # 市價開倉（USDT 單位）
-        entry_order = ex.create_market_order(
-            symbol=symbol_id,
-            side=entry_action,
-            amount=position_value,          # USDT 名義值
-            params={
-                "posSide":  trade_side,
-                "tdMode":   MARGIN_MODE,
-                "tgtCcy":   "quote_ccy",    # 告訴 OKX 用報價幣（USDT）計量
-            }
-        )
+        # ── 市價開倉：優先 USDT 單位（tgtCcy=quote_ccy），不支援則降級用「張」──
+        # 部分幣種（如 SKY-USDT-SWAP）不支援 tgtCcy=quote_ccy，回傳 sCode=59110
+        fallback_to_contracts = False   # 是否降級用張數下單
+        total_contracts       = 0       # 降級時的總張數
+        ct_val                = 1.0     # 合約面值 ctVal
+        entry_order           = None
+
+        try:
+            entry_order = ex.create_market_order(
+                symbol=symbol_id,
+                side=entry_action,
+                amount=position_value,          # USDT 名義值
+                params={
+                    "posSide":  trade_side,
+                    "tdMode":   MARGIN_MODE,
+                    "tgtCcy":   "quote_ccy",    # 告訴 OKX 用報價幣（USDT）計量
+                }
+            )
+        except Exception as quote_err:
+            if "59110" in str(quote_err):
+                # 不支援 USDT 計量 → 降級用張數下單
+                fallback_to_contracts = True
+                mkt    = ex.market(symbol_id)
+                ct_val = float(mkt.get("contractSize", 1.0) or 1.0)   # 合約面值
+                # 張數 = 倉位USDT ÷ (價格 × ctVal)，無條件捨去取整數張
+                total_contracts = int(position_value / (current_market_price * ct_val))
+                if total_contracts < 1:
+                    total_contracts = 1
+                dc_log(f"ℹ️ [{symbol_id}] 不支援 tgtCcy=quote_ccy（59110），"
+                       f"自動降級用張數下單：{total_contracts} 張（ctVal={ct_val}）")
+                entry_order = ex.create_market_order(
+                    symbol=symbol_id,
+                    side=entry_action,
+                    amount=total_contracts,     # 張數
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE}
+                )
+                execution_report.append(f"📐 張數降級下單: `{total_contracts}` 張 (ctVal={ct_val})")
+            else:
+                # 其他錯誤照常往外拋給通用例外處理
+                raise
+
         # 等待成交均價（市價單可能需要短暫延遲才有 average）
         executed_average_price = entry_order.get("average") or entry_order.get("price")
         if not executed_average_price or float(executed_average_price or 0) == 0:
@@ -932,38 +962,79 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             )
             return
 
-        # TP1：USDT 金額限價單（50%）
-        try:
-            tp1_order = ex.create_order(
-                symbol=symbol_id, type="limit", side=exit_action,
-                amount=half_usdt, price=tp1,
-                params={
-                    "posSide":    trade_side,
-                    "tdMode":     MARGIN_MODE,
-                    "reduceOnly": True,
-                    "tgtCcy":     "quote_ccy",
-                }
-            )
-            tp1_order_id = tp1_order.get("id")
-            execution_report.append(f"🌓 TP1 限價單 (50% = {half_usdt:.2f} USDT): `{tp1}` (ordId: {tp1_order_id})")
-        except Exception as tp1e:
-            execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
-
-        # TP2：USDT 金額限價單（50%）—— 不再依賴張數，根本解決 TP2=0 問題
-        try:
-            ex.create_order(
-                symbol=symbol_id, type="limit", side=exit_action,
-                amount=half_usdt, price=tp2,
-                params={
-                    "posSide":    trade_side,
-                    "tdMode":     MARGIN_MODE,
-                    "reduceOnly": True,
-                    "tgtCcy":     "quote_ccy",
-                }
-            )
-            execution_report.append(f"🌕 TP2 限價單 (50% = {half_usdt:.2f} USDT): `{tp2}`")
-        except Exception as tp2e:
-            execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+        if not fallback_to_contracts:
+            # ── USDT 單位 TP 分批（各 50%，不依賴張數）─────────────────────
+            # TP1
+            try:
+                tp1_order = ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=half_usdt, price=tp1,
+                    params={
+                        "posSide":    trade_side,
+                        "tdMode":     MARGIN_MODE,
+                        "reduceOnly": True,
+                        "tgtCcy":     "quote_ccy",
+                    }
+                )
+                tp1_order_id = tp1_order.get("id")
+                execution_report.append(f"🌓 TP1 限價單 (50% = {half_usdt:.2f} USDT): `{tp1}` (ordId: {tp1_order_id})")
+            except Exception as tp1e:
+                execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
+            # TP2
+            try:
+                ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=half_usdt, price=tp2,
+                    params={
+                        "posSide":    trade_side,
+                        "tdMode":     MARGIN_MODE,
+                        "reduceOnly": True,
+                        "tgtCcy":     "quote_ccy",
+                    }
+                )
+                execution_report.append(f"🌕 TP2 限價單 (50% = {half_usdt:.2f} USDT): `{tp2}`")
+            except Exception as tp2e:
+                execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+        else:
+            # ── 張數降級 TP 分批 ─────────────────────────────────────────
+            if total_contracts >= 2:
+                tp1_qty = int(total_contracts // 2)
+                tp2_qty = total_contracts - tp1_qty
+                # TP1
+                try:
+                    tp1_order = ex.create_order(
+                        symbol=symbol_id, type="limit", side=exit_action,
+                        amount=tp1_qty, price=tp1,
+                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                    )
+                    tp1_order_id = tp1_order.get("id")
+                    execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1}` (ordId: {tp1_order_id})")
+                except Exception as tp1e:
+                    execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
+                # TP2
+                try:
+                    ex.create_order(
+                        symbol=symbol_id, type="limit", side=exit_action,
+                        amount=tp2_qty, price=tp2,
+                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                    )
+                    execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2}`")
+                except Exception as tp2e:
+                    execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
+            else:
+                # 僅 1 張：TP1 全出，不設 TP2
+                try:
+                    tp1_order = ex.create_order(
+                        symbol=symbol_id, type="limit", side=exit_action,
+                        amount=total_contracts, price=tp1,
+                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                    )
+                    tp1_order_id = tp1_order.get("id")
+                    execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1}` (ordId: {tp1_order_id})")
+                except Exception as tp1e:
+                    execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
+                dc_log(f"⚠️ [{symbol_id}] 倉位1張，TP2略過改全出")
+                execution_report.append("⚠️ 倉位1張，TP2略過改全出")
 
         dc_log("\n".join(execution_report))
     except Exception as general_error:
