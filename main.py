@@ -792,11 +792,25 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log("⚠️ **風控異常**: 結構止損間距過小，自動拒絕下單以防爆倉。")
             return
 
-        # 槓桿 = min(50 ÷ 止損距離%, MAX_LEVERAGE)
-        calculated_leverage = max(1, min(int(50.0 / (sl_distance_pct * 100.0)), MAX_LEVERAGE))
-
-        # 倉位價值 = 風險金額 ÷ 止損距離%；保證金 = 倉位價值 ÷ 槓桿
+        # 倉位價值 = 風險金額 ÷ 止損距離%（不論模式皆照 RISK 公式）
         position_value   = risk_usdt / sl_distance_pct
+
+        if MARGIN_MODE == "cross":
+            # 全倉模式：直接用該幣種最大槓桿，保證金自動最小化
+            try:
+                _mkt_lev = ex.market(symbol_id)
+                coin_max_lev = int(float(
+                    ((_mkt_lev.get("limits", {}) or {}).get("leverage", {}) or {}).get("max")
+                    or MAX_LEVERAGE
+                ))
+            except Exception:
+                coin_max_lev = MAX_LEVERAGE
+            calculated_leverage = max(1, min(coin_max_lev, MAX_LEVERAGE))
+        else:
+            # 逐倉模式：維持原本動態槓桿邏輯
+            calculated_leverage = max(1, min(int(50.0 / (sl_distance_pct * 100.0)), MAX_LEVERAGE))
+
+        # 保證金 = 倉位價值 ÷ 槓桿
         allocated_margin = position_value / calculated_leverage
 
         # ── Fix 3：單倉保證金上限 = 總資產 × RISK_PCT ────────────────────────
@@ -811,21 +825,26 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             position_value   = round(position_value   * position_scale, 2)
             allocated_margin = round(allocated_margin * position_scale, 2)
 
-        # ── 維持保證金率保護：帳戶整體維持保證金率 < 350% 時不開新倉 ──────────
-        # 維持保證金率越低代表越危險，< 350% 代表可用保證金太少，不宜再開倉
-        try:
-            margin_info = ex.fetch_balance()
-            mmr_raw = float((margin_info.get("info", {}) or {}).get("mgnRatio", 0) or 0)
-            if mmr_raw > 0:
-                # OKX 回傳小數（如 10.5 = 1050%），若 < 50 視為小數需 ×100
-                mmr = mmr_raw * 100 if mmr_raw < 50 else mmr_raw
-            else:
-                mmr = (total_eq / used_eq * 100) if used_eq > 0 else 9999
-            if mmr < 300:
-                dc_log(f"⚠️ OKX 維持保證金率 {mmr:.1f}% < {OKX_MIN_MMR}%，暫停開新倉")
-                return
-        except Exception as risk_check_err:
-            print(f"[RiskCheck] 維持保證金率檢查失敗: {risk_check_err}")
+        # ── 全倉模式開倉前風控：預估加入新倉後維持保證金率 < 150% → 跳過 ──────
+        if MARGIN_MODE == "cross":
+            try:
+                acct_info = ex.fetch_balance()
+                info_root = acct_info.get("info", {}) or {}
+                data_list = info_root.get("data", [])
+                d0 = data_list[0] if isinstance(data_list, list) and data_list else {}
+                total_eq = float(d0.get("totalEq") or total_usdt or 0)
+                mmr_raw  = float(d0.get("mgnRatio") or info_root.get("mgnRatio", 0) or 0)
+                # OKX 回傳小數（如 10.5 = 1050%），若 0<x<50 視為倍數需 ×100
+                mmr_now = mmr_raw * 100 if 0 < mmr_raw < 50 else mmr_raw
+                # 預估加入新倉後維持保證金率：新倉佔用保證金降低權益緩衝
+                if mmr_now > 0 and total_eq > 0:
+                    projected_mmr = mmr_now * max(total_eq - allocated_margin, 0) / total_eq
+                    if projected_mmr < 150:
+                        dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：維持保證金率不足"
+                               f"（預估 {projected_mmr:.1f}% < 150%）")
+                        return
+            except Exception as risk_check_err:
+                print(f"[RiskCheck] OKX 維持保證金率檢查失敗: {risk_check_err}")
 
         # 下單前檢查：可用餘額 >= 保證金
         if available_usdt < allocated_margin:
@@ -1030,8 +1049,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         projected_used = used_margin + margin
         projected_risk_rate = projected_used / equity if equity > 0 else 1.0
         if projected_risk_rate > BINGX_MAX_RISK_RATE:
-            dc_log(f"⚠️ BingX 風險率預估 {projected_risk_rate:.1%} > {BINGX_MAX_RISK_RATE:.0%}，"
-                   f"暫停開新倉（已用 {used_margin:.2f} + 新倉 {margin:.2f} / 淨值 {equity:.2f}）")
+            dc_log(f"⚠️ BingX 跳過 [{symbol_id}]：風險率預估 {projected_risk_rate:.0%} > {BINGX_MAX_RISK_RATE:.0%}"
+                   f"（已用 {used_margin:.2f} + 新倉 {margin:.2f} / 淨值 {equity:.2f}）")
             return
 
         # 設定槓桿（全倉模式）
