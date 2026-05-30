@@ -781,10 +781,20 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ **實盤交易中斷**: 可用保證金不足 ({available_usdt:.2f} USDT)")
             return
 
-        # ── RISK 公式（動態基準：每次下單重新抓當前總資產含未實現盈虧）─────────
-        total_usdt = float(balance_data.get("USDT", {}).get("total", 0.0))
-        base_funds = total_usdt if total_usdt > 0 else available_usdt
-        risk_usdt  = base_funds * RISK_PCT         # 單筆最大風險金額 = 當前總資產 × RISK_PCT
+        # ── RISK 公式（基準＝錢包餘額，不含浮動盈虧）────────────────────────
+        # 用 cashBal/availBal（已實現權益），避免持倉浮盈浮虧讓下一單倉位忽大忽小。
+        # 只有真正平倉賺賠改變錢包餘額時，下一單風險才隨帳戶大小調整。
+        total_usdt = float(balance_data.get("USDT", {}).get("total", 0.0))   # 含uPnL，僅供顯示
+        _okx_detail = (balance_data.get("info", {}) or {}).get("data", [{}])
+        _okx_d0     = _okx_detail[0] if isinstance(_okx_detail, list) and _okx_detail else {}
+        wallet_usdt = 0.0
+        for _ccy in (_okx_d0.get("details") or []):
+            if _ccy.get("ccy") == "USDT":
+                wallet_usdt = float(_ccy.get("cashBal") or _ccy.get("availBal") or 0.0)
+                break
+        # 備援：抓不到 cashBal 時退回 free（不含 uPnL），最後才用 total
+        base_funds = wallet_usdt if wallet_usdt > 0 else (available_usdt if available_usdt > 0 else total_usdt)
+        risk_usdt  = base_funds * RISK_PCT         # 單筆最大風險金額 = 錢包餘額 × RISK_PCT
 
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
@@ -1097,12 +1107,17 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         avail_usdt = float(
             bal.get("availableMargin") or bal.get("available") or bal.get("availableBalance") or total_usdt
         )
+        # 錢包餘額（不含未實現盈虧）＝風險基準，避免浮動盈虧讓倉位忽大忽小
+        wallet_usdt = float(bal.get("balance") or bal.get("totalMarginBalance") or 0)
+        if wallet_usdt <= 0:
+            wallet_usdt = total_usdt   # 備援：抓不到才退回淨值
         if total_usdt <= 0:
             dc_log(f"⚠️ BingX 餘額讀取異常（返回值: {bal_resp}），跳過下單")
             return
 
         # 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）
-        risk_usdt = total_usdt * RISK_PCT * position_scale
+        # 風險基準用 wallet_usdt（錢包餘額），不用 equity（含uPnL）
+        risk_usdt = wallet_usdt * RISK_PCT * position_scale
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
         if sl_dist_pct <= 0.0001:
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
@@ -1130,7 +1145,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
 
         # 保證金 = 倉位價值 ÷ 槓桿（全倉用最大槓桿後此值即實際新倉保證金）
         margin = position_value / leverage
-        max_margin = total_usdt * RISK_PCT
+        max_margin = wallet_usdt * RISK_PCT   # 保證金上限與風險基準一致（錢包餘額）
         if margin > max_margin:
             margin = max_margin
             position_value = margin * leverage
