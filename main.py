@@ -237,6 +237,7 @@ FUNDING_LONG_MAX = 0.0001
 FUNDING_SHORT_MIN = -0.0001
 CVD_WINDOW = 3
 BEAR_MIN_BARS = 20
+BIAS_MAX_ATR = 1.5   # 乖離過濾：收盤離 EMA144 超過此 ATR 倍數即不進場（回測最佳，避免追漲殺跌）
 
 # 🌟 全局變數：用於追蹤 Discord 歷史最高訊息 ID，防重複處理
 
@@ -2155,13 +2156,23 @@ class SykesTradingBot:
         current_low  = df["low"].iloc[-1]
         current_high = df["high"].iloc[-1]
 
+        # ── 乖離過濾（漲過頭/跌過頭不追）─────────────────────────────────────
+        # 回測（2022-2026 BTC/ETH/SOL）：進場收盤離 EMA144 超過 BIAS_MAX×ATR 就不進，
+        # 各時框各方向 EV 全面由負轉正、MDD 大幅下降且單調，故全時框套用 1.5。
+        # long_bias = (收盤 - EMA144)/ATR；short_bias = (EMA144 - 收盤)/ATR
+        _atr_now   = current_atr if current_atr and current_atr > 0 else 1e-9
+        long_bias  = (current_close - ema144.iloc[-1]) / _atr_now
+        short_bias = (ema144.iloc[-1] - current_close) / _atr_now
+        long_bias_ok  = long_bias  <= BIAS_MAX_ATR
+        short_bias_ok = short_bias <= BIAS_MAX_ATR
+
         # C1 當根版本（v9：移除 largeTop/largeBot 限制）
         long_C1  = (current_close > small_bot and current_low  < small_bot)
         long_C2  = current_close > ema12.iloc[-1]
         long_C3  = (rsi_ma_l.iloc[-2] < 50 and
                     rsi_ma_l.iloc[-1] >= 50)   # rsiMa 從 <50 穿越到 >=50（QQE 轉藍）
         is_long  = (ema144.iloc[-1] > ema576.iloc[-1] and
-                    long_C1 and long_C2 and long_C3 and
+                    long_C1 and long_C2 and long_C3 and long_bias_ok and
                     (not ADX_ENABLED or current_adx >= ADX_THR) and
                     (funding_rate is None or funding_rate <= FUNDING_LONG_MAX))
 
@@ -2171,7 +2182,7 @@ class SykesTradingBot:
                     rsi_ma_s.iloc[-1] < 50)    # rsiMa 從 >=50 穿越到 <50（QQE 轉紅）
         short_adx_ok = (not ADX_ENABLED or current_adx >= ADX_THR)
         short_fund_ok = (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)
-        is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
+        is_short = (bear_trend and short_C1 and short_C2 and short_C3 and short_bias_ok and
                     short_adx_ok and short_fund_ok)
 
         # ── DOGE/15m 詳細 debug log ─────────────────────────────
