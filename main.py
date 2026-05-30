@@ -73,15 +73,15 @@ TG_CHAT_ID = os.environ.get("TG_CHAT_ID", "")
 
 # OKX 交易所帳戶配置
 
-OKX_API_KEY = os.environ.get("OKX_API_KEY", "")
-OKX_SECRET = os.environ.get("OKX_SECRET_KEY", "359300E99DD8870F8990CC698BC4F491")
-OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "Small5017714@")
+OKX_API_KEY    = os.environ.get("OKX_API_KEY", "")
+OKX_SECRET     = os.environ.get("OKX_SECRET_KEY", "")
+OKX_PASSPHRASE = os.environ.get("OKX_PASSPHRASE", "")
 OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 
 # BingX 交易所帳戶配置
 
-BINGX_API_KEY    = os.environ.get("BINGX_API_KEY",    "dUs9Bi25VBAAAIWpqpBgzbj5gjZXmufeO0U0LW6mMgGAsCeNNtPlbjvVoNYS6jxAECRWdLXDLRn23XE1gtg")
-BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "jn69lGmeOQLAmOjjsUUUUd6tJL1zntmz7RSIOgkHsxn2YakmI4NbzzjgpzkvZCf5D5Xnue2mPSe9qWU6hQ")
+BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
+BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_BASE       = "https://open-api.bingx.com"
 
 # 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
