@@ -53,3 +53,10 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pythonlibs/
+
+# 環境變數與金鑰（嚴禁進版控）
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
