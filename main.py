@@ -2248,87 +2248,50 @@ class SykesTradingBot:
         if _dbg and (combined_long or combined_short):
             print(f"[DBG DOGE/15m] CVD: pass={cvd_pass}  reason={cvd_reason}", flush=True)
 
-    # 8.5 訊號評分（模組一 filter_signals）────────────────────────────────
-    #   輸入：CVD確認、ADX值、K棒結構條件、資費方向
-    #   輸出：0~100 整數評分，再經熔斷器過濾後決定是否下單與倉位大小
-        raw_score = filter_signals(
-            direction      = direction,
-            is_c3          = (is_long if direction == "long" else is_short),
-            is_pattern     = (is_double_bottom if direction == "long" else is_double_top),
-            cvd_pass       = cvd_pass,
-            current_adx    = current_adx,
-            c1_ok          = (long_C1  if direction == "long" else short_C1),
-            c2_ok          = (long_C2  if direction == "long" else short_C2),
-            c3_ok          = (long_C3  if direction == "long" else short_C3),
-            funding_rate   = funding_rate,
-        )
-        # 熔斷器過濾（模組三 CircuitBreaker.check）
-        # 熔斷期間低品質訊號會被強制降為 0
-        final_score = _circuit_breaker.check(raw_score)
-
-        if final_score < 30:
-            # 極弱訊號或熔斷中：直接跳過，不發通知、不下單
-            return
-
-    # 9. 動態 SL/TP 調整（模組二 dynamic_sl_tp）────────────────────────────
-    #   根據 final_score 取得調整後的倍率與倉位比例
-        p        = p_l if direction == "long" else p_s
-        dyn      = dynamic_sl_tp(final_score, p)
-        pos_scale = dyn["position_scale"]   # 1.0=正常倉位，0.5=半倉
-        sl_scale  = dyn["sl_scale"]         # 1.0=正常，1.2=放寬止損
+    # 9. SL/TP 計算（固定 BEST_PARAMS，Walk-Forward 驗證版）─────────────────
+    #   ※ 已移除「訊號評分／動態SL/動態倉位」層：該層未經回測且會偏離
+    #     WF 驗證過的參數，回退至固定參數以恢復正期望值。
+        p = p_l if direction == "long" else p_s
 
         if direction == "long":
             calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
+            # 多單止損必須在當前價下方，否則用 MIN_SL 保護
             if calculated_sl >= current_close:
                 calculated_sl = current_close * (1.0 - 0.005)
-            # 強趨勢模式：止損寬 sl_scale 倍（給更大呼吸空間）
-            if sl_scale > 1.0:
-                risk_raw  = current_close - calculated_sl
-                calculated_sl = current_close - risk_raw * sl_scale
             risk_pct = abs(current_close - calculated_sl) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult   = dyn["tp2_swing_mult"] if is_swing else dyn["tp2_intraday_mult"]
+            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = current_close - calculated_sl
-            tp1_target = current_close + risk_dist * dyn["tp1_mult"]
+            tp1_target = current_close + risk_dist * p["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
             calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
+            # 空單止損必須在當前價上方，否則用 MIN_SL 保護
             if calculated_sl <= current_close:
                 calculated_sl = current_close * (1.0 + 0.005)
-            if sl_scale > 1.0:
-                risk_raw  = calculated_sl - current_close
-                calculated_sl = current_close + risk_raw * sl_scale
             risk_pct = abs(calculated_sl - current_close) / current_close
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
-            tp2_mult   = dyn["tp2_swing_mult"] if is_swing else dyn["tp2_intraday_mult"]
+            tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
-            tp1_target = current_close - risk_dist * dyn["tp1_mult"]
+            tp1_target = current_close - risk_dist * p["tp1_mult"]
             tp2_target = current_close - risk_dist * tp2_mult
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
         rr2 = abs(tp2_target - current_close) / risk_delta
 
-        # 評分等級標籤（供 Discord 顯示）
-        score_label = (
-            "🔥強趨勢" if final_score >= 90 else
-            "✅普通"   if final_score >= 60 else
-            "⚡弱訊號"
-        )
-        pos_label = f"半倉({pos_scale*100:.0f}%)" if pos_scale < 1.0 else "正常倉位"
-
         signal_payload = {
             "side": direction, "entry": current_close, "sl": round(calculated_sl, 5),
             "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
             "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
             "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat(),
-            "source_tag": f"{signal_source_tag} | {score_label} score={final_score} {pos_label}",
+            "source_tag": signal_source_tag,
         }
 
         self.set_cooldown(symbol_item, tf_id)
@@ -2354,14 +2317,12 @@ class SykesTradingBot:
                     okx_swap_symbol, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id,
-                    position_scale=pos_scale,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
                     symbol_item, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id,
-                    position_scale=pos_scale,
                 )
         else:
             pos = PaperPosition()
