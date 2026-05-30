@@ -1026,8 +1026,27 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
             return
 
-        leverage = max(1, min(int(50.0 / (sl_dist_pct * 100.0)), MAX_LEVERAGE))
         position_value = risk_usdt / sl_dist_pct
+
+        if MARGIN_MODE == "cross":
+            # 全倉模式：查該幣種最大槓桿，直接用最大槓桿（保證金自動最小化）
+            try:
+                lev_q = _bingx_request("GET", "/openApi/swap/v2/trade/leverage", {
+                    "symbol": bingx_symbol
+                }, headers).json()
+                lev_data = lev_q.get("data", {}) or {}
+                if trade_side == "long":
+                    coin_max_lev = int(float(lev_data.get("maxLongLeverage") or MAX_LEVERAGE))
+                else:
+                    coin_max_lev = int(float(lev_data.get("maxShortLeverage") or MAX_LEVERAGE))
+            except Exception:
+                coin_max_lev = MAX_LEVERAGE
+            leverage = max(1, min(coin_max_lev, MAX_LEVERAGE))
+        else:
+            # 逐倉模式：維持原本動態槓桿邏輯
+            leverage = max(1, min(int(50.0 / (sl_dist_pct * 100.0)), MAX_LEVERAGE))
+
+        # 保證金 = 倉位價值 ÷ 槓桿（全倉用最大槓桿後此值即實際新倉保證金）
         margin = position_value / leverage
         max_margin = total_usdt * RISK_PCT
         if margin > max_margin:
