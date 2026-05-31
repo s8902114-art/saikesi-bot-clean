@@ -2066,6 +2066,12 @@ class SykesTradingBot:
         if tf_id == "1H":
             is_long = False
 
+        # ── 30m/short 停用：分區回測顯示只在 2022 慢熊有效(+0.195)，
+        #    牛市 −0.088、2025 急跌 −0.199(勝率0%)，全期 −0.023 負期望 → 停用。
+        #    30m/long(WF驗證 +0.093 穩健) 保留。空單交給 15m 雙頂共振/C3空。
+        if tf_id == "30m":
+            is_short = False
+
         # 合併：C3 或 雙底 或 共振 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long
         combined_short = is_short or is_double_top   or is_reson_short
