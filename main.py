@@ -2034,13 +2034,31 @@ class SykesTradingBot:
         # ── 雙底(W底)第二套訊號（OR 邏輯，獨立觸發）──────────────────────
         # 回測結論（backtest_wm_variants.py）：
         #   W底做多：1H +0.265、15m +0.068（C現狀版穩健）→ 僅 1H 啟用，與 WF 一致
-        #   M頭做空：四版兩時框幾乎全賠（1H/C 僅 +0.057，15m 三版全負）→ 整個關閉
-        # 故：雙底僅 1H 做多；雙頂(M頭)做空已停用。
+        #   M頭做空：四版兩時框幾乎全賠 → 單獨關閉
+        # 故：雙底僅 1H 做多；雙頂(M頭)單獨做空已停用。
         if tf_id == "1H":
             is_double_bottom = check_double_bottom(df, tf_id)
         else:
             is_double_bottom = False
-        is_double_top = False   # M頭做空回測全賠，停用（保留 check_double_top 供日後回測）
+        is_double_top = False   # M頭單獨做空回測全賠，停用（共振版見下）
+
+        # ── 雙底/雙頂 + RSI穿50 共振（僅 15m，WF 驗證穩健）────────────────────
+        # backtest_reson_wf.py：
+        #   15m 雙頂空+RSI：訓練+0.211→驗證+0.187（n=15, MDD 4%）✅ 救活了做空
+        #   15m 雙底多+RSI：訓練+0.074→驗證+0.062（n=8）✅ 輔助
+        # RSI(14) 穿 50 為共振條件（用 calculate_smooth_rsi，與回測同算法）
+        is_reson_long = False
+        is_reson_short = False
+        if tf_id == "15m":
+            _rsi = calculate_smooth_rsi(df["close"], 14)
+            _rsi_now  = _rsi.iloc[-1]
+            _rsi_prev = _rsi.iloc[-2]
+            rsi_up50   = _rsi_prev < 50 and _rsi_now >= 50   # 上穿50
+            rsi_down50 = _rsi_prev >= 50 and _rsi_now < 50   # 下穿50
+            if rsi_up50 and check_double_bottom(df, tf_id):
+                is_reson_long = True
+            if rsi_down50 and check_double_top(df, tf_id):
+                is_reson_short = True
 
         # ── C3 1H/多 停用：回測 EV −0.024 負期望（backtest_c3_bias.py）──────────
         # 1H 的多單改由雙底(W底, +0.265) 觸發；C3 做多僅保留 15m（+0.133）。
@@ -2048,9 +2066,9 @@ class SykesTradingBot:
         if tf_id == "1H":
             is_long = False
 
-        # 合併：C3 或 雙底任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom
-        combined_short = is_short or is_double_top
+        # 合併：C3 或 雙底 或 共振 任一成立即可觸發
+        combined_long  = is_long  or is_double_bottom or is_reson_long
+        combined_short = is_short or is_double_top   or is_reson_short
 
         if not combined_long and not combined_short:
             return
@@ -2068,10 +2086,12 @@ class SykesTradingBot:
             _signal_source = []
             if is_long:          _signal_source.append("C3")
             if is_double_bottom: _signal_source.append("雙底")
+            if is_reson_long:    _signal_source.append("雙底+RSI共振")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
             if is_double_top:    _signal_source.append("雙頂")
+            if is_reson_short:   _signal_source.append("雙頂+RSI共振")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
