@@ -112,8 +112,11 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
-RISK_PCT     = 0.10        # 單筆最大風險金額 = 啟動時總資金 × 10%
+RISK_PCT     = 0.10        # 單筆最大風險金額 = 基準 × 10%
 RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
+# ── 分段複利下注（壓 MDD；回測：每+50U → 37倍/MDD50% vs 純複利MDD96%）──
+LADDER_BASE_USDT = 10.0    # 初始下注基準（單筆風險 = 此值 × RISK_PCT 起跳）
+LADDER_STEP_USDT = 50.0    # 每多賺此金額，單筆風險才加一級（/setladder 可調）
 POSITION_SLOTS = 10        # 倉位格數（保留供 !setslots 指令使用）
 SIGNAL_COOLDOWN = 1800     # 同一商品相同時框的訊號冷卻時間 (秒)
 DIR_SIGNAL_COOLDOWN = 3600 # 同幣同方向跨時框去重：1 小時內只下一次（避免 15m/30m/1H 整點同時觸發）
@@ -777,8 +780,16 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 wallet_usdt = float(_ccy.get("cashBal") or _ccy.get("availBal") or 0.0)
                 break
         # 備援：抓不到 cashBal 時退回 free（不含 uPnL），最後才用 total
-        base_funds = wallet_usdt if wallet_usdt > 0 else (available_usdt if available_usdt > 0 else total_usdt)
-        risk_usdt  = base_funds * RISK_PCT         # 單筆最大風險金額 = 錢包餘額 × RISK_PCT
+        wallet_now = wallet_usdt if wallet_usdt > 0 else (available_usdt if available_usdt > 0 else total_usdt)
+        # ── 分段複利下注（壓低 MDD）─────────────────────────────────────────
+        # 不用「即時餘額×RISK_PCT」(那是純複利, 回測MDD 96%)。
+        # 改用「分段級距」：每多賺 LADDER_STEP_USDT, 單筆風險才加一級。
+        # 回測：每+50U → 10U起37倍/MDD 50%（純複利MDD 96%, 純固定MDD 29%）。
+        # base_unit = 初始基準的單筆風險；level = 已成長幾個級距。
+        base_unit = LADDER_BASE_USDT * RISK_PCT
+        level = max(0, int((wallet_now - LADDER_BASE_USDT) // LADDER_STEP_USDT))
+        risk_usdt = base_unit * (1 + level)        # 分段複利：每級 +base_unit
+        base_funds = wallet_now                     # 保留供後續保證金上限等使用
 
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
@@ -1127,9 +1138,10 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 餘額讀取異常（返回值: {bal_resp}），跳過下單")
             return
 
-        # 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）
-        # 風險基準用 wallet_usdt（錢包餘額），不用 equity（含uPnL）
-        risk_usdt = wallet_usdt * RISK_PCT * position_scale
+        # 分段複利下注（與 OKX 一致；壓 MDD）：每多賺 LADDER_STEP_USDT 才加一級
+        _base_unit = LADDER_BASE_USDT * RISK_PCT
+        _level = max(0, int((wallet_usdt - LADDER_BASE_USDT) // LADDER_STEP_USDT))
+        risk_usdt = _base_unit * (1 + _level) * position_scale
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
         if sl_dist_pct <= 0.0001:
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
