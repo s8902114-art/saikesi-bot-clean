@@ -263,17 +263,17 @@ BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 # 迭代優化 + Walk-Forward 驗證 2026-05-24
 # ✅ = WF 驗證穩健（已更新）  ⚠️ = WF 可疑（保守維持舊值）
 #
-# ✅ 15m/long：WF 訓練+0.107→驗證+0.052，略降但正，採用
-#    TP1=1.2 TP2=2.5 BE=1.2 BUF=0.0 PVT=10
+# ✅ 15m/long：WF 訓練+0.107→驗證+0.052；BE 延後至 1.5R（出場優化 WF 驗證 +0.079 vs 原 +0.047）
+#    TP1=1.2 TP2=2.5 BE=1.5 BUF=0.0 PVT=10
 "15m_long": {
-"tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.2,
+"tp1_mult": 1.2,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.5,
 "sl_atr_buffer": 0.0, "structure_lookback": 10, "exit_mode": "fixed",
 "qqe_rsi": 7, "qqe_sf": 5, "qqe_factor": 3.0
 },
-# ✅ 15m/short：WF 訓練+0.028→驗證+0.124，驗證更好，強力採用
-#    TP1=1.0 TP2=2.5 BE=1.2 BUF=0.3 PVT=5
+# ✅ 15m/short：WF 訓練+0.028→驗證+0.124；BE 延後至 1.5R（出場優化）
+#    TP1=1.0 TP2=2.5 BE=1.5 BUF=0.3 PVT=5
 "15m_short": {
-"tp1_mult": 1.0,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.2,
+"tp1_mult": 1.0,  "tp2_intraday_mult": 2.5,  "tp2_swing_mult": 2.5, "be_trigger": 1.5,
 "sl_atr_buffer": 0.3, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 6, "qqe_factor": 3.0
 },
@@ -298,10 +298,10 @@ BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 "sl_atr_buffer": 0.5, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
-# ⚠️ 1H/short：WF 訓練+0.140→驗證-0.088，嚴重過擬合，保守維持舊值
-#    維持 TP1=1.0 TP2=2.0 BE=1.0 BUF=0.5 PVT=3
+# 1H/short：BE 延後至 1.5R（出場優化 WF 驗證，三組合合併 +0.079）
+#    TP1=1.0 TP2=2.0 BE=1.5 BUF=0.5 PVT=3
 "1H_short": {
-"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.0,
+"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.5,
 "sl_atr_buffer": 0.5, "structure_lookback": 3, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
