@@ -60,6 +60,8 @@ from indicators import (
     calculate_directional_movement_index,
     calculate_macd,
     macd_difslope_ok,
+    ladder_fib_lines,
+    near_ladder,
     check_double_bottom,
     check_double_top,
 )
@@ -2065,6 +2067,17 @@ class SykesTradingBot:
         short_fund_ok = (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)
         is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
                     short_adx_ok and short_fund_ok)
+
+        # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
+        # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
+        # C3 空訊號成立後，要求進場價在某條階梯 Fibo 線 ±0.5×ATR 內才放行。
+        if is_short and tf_id == "1H":
+            try:
+                _lad = ladder_fib_lines(df)
+                if not near_ladder(current_close, _lad, float(current_atr), tol=0.5):
+                    is_short = False   # 不靠壓力位 → 取消這筆空單
+            except Exception as _lad_err:
+                print(f"[Ladder] {symbol_item} 階梯過濾失敗: {_lad_err}")
 
         # ── DOGE/15m 詳細 debug log ─────────────────────────────
         if _dbg:

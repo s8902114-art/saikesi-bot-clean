@@ -97,6 +97,47 @@ def macd_difslope_ok(dif: pd.Series, side: str, lookback: int = 2) -> bool:
     return True
 
 
+def ladder_fib_lines(df, tz_offset=8, open_h=7, close_h=4):
+    """
+    階梯 Fibo 支撐壓力：每日 session(open_h→close_h 本地時間) 結束鎖定高低，
+    畫 Fibo 0.382/0.5/0.618。回傳最後一根「當下已鎖定」的三條線 (f382,f05,f618)。
+    前視安全：只用 session 結束後鎖定的值。WF 驗證：1H 空單靠壓力位 +0.313。
+    """
+    local = df.index + pd.Timedelta(hours=tz_offset)
+    lh = local.hour.values; lm = local.minute.values
+    op = df["open"].values; hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+    n = len(df)
+    def in_sess(h, m):
+        t = h*60+m
+        return t >= open_h*60 or t < close_h*60   # 跨日 session
+    cyc_hi=cyc_lo=cyc_open=None; in_cyc=False
+    lk_hi=lk_lo=lk_bull=None
+    for i in range(n):
+        ins = in_sess(lh[i], lm[i])
+        prev = in_sess(lh[i-1], lm[i-1]) if i>0 else False
+        if ins and not prev:
+            cyc_open=op[i]; cyc_hi=hi[i]; cyc_lo=lo[i]; in_cyc=True
+        elif ins and in_cyc:
+            cyc_hi=max(cyc_hi,hi[i]); cyc_lo=min(cyc_lo,lo[i])
+        if (not ins) and prev and in_cyc:
+            lk_hi=cyc_hi; lk_lo=cyc_lo; lk_bull=(cl[i-1]>cyc_open) if cyc_open else True
+            in_cyc=False
+    if lk_hi is None:
+        return None
+    rng = abs(lk_hi-lk_lo)
+    if lk_bull:
+        return (lk_hi-rng*0.382, lk_hi-rng*0.5, lk_hi-rng*0.618)
+    else:
+        return (lk_lo+rng*0.382, lk_lo+rng*0.5, lk_lo+rng*0.618)
+
+
+def near_ladder(price, lines, atr, tol=0.5):
+    """進場價是否在任一階梯線 ±tol×ATR 內（靠支撐/壓力）"""
+    if lines is None or atr <= 0:
+        return False
+    return any(abs(price - ln) <= tol*atr for ln in lines if ln == ln)  # ln==ln 排除 nan
+
+
 def calculate_average_true_range(data_df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
     """ 計算真實波動幅度均值 (ATR) """
     high_prices = data_df["high"]
