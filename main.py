@@ -853,9 +853,18 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             except Exception as risk_check_err:
                 print(f"[RiskCheck] OKX 維持保證金率檢查失敗: {risk_check_err}")
 
-        # 下單前檢查：可用餘額 >= 保證金
-        if available_usdt < allocated_margin:
-            dc_log(f"⚠️ 保證金不足，跳過下單：可用 {available_usdt:.2f} USDT，需要 {allocated_margin:.2f} USDT")
+        # ── 下單前可用 USDT 檢查（事前乾淨跳過，避免 51008 Insufficient margin 崩潰）──
+        # 重新抓即時可用餘額（函數開頭那次已過時：其他幣同時下單會佔用保證金），
+        # 並要求 可用 >= 需要保證金 × 1.05（留 5% 緩衝給手續費/精度/滑點）。
+        try:
+            _bal_now = ex.fetch_balance()
+            avail_now = float(_bal_now.get("USDT", {}).get("free", 0.0))
+        except Exception:
+            avail_now = available_usdt   # 抓失敗退回開頭那次
+        need_margin = allocated_margin * 1.05
+        if avail_now < need_margin:
+            dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：可用USDT {avail_now:.2f} 不足，需要 {need_margin:.2f}"
+                   f"（保證金 {allocated_margin:.2f} ×1.05 緩衝）")
             return
 
         # 已開倉數量 < POSITION_SLOTS
