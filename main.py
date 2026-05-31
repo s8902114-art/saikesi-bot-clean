@@ -1039,6 +1039,34 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 dc_log(f"⚠️ [{symbol_id}] 倉位1張，TP2略過改全出")
                 execution_report.append("⚠️ 倉位1張，TP2略過改全出")
 
+        # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
+        # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
+        if sl_algo_id:
+            # 剩餘量（TP1 出一半後）：USDT 模式存名義半值、張數模式存剩餘張數
+            if fallback_to_contracts:
+                remaining_amt = str(max(total_contracts - max(1, total_contracts // 2), 1)) \
+                                if total_contracts >= 2 else "0"
+            else:
+                remaining_amt = str(round(position_value * 0.5, 2))
+            okx_tkey = f"okx_{inst_id}_{trade_side}_{int(time.time())}"
+            active_real_trades[okx_tkey] = {
+                "exchange":         "okx",
+                "inst_id":          inst_id,
+                "symbol":           symbol_id,
+                "direction":        trade_side,
+                "entry_price":      str(executed_average_price),
+                "sl_algo_id":       sl_algo_id,
+                "tp1_order_id":     tp1_order_id,
+                "tp1_hit":          False,
+                "current_sl":       stop_loss,
+                "remaining_amount": remaining_amt,
+                "pos_side":         trade_side,
+                "risk_dist":        abs(executed_average_price - stop_loss),
+                "tf_id":            tf_id,
+            }
+            save_active_trades()   # 持久化
+            execution_report.append("📋 已加入保本/移動止損追蹤池")
+
         dc_log("\n".join(execution_report))
     except Exception as general_error:
         dc_log(f"❌ **交易所執行鏈嚴重崩潰**: {general_error}")
