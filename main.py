@@ -359,6 +359,40 @@ active_real_trades: Dict[str, Dict[str, Any]] = {}
 #                    "sl_algo_id", "tp1_order_id", "tp1_hit",
 #                    "current_sl", "remaining_amount", "pos_side"}}
 
+# ── active_real_trades 持久化（解決重啟/redeploy 後追蹤丟失）────────────────
+# Railway 每次 redeploy 會重啟程式，純記憶體的 active_real_trades 會清空，
+# 導致已開倉的保本/移動止損追蹤停擺。存成 json，啟動時讀回。
+# 注意：BingX 的 headers 含 API 金鑰，不落地；讀回時用全域 key 重建。
+_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "active_trades.json")
+
+def save_active_trades():
+    """將 active_real_trades 存成 json（排除 headers 等不可序列化/敏感欄位）"""
+    try:
+        dump = {}
+        for k, v in active_real_trades.items():
+            dump[k] = {kk: vv for kk, vv in v.items() if kk != "headers"}
+        with open(_TRADES_FILE, "w", encoding="utf-8") as f:
+            json.dump(dump, f, ensure_ascii=False, default=str)
+    except Exception as e:
+        print(f"[Persist] 存檔 active_trades 失敗: {e}")
+
+def load_active_trades():
+    """啟動時讀回 active_real_trades；BingX 條目補回 headers"""
+    if not os.path.exists(_TRADES_FILE):
+        return
+    try:
+        with open(_TRADES_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        for k, v in data.items():
+            if v.get("exchange") == "bingx":
+                v["headers"] = {"X-BX-APIKEY": BINGX_API_KEY}
+            active_real_trades[k] = v
+        if active_real_trades:
+            print(f"[Persist] 已讀回 {len(active_real_trades)} 筆追蹤中倉位")
+            dc_log(f"♻️ 重啟後已還原 {len(active_real_trades)} 筆倉位追蹤（保本/移動止損續行）")
+    except Exception as e:
+        print(f"[Persist] 讀回 active_trades 失敗: {e}")
+
 class PaperPosition:
     def __init__(self):
         self.open: bool = False
@@ -1241,6 +1275,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             "risk_dist":        abs(float(entry_price) - stop_loss),
             "tf_id":            tf_id,
         }
+        save_active_trades()   # 持久化：新倉立即存檔，重啟可還原
         dc_log(f"📋 BingX 倉位已加入保本追蹤：{bingx_symbol} {trade_side} SL={stop_loss} qty={actual_qty:.4f}")
 
     except Exception as e:
@@ -1435,6 +1470,9 @@ def check_trailing_stops_for_real():
 
         except Exception as be_err:
             print(f"[BingX Trailing] {trade_key} 處理失敗: {be_err}")
+
+    # 每輪追蹤後存檔：tp1_hit/current_sl/sl_order_id 變動、倉位移除 都會反映
+    save_active_trades()
 
 def _get_tick_size(df: pd.DataFrame) -> float:
     """從 K 棒數據自動估算 tick size（最小價格單位）"""
@@ -2609,6 +2647,8 @@ def main_polling_loop():
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
     # 啟動時永遠重新抓幣單（Railway 容器重啟後快取消失，需重新抓）
     build_dynamic_symbols()
+    # 還原重啟前的倉位追蹤（保本/移動止損續行，解決 redeploy 後追蹤丟失）
+    load_active_trades()
     n_sym = len(SYMBOLS)
 
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
