@@ -61,6 +61,42 @@ def calculate_full_qqe_mod(data_df: pd.DataFrame, rsi_pd: int = 6, sf_pd: int = 
     return rsi_smoothed_ma, pd.Series(trailing_buffer_list, index=data_df.index)
 
 
+def calculate_macd(close: pd.Series, fast: int = 12, slow: int = 26, sig: int = 9):
+    """
+    標準 MACD(12,26,9)。回傳 (dif快線, dea慢線, hist柱狀體)。
+    dif = EMA12 - EMA26；dea = EMA(dif,9)；hist = dif - dea。
+    """
+    ef = close.ewm(span=fast, adjust=False).mean()
+    es = close.ewm(span=slow, adjust=False).mean()
+    dif = ef - es
+    dea = dif.ewm(span=sig, adjust=False).mean()
+    hist = dif - dea
+    return dif, dea, hist
+
+
+def macd_difslope_ok(dif: pd.Series, side: str, lookback: int = 2) -> bool:
+    """
+    快線斜率動能過濾（WF 驗證有效的版本）：
+    交叉當根，快線 DIF 朝交易方向「加速」(增量遞增)，非收腳。
+    做多：DIF 連續上行且斜率擴大；做空：連續下行且斜率擴大。
+    需要至少 lookback+2 根資料。
+    """
+    d = dif.values
+    if len(d) < lookback + 3:
+        return False
+    i = len(d) - 1   # 當根（最後一根已收盤）
+    for k in range(lookback):
+        if side == "long":
+            inc_now  = d[i-k]   - d[i-k-1]
+            inc_prev = d[i-k-1] - d[i-k-2]
+        else:
+            inc_now  = d[i-k-1] - d[i-k]
+            inc_prev = d[i-k-2] - d[i-k-1]
+        if inc_now <= 0 or inc_now <= inc_prev:
+            return False
+    return True
+
+
 def calculate_average_true_range(data_df: pd.DataFrame, atr_period: int = 14) -> pd.Series:
     """ 計算真實波動幅度均值 (ATR) """
     high_prices = data_df["high"]

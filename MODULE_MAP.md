@@ -65,7 +65,7 @@ saikesi-bot-clean/
 | 你想改… | 去這裡 |
 |---|---|
 | 某時框的 TP/SL/保本參數 | `BEST_PARAMS`（252–307） |
-| 進場條件（C3/雙底/共振） | `scan_and_process_market`；定位字串 `雙底(W底)第二套訊號`。現況：15m C3多空＋15m雙底/雙頂RSI共振；1H 雙底多＋C3空（C3 1H多已停用、M頭單獨做空已停用） |
+| 進場條件（C3/雙底/共振/MACD） | `scan_and_process_market`；定位字串 `雙底(W底)第二套訊號`、`MACD 多週期動能濾波`。現況：15m C3多空＋15m雙底/雙頂RSI共振＋15m MACD多；1H 雙底多＋C3空＋1H MACD空（C3 1H多停用、30m空停用、M頭單獨做空停用）。MACD用4H EMA200定向+快線斜率過濾 |
 | 停損怎麼算 | `_find_pivot_low/high`（1670+）+ scan 內 SL 段（~2300） |
 | OKX 下單/張數/槓桿 | `execute_okx_trade_pipeline`（762+） |
 | BingX 下單/風控 | `execute_bingx_trade_pipeline`（1082+） |

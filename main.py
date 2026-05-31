@@ -58,6 +58,8 @@ from indicators import (
     calculate_full_qqe_mod,
     calculate_average_true_range,
     calculate_directional_movement_index,
+    calculate_macd,
+    macd_difslope_ok,
     check_double_bottom,
     check_double_top,
 )
@@ -2060,6 +2062,30 @@ class SykesTradingBot:
             if rsi_down50 and check_double_top(df, tf_id):
                 is_reson_short = True
 
+        # ── MACD 多週期動能濾波（WF 驗證穩健）─────────────────────────────────
+        # backtest_macd_wf.py：
+        #   15m 多 + 快線斜率：訓練+0.102→驗證+0.104（n=1523）✅ 最強
+        #   1H  空 + 快線斜率：訓練+0.105→驗證+0.084（n=378）✅ 補1H空單
+        # 規則：4H EMA200 斜率定向 + 當時框 MACD(12,26,9) 交叉 + 快線DIF斜率加速(非收腳)
+        is_macd_long = False
+        is_macd_short = False
+        if tf_id in ("15m", "1H"):
+            try:
+                df4h_macd = fetch_market_candles(okx_swap_symbol, "4H")
+                if not df4h_macd.empty and len(df4h_macd) > 200:
+                    e200 = df4h_macd["close"].ewm(span=200, adjust=False).mean()
+                    trend_up_4h = e200.iloc[-1] > e200.iloc[-2]   # 4H EMA200 斜率
+                    dif, dea, _hist = calculate_macd(df["close"])
+                    gold = dif.iloc[-2] <= dea.iloc[-2] and dif.iloc[-1] > dea.iloc[-1]
+                    dead = dif.iloc[-2] >= dea.iloc[-2] and dif.iloc[-1] < dea.iloc[-1]
+                    # 15m 只做多、1H 只做空（WF 驗證通過的兩個方向）
+                    if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                        is_macd_long = True
+                    if tf_id == "1H" and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                        is_macd_short = True
+            except Exception as _macd_err:
+                print(f"[MACD] {symbol_item} {tf_id} 計算失敗: {_macd_err}")
+
         # ── C3 1H/多 停用：回測 EV −0.024 負期望（backtest_c3_bias.py）──────────
         # 1H 的多單改由雙底(W底, +0.265) 觸發；C3 做多僅保留 15m（+0.133）。
         # 1H 的 C3 做空（+0.073）與 15m C3 多空不受影響。
@@ -2072,9 +2098,9 @@ class SykesTradingBot:
         if tf_id == "30m":
             is_short = False
 
-        # 合併：C3 或 雙底 或 共振 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long
-        combined_short = is_short or is_double_top   or is_reson_short
+        # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short
 
         if not combined_long and not combined_short:
             return
@@ -2093,11 +2119,13 @@ class SykesTradingBot:
             if is_long:          _signal_source.append("C3")
             if is_double_bottom: _signal_source.append("雙底")
             if is_reson_long:    _signal_source.append("雙底+RSI共振")
+            if is_macd_long:     _signal_source.append("MACD動能")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
             if is_double_top:    _signal_source.append("雙頂")
             if is_reson_short:   _signal_source.append("雙頂+RSI共振")
+            if is_macd_short:    _signal_source.append("MACD動能")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
