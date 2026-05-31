@@ -2426,7 +2426,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -2546,6 +2546,17 @@ def poll_dc_commands():
                                     dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
                             else:
                                 dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
+
+                        # ── setladder：分段複利級距（每多賺 N U 才把單筆風險加一級）──
+                        elif cmd == "setladder":
+                            if len(parts) >= 2 and parts[1].replace(".", "").isdigit():
+                                LADDER_STEP_USDT = float(parts[1])
+                                base_unit = LADDER_BASE_USDT * RISK_PCT
+                                dc_log(f"⚙️ 分段複利級距已更新：每多賺 `{LADDER_STEP_USDT:.0f}U` 升一級\n"
+                                       f"   初始單筆風險 `{base_unit:.2f}U`（基準{LADDER_BASE_USDT:.0f}U × {RISK_PCT*100:.0f}%）\n"
+                                       f"   越小越接近純複利(高成長高MDD)、越大越接近固定(穩但慢)")
+                            else:
+                                dc_log("⚠️ 用法: `!setladder 50`（每多賺50U才把單筆風險加一級）")
 
                         # ── cvd on|off ─────────────────────────────────
                         elif cmd == "cvd":

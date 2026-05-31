@@ -50,8 +50,18 @@
 ## ⚠️ 風險設定（重要）
 
 `RISK_PCT` 預設 0.10（10%）對小本金太高——回測模擬顯示 10% 風險下實盤 MDD 可達 99%、存活率僅 56%。
-建議降至 **0.02~0.05**：5% 存活率 99%、2% MDD 約 44%。用 Discord `!setslots` 或直接改 `RISK_PCT`。
-（每筆風險 = 錢包餘額 × RISK_PCT，已改用 walletBalance 不含浮動盈虧，避免倉位忽大忽小。）
+建議降至 **0.02~0.05**：5% 存活率 99%、2% MDD 約 44%。用 Discord `!risk 5` 或直接改 `RISK_PCT`。
+
+### 分段複利下注（壓 MDD 的核心機制）
+**MDD 高的真相**：不是策略爛，是「純複利」（每筆風險=即時餘額×RISK_PCT）放大的——
+帳戶長大後單筆變大，遇最糟連虧(回測 −19R)從高點回落 → 純複利 MDD 96%。
+**現行機制（分段複利）**：單筆風險 = `LADDER_BASE_USDT × RISK_PCT × (1+level)`，
+`level = (錢包餘額 − BASE) ÷ LADDER_STEP_USDT`，即**每多賺 `LADDER_STEP_USDT`(預設50U) 才把單筆風險加一級**。
+- 回測對照（10U起、4年、RISK 5%）：每+50U → **37倍/MDD 50%**；純複利 7萬倍/MDD 96%；純固定 15倍/MDD 29%
+- ⚠️ **報酬與 MDD 是鎖死的取捨**，沒有又快又穩的下注法。級距越小越接近複利(高報酬高MDD)、越大越接近固定(穩但慢)
+- 級距用 `!setladder 50` 調（OKX+BingX 同步套用）
+- 注意：回測那條「MDD 50%」用 RISK 5%；若 RISK_PCT 維持 10%，實際 MDD 會更高
+- 風險基準用 walletBalance（不含浮動盈虧），平倉賺賠才改變，避免持倉中倉位忽大忽小
 
 ---
 
@@ -141,6 +151,8 @@ MARGIN_MODE = "cross" # 保證金模式（cross / isolated）
 | `/exchange okx\|bingx on\|off` | 開關交易所路由 |
 | `/cvd on\|off` | 開關 CVD 背離過濾 |
 | `!setslots [數字]` | 設定倉位格數 |
+| `!risk [數字]` | 設定每倉風險%（如 `!risk 5`）|
+| `!setladder [U]` | 分段複利級距：每多賺 N U 才把單筆風險加一級（如 `!setladder 50`）|
 
 ---
 
