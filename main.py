@@ -874,10 +874,24 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
             return
 
+        # 設槓桿：OKX 需帶 mgnMode；全倉(cross)不可帶 posSide，逐倉(isolated)才需要。
+        # 若沒設成功，OKX 會用預設低槓桿算保證金 → position_value 大時爆 51008。
+        _lev_ok = False
         try:
-            ex.set_leverage(calculated_leverage, symbol_id, params={"posSide": trade_side})
-        except:
-            pass
+            if MARGIN_MODE == "cross":
+                ex.set_leverage(calculated_leverage, symbol_id, params={"mgnMode": "cross"})
+            else:
+                ex.set_leverage(calculated_leverage, symbol_id, params={"mgnMode": "isolated", "posSide": trade_side})
+            _lev_ok = True
+        except Exception as _lev_err:
+            # 重試：不帶 posSide（部分情況 posSide 會被拒）
+            try:
+                ex.set_leverage(calculated_leverage, symbol_id, params={"mgnMode": MARGIN_MODE})
+                _lev_ok = True
+            except Exception as _lev_err2:
+                dc_log(f"⚠️ OKX [{symbol_id}] 設槓桿失敗（{calculated_leverage}x）：{_lev_err2}；"
+                       f"為避免用預設低槓桿爆保證金(51008)，跳過此單")
+                return   # 槓桿沒設成功就別硬下，否則必爆 51008
 
         is_buy       = (trade_side == "long")
         entry_action = "buy"  if is_buy else "sell"
