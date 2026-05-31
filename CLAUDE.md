@@ -4,11 +4,54 @@
 
 這是一個加密貨幣自動交易系統，部署在 Railway 上，透過 Discord 進行控制。
 
-- **版本**: v4
-- **策略**: QQE MOD 雙軌交叉 + CVD 背離過濾
-- **時框**: 15m / 30m / 1H / 4H
+- **版本**: v5（2026-05 策略大整理：全部組合經回測+Walk-Forward 驗證）
+- **策略**: 多策略 OR 觸發（C3 + 雙底W底 + RSI共振 + MACD動能），詳見下方「實盤策略地圖」
+- **時框**: 15m / 30m / 1H（4H 僅通知不下單）
 - **監控幣種**: 40+ 個（市值前100 × OKX 永續，動態更新）
 - **交易所**: OKX（主）+ BingX（副）
+
+---
+
+## 實盤策略地圖（2026-05 WF 驗證後現況）
+
+> 全部組合都經回測 + Walk-Forward(70/30) 驗證為正期望才保留。回測腳本在上層 `trading-backtest/`。
+> 進場邏輯集中在 `scan_and_process_market`（OR 邏輯，任一觸發即下單）。
+
+| 時框 | 做多 | 做空 |
+|---|---|---|
+| **15m** | C3(+0.133)、雙底+RSI共振(+0.062)、MACD動能(驗證+0.104) | C3(+0.02~0.075)、**雙頂+RSI共振(+0.187)** |
+| **30m** | C3(+0.093) | ❌ 停用（只在2022有效，2025急跌-0.199）|
+| **1H** | 雙底W底(+0.265) | C3(+0.073)、MACD動能(驗證+0.084) |
+
+**已停用（回測負期望/過擬合）**：
+- C3 1H 做多（−0.024）→ 1H 多單改由雙底W底觸發
+- 30m 做空（全期 −0.023，只在 2022 賺）
+- M頭單獨做空（四版全賠）→ 改用「雙頂+RSI共振」才有效
+- 評分層/動態SL/熔斷（未回測，已移除呼叫；函數保留為 dead code）
+
+**各策略定義**：
+- **C3**：Vegas 通道回踩 + QQE rsiMa 穿50 + ADX（原始核心，`is_long`/`is_short`）
+- **雙底/雙頂**：兩個相近 pivot + 量縮 + 頸線突破放量（`indicators.check_double_bottom/top`）
+- **RSI 共振**（限 15m）：雙底/頂 + RSI(14) 穿50 同時成立
+- **MACD 動能**：4H EMA200 斜率定向 + MACD(12,26,9) 交叉 + 快線DIF斜率加速(非收腳)（`indicators.calculate_macd`/`macd_difslope_ok`）
+
+**出場**：固定 R，TP1=1.2R(50%)/TP2=2.5R(50%)，**保本觸發已延後至 1.5R**（15m多空/1H空，WF驗證 EV+68% MDD-9pt）
+
+---
+
+## ⚠️ 風險設定（重要）
+
+`RISK_PCT` 預設 0.10（10%）對小本金太高——回測模擬顯示 10% 風險下實盤 MDD 可達 99%、存活率僅 56%。
+建議降至 **0.02~0.05**：5% 存活率 99%、2% MDD 約 44%。用 Discord `!setslots` 或直接改 `RISK_PCT`。
+（每筆風險 = 錢包餘額 × RISK_PCT，已改用 walletBalance 不含浮動盈虧，避免倉位忽大忽小。）
+
+---
+
+## 模組結構（省 token 用 MODULE_MAP.md）
+
+- `main.py`：主體（設定/通知/下單/策略/主迴圈）
+- `indicators.py`：純計算指標（QQE/ATR/ADX/MACD/雙底頂）
+- `MODULE_MAP.md`：功能→行號索引，修改前先查表跳轉，不需讀全文
 
 ---
 
@@ -179,13 +222,18 @@ git push https://${GITHUB_TOKEN}@github.com/s8902114-art/saikesi-bot-clean.git m
 
 ## 下單邏輯摘要
 
-1. 策略掃描觸發訊號（QQE MOD 雙軌交叉）
-2. ADX 過濾（若 `ADX_ENABLED`）
-3. CVD 背離確認（若 `CVD_ENABLED`）
-4. 冷卻時間檢查（`SIGNAL_COOLDOWN = 1800s`）
-5. `AUTO_TRADE[tf]` 為 True → 自動下單；False → 發 Discord 通知等手動確認
-6. 同時送往 OKX 和 BingX（各自的 `EXCHANGE_ENABLED` 開關）
-7. 熔斷檢查（連虧 `MAX_CONSEC_LOSS` 次 → 暫停 `PAUSE_HOURS` 小時）
+1. 多策略掃描（C3 / 雙底 / RSI共振 / MACD），OR 邏輯任一觸發（見「實盤策略地圖」）
+2. ADX 過濾（C3 用，若 `ADX_ENABLED`）
+3. CVD 背離（若 `CVD_ENABLED`，預設關閉；回測顯示當過濾器效益極小，建議維持關閉）
+4. 冷卻：同幣同時框 `SIGNAL_COOLDOWN=1800s` + 同幣同向跨時框 `DIR_SIGNAL_COOLDOWN=3600s`
+5. `AUTO_TRADE[tf]` True → 自動下單；False → Discord 通知等手動
+6. 同時送 OKX 和 BingX（各自 `EXCHANGE_ENABLED`，全倉用該幣最大槓桿，停損上限 = 風險預算 × `RISK_TOLERANCE_MULT`(2.0)）
+7. 熔斷：連虧 `MAX_CONSEC_LOSS` 次 → 暫停 `PAUSE_HOURS` 小時
+
+## CVD 資料說明
+- `cvd_*_perp_cvd` / `spot_cvd`：2022起齊全（spot 已修正，之前 perp==spot 重複的 bug 已解）
+- `cvd_*_oi`：僅近數月（Binance OI API 限制），三層吸收的 OI 層資料不足
+- 下載腳本：上層 `trading-backtest/download_perp_cvd.py`
 
 ---
 
