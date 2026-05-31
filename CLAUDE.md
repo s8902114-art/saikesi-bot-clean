@@ -195,6 +195,20 @@ print('done')
 " && git add .replit && git commit -m "disable auto-run" && git push
 ```
 
+### 6. 倉位追蹤管理（active_real_trades）— 兩個已修的 critical bug
+`active_real_trades` 是保本/移動止損的追蹤池，`check_trailing_stops_for_real()` 靠它管理已開倉位。
+
+**Bug A：重啟/redeploy 後追蹤丟失（已修 commit 5010669）**
+- 原本是純記憶體 dict，Railway 每次 redeploy 就清空 → 已開倉的保本/移動止損停擺。
+- 解法：持久化到 `active_trades.json`（已加 .gitignore）。開倉後 + 每輪 `check_trailing_stops` 後存檔；啟動時 `load_active_trades()` 讀回。
+- BingX 的 `headers`（含金鑰）不落地，讀回時用全域 `BINGX_API_KEY` 重建。
+- ⚠️ 勿刪 `save_active_trades()` / `load_active_trades()` 呼叫，否則追蹤丟失重現。
+
+**Bug B：OKX 倉位從未被追蹤（已修 commit 1e4dfb7）**
+- 原本只有 BingX 開倉會 `active_real_trades[...]=`，OKX 完全沒有 → OKX 的保本/移動止損從未執行。
+- 解法：`execute_okx_trade_pipeline` 末端、止損掛上(sl_algo_id 存在)後，把 OKX 倉位寫入追蹤池。
+- 驗證方式：OKX 開單後 Discord 應出現「📋 已加入保本/移動止損追蹤池」，TP1 成交時應有「止損移至保本價」通知。
+
 ---
 
 ## 標準推送流程
