@@ -114,6 +114,7 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 RISK_PCT     = 0.10        # 單筆最大風險金額 = 基準 × 10%
 RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
+OKX_MIN_MMR  = 350.0       # OKX 開倉前維持保證金率門檻(%)：預估加新倉後 < 此值就跳過（/setmmr 可調）
 # ── 分段複利下注（壓 MDD；回測：每+50U → 37倍/MDD50% vs 純複利MDD96%）──
 LADDER_BASE_USDT = 10.0    # 初始下注基準（單筆風險 = 此值 × RISK_PCT 起跳）
 LADDER_STEP_USDT = 50.0    # 每多賺此金額，單筆風險才加一級（/setladder 可調）
@@ -846,9 +847,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 # 預估加入新倉後維持保證金率：新倉佔用保證金降低權益緩衝
                 if mmr_now > 0 and total_eq > 0:
                     projected_mmr = mmr_now * max(total_eq - allocated_margin, 0) / total_eq
-                    if projected_mmr < 350:
+                    if projected_mmr < OKX_MIN_MMR:
                         dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：維持保證金率不足"
-                               f"（預估 {projected_mmr:.1f}% < 350%）")
+                               f"（預估 {projected_mmr:.1f}% < {OKX_MIN_MMR:.0f}%）")
                         return
             except Exception as risk_check_err:
                 print(f"[RiskCheck] OKX 維持保證金率檢查失敗: {risk_check_err}")
@@ -2411,7 +2412,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -2542,6 +2543,16 @@ def poll_dc_commands():
                                        f"   越小越接近純複利(高成長高MDD)、越大越接近固定(穩但慢)")
                             else:
                                 dc_log("⚠️ 用法: `!setladder 50`（每多賺50U才把單筆風險加一級）")
+
+                        # ── setmmr：OKX 維持保證金率門檻(%)，預估加新倉後低於此值就跳過 ──
+                        elif cmd == "setmmr":
+                            if len(parts) >= 2 and parts[1].replace(".", "").isdigit():
+                                OKX_MIN_MMR = float(parts[1])
+                                dc_log(f"⚙️ OKX 維持保證金率門檻已更新：`{OKX_MIN_MMR:.0f}%`\n"
+                                       f"   開倉前預估加新倉後維持率 < {OKX_MIN_MMR:.0f}% 就跳過。\n"
+                                       f"   越高越保守(留多餘保證金)、越低越積極(易爆倉風險升)")
+                            else:
+                                dc_log("⚠️ 用法: `!setmmr 350`（OKX 維持保證金率門檻%，低於此值不開新倉）")
 
                         # ── cvd on|off ─────────────────────────────────
                         elif cmd == "cvd":

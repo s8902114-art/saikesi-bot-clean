@@ -153,6 +153,7 @@ MARGIN_MODE = "cross" # 保證金模式（cross / isolated）
 | `!setslots [數字]` | 設定倉位格數 |
 | `!risk [數字]` | 設定每倉風險%（如 `!risk 5`）|
 | `!setladder [U]` | 分段複利級距：每多賺 N U 才把單筆風險加一級（如 `!setladder 50`）|
+| `!setmmr [%]` | OKX 維持保證金率門檻：預估加新倉後 < 此% 就跳過（如 `!setmmr 350`）|
 
 ---
 
