@@ -820,22 +820,11 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 保證金 = 倉位價值 ÷ 槓桿
         allocated_margin = position_value / calculated_leverage
 
-        # ── 單倉保證金上限 = 基準 × RISK_PCT（先夾，名義同步縮小）────────────
+        # ── 單倉保證金上限 = 基準 × RISK_PCT ─────────────────────────────────
         max_margin = base_funds * RISK_PCT
         if allocated_margin > max_margin:
             allocated_margin = max_margin
             position_value   = allocated_margin * calculated_leverage
-
-        # ── 名義倉位上限：強平緩衝防護（核心修 NEAR 380U 被提前強平問題）──────
-        # 根因：止損距離極小時 position_value=風險÷距離% 會爆大（0.26%→384U），
-        #       名義太大 → 強平價落在止損價之前 → 還沒到止損就被強平。
-        # 防護：名義倉位不得超過「可用餘額 × 槓桿 × 0.3」（留足強平緩衝）。
-        #       超過就縮倉（實際風險會 < 預算，安全方向）。
-        notional_cap = available_usdt * calculated_leverage * 0.30
-        if position_value > notional_cap > 0:
-            dc_log(f"⚠️ OKX [{symbol_id}] 止損過近致名義過大 {position_value:.1f}U → 縮至 {notional_cap:.1f}U（防提前強平）")
-            position_value   = notional_cap
-            allocated_margin = position_value / calculated_leverage
 
         # ── 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）──────────
         # 弱訊號（score 30~59）：倉位縮小 50%
@@ -919,68 +908,47 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         exit_action  = "sell" if is_buy else "buy"
         inst_id      = OKX_SWAP.get(symbol_id, symbol_id)
 
-        # ── USDT 單位下單（tgtCcy=quote_ccy）─────────────────────────────────
-        # OKX 支援以報價幣（USDT）指定倉位大小，完全迴避張數轉換問題
-        # position_value = 實際倉位名義價值（USDT）
-        # TP1 / TP2 各拆 50%，同樣用 USDT 金額指定（reduceOnly=True）
-        half_usdt = round(position_value * 0.5, 2)
+        # ── OKX 永續一律用「張數」下單（棄用 tgtCcy，那對 SWAP 不可靠）──────────
+        # 真因：amount=position_value + tgtCcy=quote_ccy 時，OKX 把 16.16 當成「16.16 張」，
+        #       NEAR ctVal=10 → 16.16×價×10 = 380U 名義被提前強平。
+        # 正解：張數 = 名義 ÷ (價 × ctVal)，再用 ccxt amount_to_precision 依該幣精度取整。
+        #       （NEAR 精度0.1 → 0.7張；SKY 精度1 → 整張。自動適配，不寫死 int）
+        mkt    = ex.market(symbol_id)
+        ct_val = float(mkt.get("contractSize", 1.0) or 1.0)
+        contract_notional = current_market_price * ct_val          # 1 張名義價值(USDT)
+        raw_contracts = position_value / contract_notional         # 應下張數(可能小數)
+        try:
+            qty_str = ex.amount_to_precision(symbol_id, raw_contracts)  # 依該幣精度取整
+            total_contracts = float(qty_str)
+        except Exception:
+            total_contracts = raw_contracts
+        # 最小下單量檢查：不足最小張數則拒單（不硬進位放大，守住風險）
+        _min_amt = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0)
+        if total_contracts <= 0 or (_min_amt > 0 and total_contracts < _min_amt):
+            dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：應下 {raw_contracts:.3f} 張 < 最小 {_min_amt} 張"
+                   f"（本金不足以承接此幣最小單位）")
+            return
+        # 風控：實際張數的停損虧損不得超過風險預算 × RISK_TOLERANCE_MULT
+        worst_loss = total_contracts * contract_notional * sl_distance_pct
+        if worst_loss > risk_usdt * RISK_TOLERANCE_MULT:
+            dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：預估停損虧損 {worst_loss:.2f}U "
+                   f"> 風險預算 {risk_usdt:.2f}U × {RISK_TOLERANCE_MULT}，拒絕超額下單")
+            return
 
         execution_report = [
             f"🚀 **賽克斯實盤下單鏈成功發動**",
             f"商品代號: `{symbol_id}` | 交易方向: `{'做多 LONG' if is_buy else '做空 SHORT'}`",
-            f"配置槓桿: `{calculated_leverage}x` | 倉位價值: `{position_value:.2f}` USDT"
-            f" | 保證金: `{allocated_margin:.2f}` USDT | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
+            f"配置槓桿: `{calculated_leverage}x` | 張數: `{total_contracts}`（ctVal={ct_val}）"
+            f" | 倉位價值: `{position_value:.2f}` USDT | 保證金: `{allocated_margin:.2f}` USDT"
+            f" | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
         ]
 
-        # ── 市價開倉：優先 USDT 單位（tgtCcy=quote_ccy），不支援則降級用「張」──
-        # 部分幣種（如 SKY-USDT-SWAP）不支援 tgtCcy=quote_ccy，回傳 sCode=59110
-        fallback_to_contracts = False   # 是否降級用張數下單
-        total_contracts       = 0       # 降級時的總張數
-        ct_val                = 1.0     # 合約面值 ctVal
-        entry_order           = None
-
-        try:
-            entry_order = ex.create_market_order(
-                symbol=symbol_id,
-                side=entry_action,
-                amount=position_value,          # USDT 名義值
-                params={
-                    "posSide":  trade_side,
-                    "tdMode":   MARGIN_MODE,
-                    "tgtCcy":   "quote_ccy",    # 告訴 OKX 用報價幣（USDT）計量
-                }
-            )
-        except Exception as quote_err:
-            if "59110" in str(quote_err):
-                # 不支援 USDT 計量 → 降級用張數下單
-                fallback_to_contracts = True
-                mkt    = ex.market(symbol_id)
-                ct_val = float(mkt.get("contractSize", 1.0) or 1.0)   # 合約面值
-                contract_notional = current_market_price * ct_val     # 1 張名義價值(USDT)
-                # 張數 = 倉位USDT ÷ 1張名義，無條件捨去取整數張
-                total_contracts = int(position_value / contract_notional)
-                # 不足 1 張時進位成 1 張（最小可下單量）
-                if total_contracts < 1:
-                    total_contracts = 1
-                # ★ 風控核心：停損虧損上限 = 風險預算 × RISK_TOLERANCE_MULT（容忍 2 倍）
-                #   超過才拒單；2 倍內可接受（例如 1U 預算允許停損到 2U）
-                worst_loss = total_contracts * contract_notional * sl_distance_pct
-                if worst_loss > risk_usdt * RISK_TOLERANCE_MULT:
-                    dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：預估停損虧損 {worst_loss:.2f}U "
-                           f"> 風險預算 {risk_usdt:.2f}U × {RISK_TOLERANCE_MULT}（上限 {risk_usdt*RISK_TOLERANCE_MULT:.2f}U），拒絕超額下單")
-                    return
-                dc_log(f"ℹ️ [{symbol_id}] 不支援 tgtCcy=quote_ccy（59110），"
-                       f"自動降級用張數下單：{total_contracts} 張（ctVal={ct_val}，預估觸損 {worst_loss:.2f}U）")
-                entry_order = ex.create_market_order(
-                    symbol=symbol_id,
-                    side=entry_action,
-                    amount=total_contracts,     # 張數
-                    params={"posSide": trade_side, "tdMode": MARGIN_MODE}
-                )
-                execution_report.append(f"📐 張數降級下單: `{total_contracts}` 張 (ctVal={ct_val})")
-            else:
-                # 其他錯誤照常往外拋給通用例外處理
-                raise
+        entry_order = ex.create_market_order(
+            symbol=symbol_id,
+            side=entry_action,
+            amount=total_contracts,     # 張數（已依精度取整）
+            params={"posSide": trade_side, "tdMode": MARGIN_MODE}
+        )
 
         # 等待成交均價（市價單可能需要短暫延遲才有 average）
         executed_average_price = entry_order.get("average") or entry_order.get("price")
@@ -1022,89 +990,52 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             )
             return
 
-        if not fallback_to_contracts:
-            # ── USDT 單位 TP 分批（各 50%，不依賴張數）─────────────────────
-            # TP1
+        # ── TP 分批（一律張數，依精度拆半；無法拆半則 TP1 全出）─────────────
+        tp1_qty = 0.0; tp2_qty = 0.0
+        try:
+            tp1_qty = float(ex.amount_to_precision(symbol_id, total_contracts * 0.5))
+        except Exception:
+            tp1_qty = round(total_contracts * 0.5, 4)
+        tp2_qty = round(total_contracts - tp1_qty, 8)
+        _min_amt2 = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0)
+
+        if tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
+            # 可拆半：TP1 / TP2 各一半
             try:
                 tp1_order = ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
-                    amount=half_usdt, price=tp1,
-                    params={
-                        "posSide":    trade_side,
-                        "tdMode":     MARGIN_MODE,
-                        "reduceOnly": True,
-                        "tgtCcy":     "quote_ccy",
-                    }
-                )
+                    amount=tp1_qty, price=tp1,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🌓 TP1 限價單 (50% = {half_usdt:.2f} USDT): `{tp1}` (ordId: {tp1_order_id})")
+                execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1}` (ordId: {tp1_order_id})")
             except Exception as tp1e:
                 execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
-            # TP2
             try:
                 ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
-                    amount=half_usdt, price=tp2,
-                    params={
-                        "posSide":    trade_side,
-                        "tdMode":     MARGIN_MODE,
-                        "reduceOnly": True,
-                        "tgtCcy":     "quote_ccy",
-                    }
-                )
-                execution_report.append(f"🌕 TP2 限價單 (50% = {half_usdt:.2f} USDT): `{tp2}`")
+                    amount=tp2_qty, price=tp2,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2}`")
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
         else:
-            # ── 張數降級 TP 分批 ─────────────────────────────────────────
-            if total_contracts >= 2:
-                tp1_qty = int(total_contracts // 2)
-                tp2_qty = total_contracts - tp1_qty
-                # TP1
-                try:
-                    tp1_order = ex.create_order(
-                        symbol=symbol_id, type="limit", side=exit_action,
-                        amount=tp1_qty, price=tp1,
-                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                    )
-                    tp1_order_id = tp1_order.get("id")
-                    execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1}` (ordId: {tp1_order_id})")
-                except Exception as tp1e:
-                    execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
-                # TP2
-                try:
-                    ex.create_order(
-                        symbol=symbol_id, type="limit", side=exit_action,
-                        amount=tp2_qty, price=tp2,
-                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                    )
-                    execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2}`")
-                except Exception as tp2e:
-                    execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
-            else:
-                # 僅 1 張：TP1 全出，不設 TP2
-                try:
-                    tp1_order = ex.create_order(
-                        symbol=symbol_id, type="limit", side=exit_action,
-                        amount=total_contracts, price=tp1,
-                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                    )
-                    tp1_order_id = tp1_order.get("id")
-                    execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1}` (ordId: {tp1_order_id})")
-                except Exception as tp1e:
-                    execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
-                dc_log(f"⚠️ [{symbol_id}] 倉位1張，TP2略過改全出")
-                execution_report.append("⚠️ 倉位1張，TP2略過改全出")
+            # 太小無法拆半：TP1 全出、不設 TP2
+            try:
+                tp1_order = ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=total_contracts, price=tp1,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                tp1_order_id = tp1_order.get("id")
+                execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1}` (ordId: {tp1_order_id})")
+            except Exception as tp1e:
+                execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
+            execution_report.append("⚠️ 倉位太小無法拆半，TP2略過改全出")
 
         # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
-            # 剩餘量（TP1 出一半後）：USDT 模式存名義半值、張數模式存剩餘張數
-            if fallback_to_contracts:
-                remaining_amt = str(max(total_contracts - max(1, total_contracts // 2), 1)) \
-                                if total_contracts >= 2 else "0"
-            else:
-                remaining_amt = str(round(position_value * 0.5, 2))
+            # 剩餘量（TP1 出一半後留給移動止損的張數）= TP2 那半
+            remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
             okx_tkey = f"okx_{inst_id}_{trade_side}_{int(time.time())}"
             active_real_trades[okx_tkey] = {
                 "exchange":         "okx",
