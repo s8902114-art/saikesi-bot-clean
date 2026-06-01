@@ -868,12 +868,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                    f"（保證金 {allocated_margin:.2f} ×1.05 緩衝）")
             return
 
-        # 已開倉數量 < POSITION_SLOTS
-        positions_raw = ex.fetch_positions()
-        open_positions_count = len([p for p in positions_raw if float(p.get("contracts", 0) or 0) > 0])
-        if open_positions_count >= POSITION_SLOTS:
-            dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
-            return
+        # ── 不限倉數：只要保證金夠 + 風險值內就下（倉數上限已移除）──────────────
+        # 把關交給：可用USDT檢查、維持保證金率(OKX_MIN_MMR)、worst_loss、同向去重。
+        positions_raw = ex.fetch_positions()   # 仍需取得持倉供下方防同向加倉判斷
 
         # ── 防同幣同向重複加倉（避免訊號反覆觸發把單倉越疊越大）──────────────
         # 原本只檢查總倉數，沒擋「同幣同向已有倉」→ 同一幣每隔冷卻期就再加一筆，
