@@ -966,6 +966,17 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         sl_algo_id   = None
         tp1_order_id = None
 
+        # ── 價格精度化（修低價幣如 SHIB 的 str(0.00001)='1e-05' 科學記號被 OKX 拒絕）──
+        # 一律用 ccxt price_to_precision 轉成符合該幣 tick 的字串，不用 Python str()。
+        def _px(p):
+            try:
+                return ex.price_to_precision(symbol_id, p)
+            except Exception:
+                return format(float(p), "f")   # 備援：固定小數，避免科學記號
+        sl_px_str  = _px(stop_loss)
+        tp1_px_str = _px(tp1)
+        tp2_px_str = _px(tp2)
+
         # 止損：OKX algo slTriggerPx 條件單（closeFraction=1 平全倉，無需指定張數）
         sl_side = "sell" if trade_side == "long" else "buy"
         sl_pos  = trade_side
@@ -974,7 +985,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 inst_id=inst_id,
                 side=sl_side,
                 amount="0",                  # closeFraction=1 時 sz 傳 0
-                sl_trigger_px=str(stop_loss),
+                sl_trigger_px=sl_px_str,     # 精度化字串（非 str(float)）
                 pos_side=sl_pos
             )
             sl_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
@@ -1005,18 +1016,18 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             try:
                 tp1_order = ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
-                    amount=tp1_qty, price=tp1,
+                    amount=tp1_qty, price=tp1_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1}` (ordId: {tp1_order_id})")
+                execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1_px_str}` (ordId: {tp1_order_id})")
             except Exception as tp1e:
                 execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
             try:
                 ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
-                    amount=tp2_qty, price=tp2,
+                    amount=tp2_qty, price=tp2_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
-                execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2}`")
+                execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2_px_str}`")
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
         else:
@@ -1024,10 +1035,10 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             try:
                 tp1_order = ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
-                    amount=total_contracts, price=tp1,
+                    amount=total_contracts, price=tp1_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1}` (ordId: {tp1_order_id})")
+                execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1_px_str}` (ordId: {tp1_order_id})")
             except Exception as tp1e:
                 execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
             execution_report.append("⚠️ 倉位太小無法拆半，TP2略過改全出")
@@ -1354,12 +1365,14 @@ def check_trailing_stops_for_real():
                     entry    = float(trade["entry_price"])
                     fee_buf  = entry * 0.001   # taker 雙邊 0.1%
                     be_price = entry + fee_buf if direction == "long" else entry - fee_buf
-                    be_price = round(be_price, 5)
+                    # 用該幣價格精度（不可 round(,5)，低價幣如 SHIB 會被截成 0）
+                    try: be_px = ex.price_to_precision(symbol, be_price)
+                    except Exception: be_px = format(be_price, "f")
                     exit_side = "sell" if direction == "long" else "buy"
                     sl_result = _place_okx_algo_sl(
                         inst_id=inst_id, side=exit_side,
                         amount=trade["remaining_amount"],
-                        sl_trigger_px=str(be_price),
+                        sl_trigger_px=be_px,
                         pos_side=direction
                     )
                     new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
@@ -1391,10 +1404,12 @@ def check_trailing_stops_for_real():
                     if float_pnl >= breakeven_trigger and trade["current_sl"] != entry:
                         _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                         exit_side = "sell" if direction == "long" else "buy"
+                        try: _entry_px = ex.price_to_precision(symbol, entry)
+                        except Exception: _entry_px = format(entry, "f")
                         sl_result = _place_okx_algo_sl(
                             inst_id=inst_id, side=exit_side,
                             amount=trade["remaining_amount"],
-                            sl_trigger_px=str(round(entry, 5)),
+                            sl_trigger_px=_entry_px,
                             pos_side=direction
                         )
                         new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
@@ -1422,21 +1437,23 @@ def check_trailing_stops_for_real():
                 if direction == "long":
                     # 當根創近20根新高 → 止損移至近20根最低點
                     if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
-                        candidate = round(float(lows[-20:].min()), 5)
+                        candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
                         new_sl = max(trade["current_sl"], candidate)
                 else:
                     # 當根創近20根新低 → 止損移至近20根最高點
                     if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
-                        candidate = round(float(highs[-20:].max()), 5)
+                        candidate = float(highs[-20:].max())
                         new_sl = min(trade["current_sl"], candidate)
 
                 if new_sl != trade["current_sl"]:
                     _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                     exit_side = "sell" if direction == "long" else "buy"
+                    try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
+                    except Exception: _new_sl_px = format(new_sl, "f")
                     sl_result = _place_okx_algo_sl(
                         inst_id=inst_id, side=exit_side,
                         amount=trade["remaining_amount"],
-                        sl_trigger_px=str(new_sl),
+                        sl_trigger_px=_new_sl_px,
                         pos_side=direction
                     )
                     new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
@@ -1482,7 +1499,7 @@ def check_trailing_stops_for_real():
                 # 新止損掛在保本價（含手續費）
                 new_sl_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                     "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                    "type": "STOP_MARKET", "stopPrice": str(round(be_price, 5)),
+                    "type": "STOP_MARKET", "stopPrice": format(be_price, "f"),
                     "quantity": str(remaining), "workingType": "MARK_PRICE"
                 }, headers)
                 new_sl_data = new_sl_r.json()
