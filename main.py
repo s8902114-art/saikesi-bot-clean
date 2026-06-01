@@ -782,14 +782,14 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 break
         # 備援：抓不到 cashBal 時退回 free（不含 uPnL），最後才用 total
         wallet_now = wallet_usdt if wallet_usdt > 0 else (available_usdt if available_usdt > 0 else total_usdt)
-        # ── 分段複利下注（壓低 MDD）─────────────────────────────────────────
-        # 不用「即時餘額×RISK_PCT」(那是純複利, 回測MDD 96%)。
-        # 改用「分段級距」：每多賺 LADDER_STEP_USDT, 單筆風險才加一級。
-        # 回測：每+50U → 10U起37倍/MDD 50%（純複利MDD 96%, 純固定MDD 29%）。
-        # base_unit = 初始基準的單筆風險；level = 已成長幾個級距。
-        base_unit = LADDER_BASE_USDT * RISK_PCT
+        # ── 分段複利下注 + 小資金自動縮（壓低 MDD，且基準不超過實際餘額）──────
+        # 階梯基準：每多賺 LADDER_STEP_USDT 升一級（回測：每+50U → 37倍/MDD50%）。
+        # 但若實際餘額 < 階梯基準（如帳戶5U卻設基準10U），改用實際餘額當基準，
+        # 讓每單風險貼近實際資金（5U×10%=0.5U），避免小帳戶撐不起、保證金卡滿。
         level = max(0, int((wallet_now - LADDER_BASE_USDT) // LADDER_STEP_USDT))
-        risk_usdt = base_unit * (1 + level)        # 分段複利：每級 +base_unit
+        ladder_base = LADDER_BASE_USDT * (1 + level)   # 階梯基準
+        eff_base = min(ladder_base, wallet_now)        # 取較小：小資金用實際餘額
+        risk_usdt = eff_base * RISK_PCT
         base_funds = wallet_now                     # 錢包餘額（顯示/參考用）
 
         ticker_info = ex.fetch_ticker(symbol_id)
@@ -1114,10 +1114,11 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 餘額讀取異常（返回值: {bal_resp}），跳過下單")
             return
 
-        # 分段複利下注（與 OKX 一致；壓 MDD）：每多賺 LADDER_STEP_USDT 才加一級
-        _base_unit = LADDER_BASE_USDT * RISK_PCT
+        # 分段複利下注 + 小資金自動縮（與 OKX 一致）：基準不超過實際餘額
         _level = max(0, int((wallet_usdt - LADDER_BASE_USDT) // LADDER_STEP_USDT))
-        risk_usdt = _base_unit * (1 + _level) * position_scale
+        _ladder_base = LADDER_BASE_USDT * (1 + _level)
+        _eff_base = min(_ladder_base, wallet_usdt)     # 小資金用實際餘額
+        risk_usdt = _eff_base * RISK_PCT * position_scale
         sl_dist_pct = abs(entry_price - stop_loss) / entry_price
         if sl_dist_pct <= 0.0001:
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
