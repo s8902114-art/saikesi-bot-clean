@@ -820,11 +820,22 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 保證金 = 倉位價值 ÷ 槓桿
         allocated_margin = position_value / calculated_leverage
 
-        # ── Fix 3：單倉保證金上限 = 總資產 × RISK_PCT ────────────────────────
-        max_margin = base_funds * RISK_PCT   # e.g. 1000 USDT × 10% = 100 USDT
+        # ── 單倉保證金上限 = 基準 × RISK_PCT（先夾，名義同步縮小）────────────
+        max_margin = base_funds * RISK_PCT
         if allocated_margin > max_margin:
             allocated_margin = max_margin
             position_value   = allocated_margin * calculated_leverage
+
+        # ── 名義倉位上限：強平緩衝防護（核心修 NEAR 380U 被提前強平問題）──────
+        # 根因：止損距離極小時 position_value=風險÷距離% 會爆大（0.26%→384U），
+        #       名義太大 → 強平價落在止損價之前 → 還沒到止損就被強平。
+        # 防護：名義倉位不得超過「可用餘額 × 槓桿 × 0.3」（留足強平緩衝）。
+        #       超過就縮倉（實際風險會 < 預算，安全方向）。
+        notional_cap = available_usdt * calculated_leverage * 0.30
+        if position_value > notional_cap > 0:
+            dc_log(f"⚠️ OKX [{symbol_id}] 止損過近致名義過大 {position_value:.1f}U → 縮至 {notional_cap:.1f}U（防提前強平）")
+            position_value   = notional_cap
+            allocated_margin = position_value / calculated_leverage
 
         # ── 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）──────────
         # 弱訊號（score 30~59）：倉位縮小 50%
