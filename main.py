@@ -789,7 +789,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         base_unit = LADDER_BASE_USDT * RISK_PCT
         level = max(0, int((wallet_now - LADDER_BASE_USDT) // LADDER_STEP_USDT))
         risk_usdt = base_unit * (1 + level)        # 分段複利：每級 +base_unit
-        base_funds = wallet_now                     # 保留供後續保證金上限等使用
+        base_funds = wallet_now                     # 錢包餘額（顯示/參考用）
 
         ticker_info = ex.fetch_ticker(symbol_id)
         current_market_price = float(ticker_info.get("last", entry_price))
@@ -820,11 +820,11 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 保證金 = 倉位價值 ÷ 槓桿
         allocated_margin = position_value / calculated_leverage
 
-        # ── 單倉保證金上限 = 基準 × RISK_PCT ─────────────────────────────────
-        max_margin = base_funds * RISK_PCT
-        if allocated_margin > max_margin:
-            allocated_margin = max_margin
-            position_value   = allocated_margin * calculated_leverage
+        # ── 鐵律：每單觸止損 = risk_usdt，不論動用多少保證金 ────────────────────
+        # 已移除原本的「保證金上限(max_margin = base×RISK_PCT)」——它會在止損近時
+        # 把倉位縮小，導致觸損虧損 < risk_usdt，破壞「每單精準虧 risk_usdt」鐵律。
+        # 倉位一律 = risk_usdt ÷ 止損距離%，保證金該多少就多少（不夾）。
+        # 保證金不足由後面的「可用USDT檢查」乾淨跳過，不在此處縮倉。
 
         # ── 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）──────────
         # 弱訊號（score 30~59）：倉位縮小 50%
@@ -1155,11 +1155,9 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             leverage = max(1, min(int(50.0 / (sl_dist_pct * 100.0)), MAX_LEVERAGE))
 
         # 保證金 = 倉位價值 ÷ 槓桿（全倉用最大槓桿後此值即實際新倉保證金）
+        # 鐵律：倉位 = risk_usdt ÷ 止損距離%，不夾保證金上限（與 OKX 一致），
+        # 確保每單觸止損精準 = risk_usdt。保證金不足由下方「可用 < margin」檢查跳過。
         margin = position_value / leverage
-        max_margin = wallet_usdt * RISK_PCT   # 保證金上限與風險基準一致（錢包餘額）
-        if margin > max_margin:
-            margin = max_margin
-            position_value = margin * leverage
 
         if avail_usdt < margin:
             dc_log(f"⚠️ BingX 保證金不足：可用 {avail_usdt:.2f}，需要 {margin:.2f}")
