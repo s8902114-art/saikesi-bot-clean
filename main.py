@@ -874,6 +874,16 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             dc_log(f"⚠️ 已達最大倉位數 ({open_positions_count}/{POSITION_SLOTS})，跳過下單")
             return
 
+        # ── 防同幣同向重複加倉（避免訊號反覆觸發把單倉越疊越大）──────────────
+        # 原本只檢查總倉數，沒擋「同幣同向已有倉」→ 同一幣每隔冷卻期就再加一筆，
+        # 名義/保證金累積成大倉，且止損仍按單筆算 → 實際觸損遠超預算。
+        for _p in positions_raw:
+            if (_p.get("symbol") == symbol_id
+                    and _p.get("side") == trade_side
+                    and abs(float(_p.get("contracts") or 0)) > 0):
+                dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：已有 {trade_side} 倉，不重複加倉")
+                return
+
         # 設槓桿：OKX 需帶 mgnMode；全倉(cross)不可帶 posSide，逐倉(isolated)才需要。
         # 若沒設成功，OKX 會用預設低槓桿算保證金 → position_value 大時爆 51008。
         _lev_ok = False
@@ -1169,6 +1179,18 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         if sl_dist_pct <= 0.0001:
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
             return
+
+        # ── 防同幣同向重複加倉（與 OKX 一致）─────────────────────────────────
+        _ps = "LONG" if trade_side == "long" else "SHORT"
+        try:
+            pos_q = _bingx_request("GET", "/openApi/swap/v2/user/positions",
+                                   {"symbol": bingx_symbol}, headers).json()
+            for _pp in (pos_q.get("data") or []):
+                if _pp.get("positionSide") == _ps and abs(float(_pp.get("positionAmt") or 0)) > 0:
+                    dc_log(f"⚠️ BingX 跳過 [{bingx_symbol}]：已有 {trade_side} 倉，不重複加倉")
+                    return
+        except Exception as _pos_err:
+            print(f"[BingX] 查持倉失敗（不阻擋下單）: {_pos_err}")
 
         position_value = risk_usdt / sl_dist_pct
 
