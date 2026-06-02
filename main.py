@@ -775,7 +775,8 @@ def _cancel_okx_algo_order(inst_id: str, algo_id: str) -> bool:
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
                               tf_id: str = "15m", position_scale: float = 1.0,
-                              pyramid_eligible: bool = False) -> None:
+                              pyramid_eligible: bool = False,
+                              is_box_short: bool = False) -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1106,6 +1107,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "init_contracts":   round(total_contracts / max(position_scale, 1e-9), 8),
                 "pyramid_added":    False,             # 是否已 +1R 加碼過
                 "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
+                "strategy":         "box_short" if is_box_short else "",
             }
             save_active_trades()   # 持久化
             execution_report.append("📋 已納入保本追蹤")
@@ -1488,50 +1490,87 @@ def check_trailing_stops_for_real():
                         print(f"[Trailing] {msg}")
 
             else:
-                # TP1 已成交，波浪偵測：當根創近20根新高/低 → 止損移至20根低點/高點
-                tf_wave = trade.get("tf_id", "15m")
-                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
-                if wave_df.empty or len(wave_df) < 20:
-                    continue
-                highs = wave_df["high"].values
-                lows  = wave_df["low"].values
-                cur_high  = highs[-1]
-                cur_low   = lows[-1]
-                prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
-                prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
-
-                new_sl = trade["current_sl"]
-                if direction == "long":
-                    # 當根創近20根新高 → 止損移至近20根最低點
-                    if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
-                        candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
-                        new_sl = max(trade["current_sl"], candidate)
+                # TP1 已成交
+                if trade.get("strategy") == "box_short":
+                    # 箱突破空：麥門切線追蹤出場（pv3，連下降擺動高點成趨勢線，收盤突破→市價平剩餘）
+                    tf_wave = trade.get("tf_id", "15m")
+                    wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=35)
+                    if not wave_df.empty and len(wave_df) >= 10:
+                        hi_arr = wave_df["high"].values
+                        cl_arr = wave_df["close"].values
+                        n_w = len(hi_arr)
+                        PV = 3
+                        swings = []
+                        for j in range(PV, n_w - PV):
+                            if hi_arr[j] == hi_arr[max(0, j - PV):j + PV + 1].max():
+                                if not swings or hi_arr[j] < swings[-1][1]:
+                                    swings.append((j, hi_arr[j]))
+                        if len(swings) >= 2:
+                            (a, pa), (b, pb) = swings[-2], swings[-1]
+                            if b > a:
+                                f = n_w - 1
+                                proj = pb + (pb - pa) / (b - a) * (f - b)
+                                if cl_arr[-1] > proj:
+                                    rem = float(trade.get("remaining_amount", 0) or 0)
+                                    if rem > 0:
+                                        try:
+                                            ex.create_market_order(
+                                                symbol=symbol, side="buy", amount=rem,
+                                                params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True}
+                                            )
+                                            _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                                            msg = f"🔺 {name} 箱突破空 麥門切線突破，市價平剩餘倉位"
+                                            dc_log(msg); tg_log(msg)
+                                            print(f"[MaiLine] {name} 切線突破 proj={proj:.4f} close={cl_arr[-1]:.4f}")
+                                            active_real_trades.pop(trade_key, None)
+                                            save_active_trades()
+                                        except Exception as me:
+                                            print(f"[MaiLine] {name} 市價平倉失敗: {me}")
                 else:
-                    # 當根創近20根新低 → 止損移至近20根最高點
-                    if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
-                        candidate = float(highs[-20:].max())
-                        new_sl = min(trade["current_sl"], candidate)
+                    # TP1 已成交，波浪偵測：當根創近20根新高/低 → 止損移至20根低點/高點
+                    tf_wave = trade.get("tf_id", "15m")
+                    wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
+                    if wave_df.empty or len(wave_df) < 20:
+                        continue
+                    highs = wave_df["high"].values
+                    lows  = wave_df["low"].values
+                    cur_high  = highs[-1]
+                    cur_low   = lows[-1]
+                    prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
+                    prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
 
-                if new_sl != trade["current_sl"]:
-                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
-                    exit_side = "sell" if direction == "long" else "buy"
-                    try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
-                    except Exception: _new_sl_px = format(new_sl, "f")
-                    sl_result = _place_okx_algo_sl(
-                        inst_id=inst_id, side=exit_side,
-                        amount=trade["remaining_amount"],
-                        sl_trigger_px=_new_sl_px,
-                        pos_side=direction
-                    )
-                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
-                    if new_algo_id:
-                        trade["sl_algo_id"] = new_algo_id
-                        trade["current_sl"] = new_sl
+                    new_sl = trade["current_sl"]
+                    if direction == "long":
+                        # 當根創近20根新高 → 止損移至近20根最低點
+                        if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
+                            candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
+                            new_sl = max(trade["current_sl"], candidate)
+                    else:
+                        # 當根創近20根新低 → 止損移至近20根最高點
+                        if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
+                            candidate = float(highs[-20:].max())
+                            new_sl = min(trade["current_sl"], candidate)
 
-                    msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
-                    dc_log(msg)
-                    tg_log(msg)
-                    print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
+                    if new_sl != trade["current_sl"]:
+                        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                        exit_side = "sell" if direction == "long" else "buy"
+                        try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
+                        except Exception: _new_sl_px = format(new_sl, "f")
+                        sl_result = _place_okx_algo_sl(
+                            inst_id=inst_id, side=exit_side,
+                            amount=trade["remaining_amount"],
+                            sl_trigger_px=_new_sl_px,
+                            pos_side=direction
+                        )
+                        new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                        if new_algo_id:
+                            trade["sl_algo_id"] = new_algo_id
+                            trade["current_sl"] = new_sl
+
+                        msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
+                        dc_log(msg)
+                        tg_log(msg)
+                        print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
@@ -2628,6 +2667,7 @@ class SykesTradingBot:
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id, position_scale=dh_boost,
                     pyramid_eligible=_pyr_elig,
+                    is_box_short=is_box_short,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
