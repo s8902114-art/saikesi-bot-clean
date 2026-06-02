@@ -1072,6 +1072,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "pos_side":         trade_side,
                 "risk_dist":        abs(executed_average_price - stop_loss),
                 "tf_id":            tf_id,
+                "init_contracts":   total_contracts,   # 原始張數（供金字塔加碼用）
+                "pyramid_added":    False,             # 是否已 +1R 加碼過
             }
             save_active_trades()   # 持久化
             execution_report.append("📋 已加入保本/移動止損追蹤池")
@@ -1362,6 +1364,20 @@ def check_trailing_stops_for_real():
                 print(f"[Trailing] {name} 倉位已關閉，移除追蹤")
                 active_real_trades.pop(trade_key, None)
                 continue
+
+            # ── 金字塔加碼：多單達 +1R 且未加過 → 加一單位(走強平守門員,停損上移原進場價)──
+            if (PYRAMID_ENABLED and trade.get("exchange") == "okx" and direction == "long"
+                    and not trade.get("pyramid_added", False)
+                    and not trade.get("tp1_hit", False)):
+                try:
+                    entry_p = float(trade["entry_price"]); risk_d = float(trade.get("risk_dist", 0) or 0)
+                    if risk_d > 0:
+                        cur_p = float(ex.fetch_ticker(symbol).get("last") or 0)
+                        if cur_p >= entry_p + risk_d:   # 達 +1R
+                            _okx_pyramid_add(ex, trade)
+                            save_active_trades()
+                except Exception as _pe:
+                    print(f"[Pyramid] {name} 加碼判斷失敗: {_pe}")
 
             if not trade["tp1_hit"]:
                 # 查詢 TP1 限價單狀態
@@ -1671,6 +1687,64 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
 # ── 數據獵手 CVD 過濾（WF 驗證版，與上面三層吸收不同）───────────────────────────
 DH_CVD_ENABLED = True   # 開關：15m 多 CVD吸收加碼（C方案）
 DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5最佳：成長↑且MDD略降）
+
+# ── 金字塔加碼（+1R 加單，僅多單）──────────────────────────────────────────────
+# 回測(WF)金字塔翻倍成長但MDD大增;OKX同方向會合併成一個部位,故實作=「+1R加大部位
+# + 停損上移到原進場價」,行為與回測(兩獨立單)不完全相同。安全設計:
+#   1) 加碼前走強平守門員(合併部位若強平在停損前→不加)
+#   2) 加碼後停損=原進場價→觸損時原單保本+加碼單虧1R,合併最大虧≈1單位(有界,不爆倉)
+#   3) 每筆只加一次  4) 預設關閉,review+觀察後再開
+PYRAMID_ENABLED = False   # 預設關;確認無誤後改 True 或加 Discord 指令
+PYRAMID_LIQ_BUF = 0.85    # 強平守門員緩衝(同下單管線)
+def _okx_pyramid_add(ex, trade) -> bool:
+    """對已 +1R 的多單加碼一個單位(=原始張數),停損上移到原進場價。
+    走強平守門員;不安全則跳過。回傳是否成功加碼。"""
+    try:
+        symbol = trade["symbol"]; inst_id = trade["inst_id"]
+        entry  = float(trade["entry_price"]); init_ct = float(trade.get("init_contracts") or 0)
+        if init_ct <= 0: return False
+        tk = ex.fetch_ticker(symbol); cur = float(tk.get("last") or 0)
+        if cur <= 0: return False
+        mkt = ex.market(symbol); ct_val = float(mkt.get("contractSize", 1.0) or 1.0)
+        # 合併部位名義 ≈ (原+加) 張 × 價 × ctVal
+        combined_val = (init_ct * 2.0) * cur * ct_val
+        try:
+            bal = ex.fetch_balance(); avail = float(bal.get("USDT", {}).get("free", 0.0))
+        except Exception:
+            avail = 0.0
+        # 加碼後合併保證金估算(用該幣槓桿)
+        try:
+            lev = int(float(((mkt.get("limits", {}) or {}).get("leverage", {}) or {}).get("max") or MAX_LEVERAGE))
+        except Exception:
+            lev = MAX_LEVERAGE
+        comb_margin = combined_val / max(1, min(lev, MAX_LEVERAGE))
+        # 強平守門員:停損距=(cur-entry)/cur;估強平距=(avail+合併保證金)/合併名義
+        sl_dist_pct = abs(cur - entry) / cur if cur else 1.0
+        est_liq = (avail + comb_margin) / combined_val if combined_val else 0.0
+        if sl_dist_pct >= est_liq * PYRAMID_LIQ_BUF:
+            dc_log(f"⚠️ 金字塔跳過 [{symbol}]：加碼後強平價會在停損(原進場{entry})前，為防爆倉不加")
+            return False
+        # 下加碼市價單(增加部位)
+        add_action = "buy" if trade["direction"] == "long" else "sell"
+        ex.create_market_order(symbol=symbol, side=add_action, amount=init_ct,
+                               params={"posSide": trade["direction"], "tdMode": MARGIN_MODE})
+        # 停損上移到原進場價(closeFraction=1 平合併全倉)
+        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+        try: sl_px = ex.price_to_precision(symbol, entry)
+        except Exception: sl_px = format(entry, "f")
+        sl_side = "sell" if trade["direction"] == "long" else "buy"
+        res = _place_okx_algo_sl(inst_id=inst_id, side=sl_side, amount="0",
+                                 sl_trigger_px=sl_px, pos_side=trade["direction"])
+        new_id = (res.get("data") or [{}])[0].get("algoId")
+        if new_id:
+            trade["sl_algo_id"] = new_id; trade["current_sl"] = entry
+        trade["pyramid_added"] = True
+        dc_log(f"📈 金字塔加碼成功 [{symbol}]：+{init_ct}張(達+1R)，停損上移至原進場價 {entry}")
+        return True
+    except Exception as e:
+        dc_log(f"❌ 金字塔加碼失敗 [{trade.get('symbol')}]：{e}")
+        trade["pyramid_added"] = True   # 失敗也標記，避免反覆重試
+        return False
 def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -> Tuple[bool, str]:
     """
     數據獵手合約 CVD 過濾（只用合約 perp CVD，與三層吸收不同）：
