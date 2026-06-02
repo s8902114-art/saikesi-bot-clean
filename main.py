@@ -1385,9 +1385,15 @@ def check_trailing_stops_for_real():
                     print(f"[Pyramid] {name} 加碼判斷失敗: {_pe}")
 
             if not trade["tp1_hit"]:
-                # 查詢 TP1 限價單狀態
-                tp1_order = ex.fetch_order(trade["tp1_order_id"], symbol)
-                if tp1_order.get("status") in ("closed", "filled"):
+                # 安全查 TP1 狀態：無單號或查詢失敗 → 視為未成交，改走浮盈保本
+                # （修：原本 fetch_order(None) 會丟例外→整筆被跳過→保本永遠不動）
+                tp1_status = None
+                if trade.get("tp1_order_id"):
+                    try:
+                        tp1_status = (ex.fetch_order(trade["tp1_order_id"], symbol) or {}).get("status")
+                    except Exception as _tpe:
+                        print(f"[Trailing] {name} 查TP1失敗(改走浮盈保本): {_tpe}")
+                if tp1_status in ("closed", "filled"):
                     # TP1 成交 → 1. 取消原止損
                     _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
 
