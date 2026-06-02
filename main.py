@@ -827,9 +827,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 倉位一律 = risk_usdt ÷ 止損距離%，保證金該多少就多少（不夾）。
         # 保證金不足由後面的「可用USDT檢查」乾淨跳過，不在此處縮倉。
 
-        # ── 訊號分級倉位縮放（position_scale 由 dynamic_sl_tp 傳入）──────────
-        # 弱訊號（score 30~59）：倉位縮小 50%
-        if position_scale < 1.0:
+        # ── 倉位縮放（position_scale）：<1.0 縮倉(弱訊號) / >1.0 加碼(CVD吸收C方案)──
+        if position_scale != 1.0:
             position_value   = round(position_value   * position_scale, 2)
             allocated_margin = round(allocated_margin * position_scale, 2)
 
@@ -866,6 +865,19 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         if avail_now < need_margin:
             dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：可用USDT {avail_now:.2f} 不足，需要 {need_margin:.2f}"
                    f"（保證金 {allocated_margin:.2f} ×1.05 緩衝）")
+            return
+
+        # ── ★強平保護：強平價若落在停損之前，這筆不下（保住高槓桿、只擋自殺單）──────
+        # 全倉強平≈逆向虧損把可動用權益吃光。可承受逆向幅度(%) ≈
+        #   (可用USDT + 本倉保證金) ÷ 倉位價值。
+        # 若 停損距離% ≥ 估算強平距離% × 0.85（留緩衝）→ 價格會在碰停損前先強平，
+        # 全倉模式下會連帶清掉帳戶其他倉(含手動倉) → 直接跳過不下。
+        # 高槓桿照舊；只有「停損太遠相對於當前權益緩衝」的危險單會被擋。
+        est_liq_dist = (avail_now + allocated_margin) / position_value if position_value > 0 else 0.0
+        if sl_distance_pct >= est_liq_dist * 0.85:
+            dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：強平價會在停損前觸發，為保護全倉帳戶不下單"
+                   f"（停損距 {sl_distance_pct*100:.2f}% ≥ 估強平距 {est_liq_dist*100:.2f}%×0.85；"
+                   f"可用 {avail_now:.2f}U／倉位 {position_value:.2f}U）")
             return
 
         # ── 不限倉數：只要保證金夠 + 風險值內就下（倉數上限已移除）──────────────
@@ -1655,6 +1667,38 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
     else:
         return True, "現貨CVD↓+合約CVD↓+OI↑（三層吸收確認）"
 
+
+# ── 數據獵手 CVD 過濾（WF 驗證版，與上面三層吸收不同）───────────────────────────
+DH_CVD_ENABLED = True   # 開關：15m 多 CVD吸收加碼（C方案）
+DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5最佳：成長↑且MDD略降）
+def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -> Tuple[bool, str]:
+    """
+    數據獵手合約 CVD 過濾（只用合約 perp CVD，與三層吸收不同）：
+      15m 多：CVD[-1] < CVD[-4]（近3根淨賣壓，C3已確認反彈=被動買方吸收）
+              WF 驗證 EV +0.073→+0.187（backtest_15m_sop.py）
+      1H 空：CVD[-1] < max(CVD[-4:-1])（頂背離=主動買盤力竭），疊在階梯壓力上
+              WF 驗證 1H空 +0.208→+0.287（_short_1h_dh.py）
+    其他時框/方向不過濾。資料不足時拒絕（保守）。
+    """
+    if not ((tf_id == "15m" and direction == "long") or (tf_id == "1H" and direction == "short")):
+        return True, "非DH適用時框/方向"
+    cona_perp = CONA_PERP.get(symbol_item)
+    if not cona_perp:
+        return True, "無Coinalyze合約數據，略過DH-CVD"
+    end_ts   = int(time.time() * 1000)
+    start_ts = end_ts - (BAR_SECONDS[tf_id] * 30 * 1000)   # 近~30根
+    cvd = calculate_cumulative_volume_delta(cona_perp, okx_bar_fmt, start_ts, end_ts)
+    if len(cvd) < 4:
+        return False, "DH-CVD數據不足"
+    if tf_id == "15m":   # long 吸收
+        ok = bool(cvd.iloc[-1] < cvd.iloc[-4])
+        return (ok, "合約CVD吸收(近3根↓)確認" if ok else "合約CVD未吸收(非DH多)")
+    else:                # 1H short 頂背離
+        prior_max = max(cvd.iloc[-2], cvd.iloc[-3], cvd.iloc[-4])
+        ok = bool(cvd.iloc[-1] < prior_max)
+        return (ok, "合約CVD頂背離確認" if ok else "合約CVD無頂背離(非DH空)")
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
 # 輸入：各指標布林值與數值
@@ -2081,6 +2125,19 @@ class SykesTradingBot:
         is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
                     short_adx_ok and short_fund_ok)
 
+        # ── 數據獵手 CVD 加碼（C方案）：15m 多單 CVD吸收確認 → 下注 ×DH_BOOST_MULT ──
+        # 不過濾(保留全部15m多的頻率=複利引擎)，只把資金往高品質的CVD確認單傾斜。
+        # 回測(全策略×階梯下注)：C×1.5 成長>不過濾基準、MDD還略低，優於硬性過濾(A)。
+        # dh_boost 一律先設1.0(每個tf都會經過此行)，只有15m多且CVD確認才放大。
+        dh_boost = 1.0
+        if DH_CVD_ENABLED and is_long and tf_id == "15m":
+            try:
+                _dh_ok, _dh_r = _dh_cvd_ok(symbol_item, okx_bar_fmt, "15m", "long")
+                if _dh_ok:
+                    dh_boost = DH_BOOST_MULT   # CVD吸收確認 → 加碼下注
+            except Exception as _dh_err:
+                print(f"[DH-CVD] {symbol_item} 15m多加碼判斷失敗: {_dh_err}")
+
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
         # C3 空訊號成立後，要求進場價在某條階梯 Fibo 線 ±0.5×ATR 內才放行。
@@ -2091,6 +2148,8 @@ class SykesTradingBot:
                     is_short = False   # 不靠壓力位 → 取消這筆空單
             except Exception as _lad_err:
                 print(f"[Ladder] {symbol_item} 階梯過濾失敗: {_lad_err}")
+            # 註：曾試「1H空再加CVD頂背離」，但全期指標顯示 EV 不變(+0.141)、累積R反降
+            # (17.6→14.7R)，WF的+0.287是n=40小樣本假象 → 不加，階梯壓力本身才是edge。
 
         # ── DOGE/15m 詳細 debug log ─────────────────────────────
         if _dbg:
@@ -2310,13 +2369,13 @@ class SykesTradingBot:
                 execute_okx_trade_pipeline(
                     okx_swap_symbol, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                    p["exit_mode"], tf_id,
+                    p["exit_mode"], tf_id, position_scale=dh_boost,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
                     symbol_item, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                    p["exit_mode"], tf_id,
+                    p["exit_mode"], tf_id, position_scale=dh_boost,
                 )
         else:
             pos = PaperPosition()
