@@ -2877,6 +2877,65 @@ def build_dynamic_symbols() -> bool:
     dc_log(msg)
     return True
 
+def _okx_fetch_algo_sl(inst_id: str):
+    """讀該 instId 第一個 conditional 止損 algo 單，回傳 (algoId, slTriggerPx)；無則 (None,None)。"""
+    now=datetime.now(timezone.utc); ts=now.strftime("%Y-%m-%dT%H:%M:%S.")+f"{now.microsecond//1000:03d}Z"
+    path=f"/api/v5/trade/orders-algo-pending?ordType=conditional&instId={inst_id}"
+    sig=_okx_generate_signature(ts,"GET",path,"")
+    headers={"OK-ACCESS-KEY":OKX_API_KEY,"OK-ACCESS-SIGN":sig,"OK-ACCESS-TIMESTAMP":ts,
+             "OK-ACCESS-PASSPHRASE":OKX_PASSPHRASE,"Content-Type":"application/json"}
+    if OKX_DEMO: headers["x-simulated-trading"]="1"
+    try:
+        r=requests.get(f"{OKX_BASE}{path}",headers=headers,timeout=10).json()
+        for d in (r.get("data") or []):
+            t=d.get("slTriggerPx")
+            if t and float(t)>0: return d.get("algoId"), float(t)
+    except Exception as e:
+        print(f"[Adopt] 讀algo失敗 {inst_id}: {e}")
+    return None,None
+
+
+def adopt_untracked_okx_positions():
+    """啟動時把未追蹤的 OKX 倉位納入保本追蹤：讀既有止損推算R→達1R自動移保本。
+    讀不到止損則只發通知、不亂下單(避免重複止損/亂猜)。採用倉位不做金字塔。"""
+    if not _LIVE_MODE: return
+    try:
+        ex=_initialize_ccxt_client(); ex.load_markets(); positions=ex.fetch_positions()
+    except Exception as e:
+        print(f"[Adopt] 取持倉失敗: {e}"); return
+    tracked={(t.get("symbol"),t.get("direction")) for t in active_real_trades.values()}
+    adopted=0
+    for p in positions:
+        try:
+            ct=abs(float(p.get("contracts") or 0))
+            if ct<=0: continue
+            sym=p.get("symbol"); side=p.get("side")
+            if not sym or side not in ("long","short"): continue
+            if (sym,side) in tracked: continue
+            entry=float(p.get("entryPrice") or 0) or float((p.get("info") or {}).get("avgPx") or 0)
+            if entry<=0: continue
+            inst_id=(p.get("info") or {}).get("instId") or OKX_SWAP.get(sym, sym)
+            sl_id, sl_trig=_okx_fetch_algo_sl(inst_id)
+            if not sl_trig:
+                dc_log(f"⚠️ 發現未追蹤倉位 {sym} {side}(讀不到止損)→ bot不自動接管，請手動設止損/保本")
+                continue
+            risk=abs(entry-sl_trig)
+            if risk<=0: continue
+            tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
+            active_real_trades[tkey]={
+                "exchange":"okx","inst_id":inst_id,"symbol":sym,"direction":side,
+                "entry_price":str(entry),"sl_algo_id":sl_id,"tp1_order_id":None,
+                "tp1_hit":False,"current_sl":sl_trig,"remaining_amount":str(ct),
+                "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
+                "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
+            }
+            adopted+=1
+            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ 達1R自動移保本")
+        except Exception as ie:
+            print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
+    if adopted: save_active_trades()
+
+
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
@@ -2884,6 +2943,8 @@ def main_polling_loop():
     build_dynamic_symbols()
     # 還原重啟前的倉位追蹤（保本/移動止損續行，解決 redeploy 後追蹤丟失）
     load_active_trades()
+    # 接管現有未追蹤的 OKX 倉位（手動開的/重啟前丟失的）→ 讀既有止損納入自動保本
+    adopt_untracked_okx_positions()
     n_sym = len(SYMBOLS)
 
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
