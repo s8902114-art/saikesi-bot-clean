@@ -1073,7 +1073,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "pos_side":         trade_side,
                 "risk_dist":        abs(executed_average_price - stop_loss),
                 "tf_id":            tf_id,
-                "init_contracts":   total_contracts,   # 原始張數（供金字塔加碼用）
+                # 金字塔基礎張數 = 未含CVD加碼的基礎單位(total_contracts已×position_scale,
+                # 故除回去)。讓加碼只加1個基礎單位,不疊CVD的×1.5,使MDD與回測(48%)一致。
+                "init_contracts":   round(total_contracts / max(position_scale, 1e-9), 8),
                 "pyramid_added":    False,             # 是否已 +1R 加碼過
                 "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
             }
@@ -1709,13 +1711,25 @@ def _okx_pyramid_add(ex, trade) -> bool:
         tk = ex.fetch_ticker(symbol); cur = float(tk.get("last") or 0)
         if cur <= 0: return False
         mkt = ex.market(symbol); ct_val = float(mkt.get("contractSize", 1.0) or 1.0)
-        # 合併部位名義 ≈ (原+加) 張 × 價 × ctVal
-        combined_val = (init_ct * 2.0) * cur * ct_val
+        # 加碼張數 = 基礎單位(未疊CVD加碼),依該幣精度取整
+        try: add_amt = float(ex.amount_to_precision(symbol, init_ct))
+        except Exception: add_amt = init_ct
+        if add_amt <= 0:
+            dc_log(f"⚠️ 金字塔跳過 [{symbol}]：加碼張數取整後為0"); trade["pyramid_added"]=True; return False
+        # 實際當前部位張數(含CVD加碼) + 加碼 = 合併名義(守門員用真實部位才保守)
+        try:
+            cur_ct = 0.0
+            for _p in ex.fetch_positions([symbol]):
+                if _p.get("symbol")==symbol and _p.get("side")==trade["direction"]:
+                    cur_ct = abs(float(_p.get("contracts") or 0)); break
+            if cur_ct <= 0: cur_ct = init_ct
+        except Exception:
+            cur_ct = init_ct
+        combined_val = (cur_ct + add_amt) * cur * ct_val
         try:
             bal = ex.fetch_balance(); avail = float(bal.get("USDT", {}).get("free", 0.0))
         except Exception:
             avail = 0.0
-        # 加碼後合併保證金估算(用該幣槓桿)
         try:
             lev = int(float(((mkt.get("limits", {}) or {}).get("leverage", {}) or {}).get("max") or MAX_LEVERAGE))
         except Exception:
@@ -1729,7 +1743,7 @@ def _okx_pyramid_add(ex, trade) -> bool:
             return False
         # 下加碼市價單(增加部位)
         add_action = "buy" if trade["direction"] == "long" else "sell"
-        ex.create_market_order(symbol=symbol, side=add_action, amount=init_ct,
+        ex.create_market_order(symbol=symbol, side=add_action, amount=add_amt,
                                params={"posSide": trade["direction"], "tdMode": MARGIN_MODE})
         # 停損上移到原進場價(closeFraction=1 平合併全倉)
         _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
@@ -1742,7 +1756,7 @@ def _okx_pyramid_add(ex, trade) -> bool:
         if new_id:
             trade["sl_algo_id"] = new_id; trade["current_sl"] = entry
         trade["pyramid_added"] = True
-        dc_log(f"📈 金字塔加碼成功 [{symbol}]：+{init_ct}張(達+1R)，停損上移至原進場價 {entry}")
+        dc_log(f"📈 金字塔加碼成功 [{symbol}]：+{add_amt}張(基礎單位,達+1R)，停損上移至原進場價 {entry}")
         return True
     except Exception as e:
         dc_log(f"❌ 金字塔加碼失敗 [{trade.get('symbol')}]：{e}")
