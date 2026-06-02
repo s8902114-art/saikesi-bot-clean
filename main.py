@@ -476,6 +476,7 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     elif "雙底" in s:     bits.append("W底型態")
     if "MACD" in s:       bits.append("MACD 動能 + 4H 趨勢同向")
     if "數據獵手空" in s:  bits.append("大級別2B假突破 + CVD頂背離 + OI升 + 散戶爆多")
+    if "箱突破空" in s:    bits.append("跌破盤整箱底 + 帶量 + CVD↓ + OI升(順勢)")
     if tf == "1H" and side == "short":
         bits.append("靠階梯壓力位")
     if dh_boost and dh_boost > 1.0:
@@ -1899,6 +1900,33 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
         return False, ""
 
 
+# ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF +0.193,出場1.5R/3R)──────────────
+BOX_SHORT_ENABLED = True
+def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
+    """箱突破做空：96根窄箱(range<8%)收盤跌破箱底 + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
+    try:
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+        vol = df["vol"].values if "vol" in df.columns else None
+        if len(cl) < 100 or vol is None: return False, ""
+        bh = hi[-97:-1].max(); bl = lo[-97:-1].min()
+        if bl <= 0 or (bh-bl)/bl > 0.08: return False, ""        # 箱要夠窄=盤整
+        if not (cl[-1] < bl and cl[-2] >= bl): return False, ""  # 收盤首根跌破箱底
+        va = float(np.mean(vol[-21:-1]))
+        if not (va > 0 and vol[-1] > 1.5*va): return False, ""    # 帶量突破
+        cona = CONA_PERP.get(symbol_item)
+        if not cona: return False, ""
+        end_ts = int(time.time()*1000); start_ts = end_ts - (BAR_SECONDS["15m"]*40*1000)
+        cvd = calculate_cumulative_volume_delta(cona, okx_bar_fmt, start_ts, end_ts)
+        oi  = fetch_open_interest_series(cona, okx_bar_fmt, start_ts, end_ts)
+        if len(cvd) < 2 or len(oi) < 4: return False, ""
+        if not (cvd.iloc[-1] < cvd.iloc[-2]): return False, ""    # CVD↓(賣方主導)
+        if not (oi.iloc[-1] > oi.iloc[-4]): return False, ""      # OI升(新空進場)
+        return True, "破窄箱底+帶量+CVD↓+OI升"
+    except Exception as e:
+        print(f"[Box-Short] {symbol_item} 失敗: {e}")
+        return False, ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
 # 輸入：各指標布林值與數值
@@ -2347,6 +2375,14 @@ class SykesTradingBot:
             except Exception as _dse:
                 print(f"[DH-Short] {symbol_item} 判斷失敗: {_dse}")
 
+        # ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF+0.193,出場1.5R/3R)──
+        is_box_short = False
+        if BOX_SHORT_ENABLED and tf_id == "15m":
+            try:
+                is_box_short, _ = _check_box_short(symbol_item, okx_bar_fmt, df)
+            except Exception as _bse:
+                print(f"[Box-Short] {symbol_item} 判斷失敗: {_bse}")
+
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
         # C3 空訊號成立後，要求進場價在某條階梯 Fibo 線 ±0.5×ATR 內才放行。
@@ -2460,7 +2496,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short
 
         if not combined_long and not combined_short:
             return
@@ -2487,6 +2523,7 @@ class SykesTradingBot:
             if is_reson_short:   _signal_source.append("雙頂+RSI共振")
             if is_macd_short:    _signal_source.append("MACD動能")
             if is_dh_short:      _signal_source.append("數據獵手空")
+            if is_box_short:     _signal_source.append("箱突破空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
@@ -2514,6 +2551,9 @@ class SykesTradingBot:
     #   ※ 已移除「訊號評分／動態SL/動態倉位」層：該層未經回測且會偏離
     #     WF 驗證過的參數，回退至固定參數以恢復正期望值。
         p = p_l if direction == "long" else p_s
+        # 箱突破空專屬出場 1.5R/3.0R(順勢讓跑,WF最佳;其他空單不受影響)
+        if direction == "short" and is_box_short:
+            p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 3.0, "tp2_swing_mult": 3.0}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
