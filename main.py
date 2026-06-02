@@ -2976,16 +2976,42 @@ def adopt_untracked_okx_positions():
                 continue
             risk=abs(entry-sl_trig)
             if risk<=0: continue
+            # 補 TP(接管倉常沒TP)：若無既有reduceOnly限價單,掛TP1(1.2R,50%)/TP2(2.5R,50%)
+            tp1_id=None
+            try:
+                has_tp=any(o.get("type")=="limit" and (o.get("reduceOnly") or
+                           str((o.get("info") or {}).get("reduceOnly")).lower()=="true")
+                           for o in ex.fetch_open_orders(sym))
+                if not has_tp:
+                    if side=="long": tp1p,tp2p,exs=entry+risk*1.2,entry+risk*2.5,"sell"
+                    else:            tp1p,tp2p,exs=entry-risk*1.2,entry-risk*2.5,"buy"
+                    try: half=float(ex.amount_to_precision(sym,ct*0.5))
+                    except Exception: half=round(ct*0.5,8)
+                    try: tp1px=ex.price_to_precision(sym,tp1p)
+                    except Exception: tp1px=format(tp1p,"f")
+                    try: tp2px=ex.price_to_precision(sym,tp2p)
+                    except Exception: tp2px=format(tp2p,"f")
+                    if half>0:
+                        o1=ex.create_order(symbol=sym,type="limit",side=exs,amount=half,price=tp1px,
+                                           params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
+                        tp1_id=o1.get("id")
+                        _rest=round(ct-half,8)
+                        if _rest>0:
+                            ex.create_order(symbol=sym,type="limit",side=exs,amount=_rest,price=tp2px,
+                                            params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
+                        dc_log(f"🎯 接管倉 {sym} {side} 補掛 TP1 `{tp1px}` / TP2 `{tp2px}`")
+            except Exception as _te:
+                print(f"[Adopt] {sym} 補TP失敗: {_te}")
             tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
             active_real_trades[tkey]={
                 "exchange":"okx","inst_id":inst_id,"symbol":sym,"direction":side,
-                "entry_price":str(entry),"sl_algo_id":sl_id,"tp1_order_id":None,
-                "tp1_hit":False,"current_sl":sl_trig,"remaining_amount":str(ct),
+                "entry_price":str(entry),"sl_algo_id":sl_id,"tp1_order_id":tp1_id,
+                "tp1_hit":False,"current_sl":sl_trig,"remaining_amount":str(round(ct*0.5,8)),
                 "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
             }
             adopted+=1
-            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ 達1R自動移保本")
+            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ 補TP+達1R自動保本")
         except Exception as ie:
             print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
     if adopted: save_active_trades()
