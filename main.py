@@ -705,6 +705,25 @@ def _place_okx_algo_sl(inst_id: str, side: str, amount: str, sl_trigger_px: str,
     r = requests.post(f"{OKX_BASE}{path}", headers=headers, data=body, timeout=10)
     return r.json()
 
+def _okx_cancel_all_algos(inst_id: str) -> int:
+    """取消該 instId 所有 pending conditional algo 單(TP/SL)。回傳取消數。
+    用於解 51088「同全倉位只能有一張 TP/SL」→ 清掉舊單再重掛。"""
+    now=datetime.now(timezone.utc); ts=now.strftime("%Y-%m-%dT%H:%M:%S.")+f"{now.microsecond//1000:03d}Z"
+    path=f"/api/v5/trade/orders-algo-pending?ordType=conditional&instId={inst_id}"
+    sig=_okx_generate_signature(ts,"GET",path,"")
+    headers={"OK-ACCESS-KEY":OKX_API_KEY,"OK-ACCESS-SIGN":sig,"OK-ACCESS-TIMESTAMP":ts,
+             "OK-ACCESS-PASSPHRASE":OKX_PASSPHRASE,"Content-Type":"application/json"}
+    if OKX_DEMO: headers["x-simulated-trading"]="1"
+    cancelled=0
+    try:
+        r=requests.get(f"{OKX_BASE}{path}",headers=headers,timeout=10).json()
+        for d in (r.get("data") or []):
+            aid=d.get("algoId")
+            if aid and _cancel_okx_algo_order(inst_id, aid): cancelled+=1
+    except Exception as e:
+        print(f"[Algo] 取消全部algo失敗 {inst_id}: {e}")
+    return cancelled
+
 def _place_okx_algo_trailing(inst_id: str, side: str, amount: str, callback_ratio: str, pos_side: str) -> dict:
     """ 使用 OKX REST API 掛移動止損 (Trailing Stop) Algo 單 """
     now_utc = datetime.now(timezone.utc)
@@ -990,15 +1009,21 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 止損：OKX algo slTriggerPx 條件單（closeFraction=1 平全倉，無需指定張數）
         sl_side = "sell" if trade_side == "long" else "buy"
         sl_pos  = trade_side
+        def _do_place_sl():
+            res = _place_okx_algo_sl(inst_id=inst_id, side=sl_side, amount="0",
+                                     sl_trigger_px=sl_px_str, pos_side=sl_pos)
+            return res, (res.get("data") or [{}])[0].get("algoId")
         try:
-            sl_result  = _place_okx_algo_sl(
-                inst_id=inst_id,
-                side=sl_side,
-                amount="0",                  # closeFraction=1 時 sz 傳 0
-                sl_trigger_px=sl_px_str,     # 精度化字串（非 str(float)）
-                pos_side=sl_pos
-            )
-            sl_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+            sl_result, sl_algo_id = _do_place_sl()
+            if not sl_algo_id:
+                # 51088：同全倉位已有TP/SL → 清掉舊algo單再重掛一次(避免裸倉)
+                _scode = str((sl_result.get("data") or [{}])[0].get("sCode") or "")
+                if _scode == "51088":
+                    n_cxl = _okx_cancel_all_algos(inst_id)
+                    time.sleep(0.3)
+                    sl_result, sl_algo_id = _do_place_sl()
+                    if sl_algo_id:
+                        execution_report.append(f"♻️ 清掉{n_cxl}張舊TP/SL後重掛止損成功")
             if sl_algo_id:
                 execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
             else:
@@ -1324,6 +1349,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             "current_sl":       stop_loss,
             "be_price":         be_price_bingx,
             "remaining_qty":    str(half_qty),      # 實際成交量的一半
+            "full_qty":         str(round(actual_qty, 4)),  # 全倉量(TP1前提前保本用)
             "pos_side":         pos_side,
             "exit_side":        exit_side,
             "headers":          headers,
@@ -1437,22 +1463,24 @@ def check_trailing_stops_for_real():
                         float_pnl = cur_price - entry
                     else:
                         float_pnl = entry - cur_price
-                    if float_pnl >= breakeven_trigger and trade["current_sl"] != entry:
+                    # 保本價含手續費：多單掛 entry+fee、空單掛 entry-fee（之前誤掛在raw entry沒扣費）
+                    be_price = entry + fee_buffer if direction == "long" else entry - fee_buffer
+                    if float_pnl >= breakeven_trigger and trade["current_sl"] != be_price:
                         _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                         exit_side = "sell" if direction == "long" else "buy"
-                        try: _entry_px = ex.price_to_precision(symbol, entry)
-                        except Exception: _entry_px = format(entry, "f")
+                        try: _be_px = ex.price_to_precision(symbol, be_price)
+                        except Exception: _be_px = format(be_price, "f")
                         sl_result = _place_okx_algo_sl(
                             inst_id=inst_id, side=exit_side,
                             amount=trade["remaining_amount"],
-                            sl_trigger_px=_entry_px,
+                            sl_trigger_px=_be_px,
                             pos_side=direction
                         )
                         new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
                         if new_algo_id:
                             trade["sl_algo_id"] = new_algo_id
-                            trade["current_sl"] = entry
-                        msg = f"🔒 {name} 浮盈達1R，止損提前移至成本價 {entry}（含手續費保護）"
+                            trade["current_sl"] = be_price
+                        msg = f"🔒 {name} 浮盈達{be_trigger_mult}R，止損移至保本價 {be_price}（含手續費）"
                         dc_log(msg)
                         print(f"[Trailing] {msg}")
 
@@ -1521,6 +1549,32 @@ def check_trailing_stops_for_real():
             sl_order_id  = trade["sl_order_id"]
 
             if trade["tp1_hit"]: continue  # 已保本，跳過
+
+            # ── 浮盈提前保本(與OKX對齊)：達 be_trigger×R+fee → 全倉SL移保本價 ──
+            # 用 OKX 報價當參考(同資產跨所價格近似);失敗則跳過,退回TP1成交後保本。
+            try:
+                risk_b = float(trade.get("risk_dist", 0) or 0)
+                if risk_b > 0 and trade.get("current_sl") != be_price:
+                    cur_b = float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                    tf_kb = f"{trade.get('tf_id','15m')}_{direction}"
+                    be_mb = BEST_PARAMS.get(tf_kb, {}).get("be_trigger", 1.0)
+                    trig_b = risk_b * be_mb + entry * 0.001
+                    fpnl_b = (cur_b - entry) if direction == "long" else (entry - cur_b)
+                    if cur_b > 0 and fpnl_b >= trig_b:
+                        _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                                       {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
+                        _fq = trade.get("full_qty", remaining)
+                        nsl = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                            "type": "STOP_MARKET", "stopPrice": format(be_price, "f"),
+                            "quantity": str(_fq), "workingType": "MARK_PRICE"}, headers)
+                        nd = nsl.json()
+                        if nd.get("code", 0) == 0:
+                            trade["sl_order_id"] = nd.get("data", {}).get("order", {}).get("orderId", "")
+                            trade["current_sl"]  = be_price
+                            dc_log(f"🔒 BingX {bingx_symbol} 浮盈達{be_mb}R，止損移至保本價 {be_price}（含手續費）")
+            except Exception as _eb:
+                print(f"[BingX Trailing] {trade_key} 提前保本判斷失敗: {_eb}")
 
             # 查詢 TP1 是否成交
             tp1_r = _bingx_request("GET", "/openApi/swap/v2/trade/order", {
