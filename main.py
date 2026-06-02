@@ -475,6 +475,7 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     elif "雙頂" in s:     bits.append("M頭型態")
     elif "雙底" in s:     bits.append("W底型態")
     if "MACD" in s:       bits.append("MACD 動能 + 4H 趨勢同向")
+    if "數據獵手空" in s:  bits.append("大級別2B假突破 + CVD頂背離 + OI升 + 散戶爆多")
     if tf == "1H" and side == "short":
         bits.append("靠階梯壓力位")
     if dh_boost and dh_boost > 1.0:
@@ -1851,6 +1852,53 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
         return (ok, "合約CVD頂背離確認" if ok else "合約CVD無頂背離(非DH空)")
 
 
+# ── 數據獵手做空 + ls_ratio/taker_ratio（Binance 免費端點，快取5分）────────────────
+DH_SHORT_ENABLED = True          # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
+DH_SHORT_MAJOR   = 96            # 大級別2B回看(96根/1天)
+_LS_TAKER_CACHE: Dict[str, Any] = {}   # bsym -> (ts, ls, taker)
+def _fetch_binance_ls_taker(symbol_item: str, period: str = "15m"):
+    """Binance 多空人數比 ls + 主動買賣比 taker。快取5分鐘。回傳(ls,taker)或(None,None)。"""
+    bsym = symbol_item.replace("/", "").upper()   # BTC/USDT -> BTCUSDT
+    now = time.time()
+    c = _LS_TAKER_CACHE.get(bsym)
+    if c and now - c[0] < 300:
+        return c[1], c[2]
+    try:
+        h = {"User-Agent": "Mozilla/5.0"}
+        ls_d = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=10).json()
+        tk_d = requests.get(f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=10).json()
+        ls = float(ls_d[-1]["longShortRatio"]); taker = float(tk_d[-1]["buySellRatio"])
+        _LS_TAKER_CACHE[bsym] = (now, ls, taker)
+        return ls, taker
+    except Exception as e:
+        print(f"[LS/Taker] {bsym} 取得失敗: {e}")
+        return None, None
+
+
+def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
+    """數據獵手做空(15m,WF驗證+0.153)：大級別2B(戳破96根高收回)+CVD頂背離+OI升6根+ls>=2.5+taker>1.0"""
+    try:
+        hi = df["high"].values; cl = df["close"].values
+        if len(hi) < DH_SHORT_MAJOR + 4: return False, ""
+        prior_high = hi[-(DH_SHORT_MAJOR+1):-1].max()   # 過去96根(不含當根)
+        if not (hi[-1] > prior_high and cl[-1] < prior_high): return False, ""   # 2B假突破收回
+        cona_perp = CONA_PERP.get(symbol_item)
+        if not cona_perp: return False, ""
+        end_ts = int(time.time()*1000); start_ts = end_ts - (BAR_SECONDS["15m"]*40*1000)
+        cvd = calculate_cumulative_volume_delta(cona_perp, okx_bar_fmt, start_ts, end_ts)
+        oi  = fetch_open_interest_series(cona_perp, okx_bar_fmt, start_ts, end_ts)
+        if len(cvd) < 4 or len(oi) < 7: return False, ""
+        if not (cvd.iloc[-1] < max(cvd.iloc[-2], cvd.iloc[-3], cvd.iloc[-4])): return False, ""  # CVD頂背離
+        if not (oi.iloc[-1] > oi.iloc[-7]): return False, ""                                       # OI升6根
+        ls, taker = _fetch_binance_ls_taker(symbol_item)
+        if ls is None or ls < 2.5: return False, ""
+        if taker is None or taker <= 1.0: return False, ""
+        return True, f"ls{ls:.1f}+taker{taker:.2f}"
+    except Exception as e:
+        print(f"[DH-Short] {symbol_item} 失敗: {e}")
+        return False, ""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
 # 輸入：各指標布林值與數值
@@ -2285,10 +2333,19 @@ class SykesTradingBot:
         if DH_CVD_ENABLED and is_long and tf_id == "15m":
             try:
                 _dh_ok, _dh_r = _dh_cvd_ok(symbol_item, okx_bar_fmt, "15m", "long")
-                if _dh_ok:
-                    dh_boost = DH_BOOST_MULT   # CVD吸收確認 → 加碼下注
+                _ls_l, _ = _fetch_binance_ls_taker(symbol_item)   # ls<1.0=散戶淨空=逆勢多(WF+0.138)
+                if _dh_ok or (_ls_l is not None and _ls_l < 1.0):
+                    dh_boost = DH_BOOST_MULT   # CVD吸收 或 散戶淨空 → 加碼下注
             except Exception as _dh_err:
                 print(f"[DH-CVD] {symbol_item} 15m多加碼判斷失敗: {_dh_err}")
+
+        # ── 數據獵手做空(15m)：2B+CVD頂背離+OI升6根+ls>=2.5+taker>1.0(WF驗證+0.153)──
+        is_dh_short = False; _dh_short_r = ""
+        if DH_SHORT_ENABLED and tf_id == "15m":
+            try:
+                is_dh_short, _dh_short_r = _check_dh_short(symbol_item, okx_bar_fmt, df)
+            except Exception as _dse:
+                print(f"[DH-Short] {symbol_item} 判斷失敗: {_dse}")
 
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
@@ -2403,7 +2460,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short
 
         if not combined_long and not combined_short:
             return
@@ -2429,6 +2486,7 @@ class SykesTradingBot:
             if is_double_top:    _signal_source.append("雙頂")
             if is_reson_short:   _signal_source.append("雙頂+RSI共振")
             if is_macd_short:    _signal_source.append("MACD動能")
+            if is_dh_short:      _signal_source.append("數據獵手空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
