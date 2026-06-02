@@ -972,6 +972,10 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             f" | 倉位價值: `{position_value:.2f}` USDT | 保證金: `{allocated_margin:.2f}` USDT"
             f" | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
         ]
+        if position_scale > 1.0:
+            execution_report.append(f"⚡ **CVD吸收確認 → 加碼下注 ×{position_scale}**（倉位已放大）")
+        elif position_scale < 1.0:
+            execution_report.append(f"🔻 弱訊號 → 縮倉 ×{position_scale}")
 
         entry_order = ex.create_market_order(
             symbol=symbol_id,
