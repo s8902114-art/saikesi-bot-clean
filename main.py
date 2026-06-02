@@ -2457,12 +2457,15 @@ class SykesTradingBot:
     #     WF 驗證過的參數，回退至固定參數以恢復正期望值。
         p = p_l if direction == "long" else p_s
 
+        # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
+        MIN_SL_PCT = 0.006   # 0.6%
         if direction == "long":
             calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            # 多單止損必須在當前價下方，否則用 MIN_SL 保護
-            if calculated_sl >= current_close:
-                calculated_sl = current_close * (1.0 - 0.005)
             risk_pct = abs(current_close - calculated_sl) / current_close
+            # 結構低點在現價之上(無效) 或 止損過近(<MIN_SL) → 跳過(不用0.5%硬下=秒進秒損)
+            if calculated_sl >= current_close or risk_pct < MIN_SL_PCT:
+                if _dbg: print(f"[SL] {symbol_item} 多 止損無效/過近({risk_pct:.3%}<{MIN_SL_PCT:.1%})→跳過", flush=True)
+                return
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 - MAX_SL)
                 risk_pct = MAX_SL
@@ -2473,10 +2476,11 @@ class SykesTradingBot:
             tp2_target = current_close + risk_dist * tp2_mult
         else:
             calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
-            # 空單止損必須在當前價上方，否則用 MIN_SL 保護
-            if calculated_sl <= current_close:
-                calculated_sl = current_close * (1.0 + 0.005)
             risk_pct = abs(calculated_sl - current_close) / current_close
+            # 結構高點在現價之下(無效) 或 止損過近(<MIN_SL) → 跳過
+            if calculated_sl <= current_close or risk_pct < MIN_SL_PCT:
+                if _dbg: print(f"[SL] {symbol_item} 空 止損無效/過近({risk_pct:.3%}<{MIN_SL_PCT:.1%})→跳過", flush=True)
+                return
             if risk_pct > MAX_SL:
                 calculated_sl = current_close * (1.0 + MAX_SL)
                 risk_pct = MAX_SL
@@ -2976,30 +2980,30 @@ def adopt_untracked_okx_positions():
                 continue
             risk=abs(entry-sl_trig)
             if risk<=0: continue
-            # 補 TP(接管倉常沒TP)：若無既有reduceOnly限價單,掛TP1(1.2R,50%)/TP2(2.5R,50%)
+            # 補 TP(接管倉常沒TP)：risk太小(止損已近保本)不補;TP只掛在現價的獲利方向(避免51006)
             tp1_id=None
             try:
+                cur=float(ex.fetch_ticker(sym).get("last") or 0)
                 has_tp=any(o.get("type")=="limit" and (o.get("reduceOnly") or
                            str((o.get("info") or {}).get("reduceOnly")).lower()=="true")
                            for o in ex.fetch_open_orders(sym))
-                if not has_tp:
+                if (not has_tp) and cur>0 and risk > entry*0.003:   # risk>0.3%才補
                     if side=="long": tp1p,tp2p,exs=entry+risk*1.2,entry+risk*2.5,"sell"
                     else:            tp1p,tp2p,exs=entry-risk*1.2,entry-risk*2.5,"buy"
                     try: half=float(ex.amount_to_precision(sym,ct*0.5))
                     except Exception: half=round(ct*0.5,8)
-                    try: tp1px=ex.price_to_precision(sym,tp1p)
-                    except Exception: tp1px=format(tp1p,"f")
-                    try: tp2px=ex.price_to_precision(sym,tp2p)
-                    except Exception: tp2px=format(tp2p,"f")
-                    if half>0:
-                        o1=ex.create_order(symbol=sym,type="limit",side=exs,amount=half,price=tp1px,
-                                           params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
-                        tp1_id=o1.get("id")
-                        _rest=round(ct-half,8)
-                        if _rest>0:
-                            ex.create_order(symbol=sym,type="limit",side=exs,amount=_rest,price=tp2px,
-                                            params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
-                        dc_log(f"🎯 接管倉 {sym} {side} 補掛 TP1 `{tp1px}` / TP2 `{tp2px}`")
+                    def _valid(px):  # TP需在現價的獲利方向且有距離(>0.2%)
+                        return (px>cur*1.002) if side=="long" else (px<cur*0.998)
+                    placed=[]
+                    for _px,_qty,_is1 in [(tp1p,half,True),(tp2p,round(ct-half,8),False)]:
+                        if _qty<=0 or not _valid(_px): continue
+                        try: _pxs=ex.price_to_precision(sym,_px)
+                        except Exception: _pxs=format(_px,"f")
+                        o=ex.create_order(symbol=sym,type="limit",side=exs,amount=_qty,price=_pxs,
+                                          params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
+                        placed.append(_pxs)
+                        if _is1: tp1_id=o.get("id")
+                    if placed: dc_log(f"🎯 接管倉 {sym} {side} 補TP: {' / '.join(placed)}")
             except Exception as _te:
                 print(f"[Adopt] {sym} 補TP失敗: {_te}")
             tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
