@@ -749,7 +749,8 @@ def _cancel_okx_algo_order(inst_id: str, algo_id: str) -> bool:
 
 def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
-                              tf_id: str = "15m", position_scale: float = 1.0) -> None:
+                              tf_id: str = "15m", position_scale: float = 1.0,
+                              pyramid_eligible: bool = False) -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1074,6 +1075,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "tf_id":            tf_id,
                 "init_contracts":   total_contracts,   # 原始張數（供金字塔加碼用）
                 "pyramid_added":    False,             # 是否已 +1R 加碼過
+                "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
             }
             save_active_trades()   # 持久化
             execution_report.append("📋 已加入保本/移動止損追蹤池")
@@ -1365,8 +1367,9 @@ def check_trailing_stops_for_real():
                 active_real_trades.pop(trade_key, None)
                 continue
 
-            # ── 金字塔加碼：多單達 +1R 且未加過 → 加一單位(走強平守門員,停損上移原進場價)──
+            # ── 金字塔加碼：驗證過的多單(C3/W底)達 +1R 且未加過 → 加一單位 ──────────
             if (PYRAMID_ENABLED and trade.get("exchange") == "okx" and direction == "long"
+                    and trade.get("pyramid_eligible", False)
                     and not trade.get("pyramid_added", False)
                     and not trade.get("tp1_hit", False)):
                 try:
@@ -2438,12 +2441,16 @@ class SykesTradingBot:
             signal_payload["cvd_override"] = True
             dc_log(f"⚡ CVD 複合信號觸發特調：{symbol_item} 30m_long → tp1=1.5R tp2=2.0R")
 
+        # 金字塔資格：僅驗證過的多單(C3 15m/30m、1H W底)。排除15m雙底共振(n小且加碼變差)、MACD。
+        _pyr_elig = (direction == "long" and ("C3" in _signal_source or "雙底" in _signal_source))
+
         if AUTO_TRADE.get(tf_id):
             if EXCHANGE_ENABLED.get("okx", True):
                 execute_okx_trade_pipeline(
                     okx_swap_symbol, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id, position_scale=dh_boost,
+                    pyramid_eligible=_pyr_elig,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
