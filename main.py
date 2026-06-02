@@ -463,48 +463,52 @@ def dc_embed_edit(message_id: str, new_text: str):
     except Exception as e:
         print(f"  [Embed 編輯失敗] {e}")
 
-def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok: bool) -> str:
-    """ 建置完全體交互控制台卡片，整合止損比率、盈虧比與手動掛單快取 """
-    side_emoji = "🟢" if sig["side"] == "long" else "🔴"
-    dir_name = "多頭趨勢進場" if sig["side"] == "long" else "空頭趨勢進場"
-    swing_tag = "📐 趨勢波段追蹤" if sig["is_swing"] else "⚡ 短線日內反彈"
-    cvd_tag = "CVD ✅ 動能同步確認" if cvd_ok else "CVD ⚠️ 量能背離過濾"
-    card_color = 0x2ecc71 if sig["side"] == "long" else 0xe74c3c
+def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
+    """把訊號來源組成一句白話進場原因。"""
+    s = source_tag or ""
+    trend = "多頭" if side == "long" else "空頭"
+    bits = []
+    if "C3" in s:
+        bits.append("回踩維加斯通道後 QQE 轉" + ("強" if side == "long" else "弱"))
+    if "雙頂+RSI" in s:   bits.append("雙頂 + RSI 跌破50 共振")
+    elif "雙底+RSI" in s: bits.append("雙底 + RSI 穿50 共振")
+    elif "雙頂" in s:     bits.append("M頭型態")
+    elif "雙底" in s:     bits.append("W底型態")
+    if "MACD" in s:       bits.append("MACD 動能 + 4H 趨勢同向")
+    if tf == "1H" and side == "short":
+        bits.append("靠階梯壓力位")
+    if dh_boost and dh_boost > 1.0:
+        bits.append(f"CVD 吸收確認(加碼×{dh_boost})")
+    return f"{trend}趨勢｜" + "、".join(bits) if bits else f"{trend}趨勢"
 
-    tw_time = datetime.fromisoformat(sig["time"].replace("Z", "").replace("+00:00", "")) + timedelta(hours=8)
-    coin_name = symbol.split("/")[0]
+
+def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok: bool) -> str:
+    """ 精簡訊號卡：標題 + 進場原因 + 進場/止損 + TP1/TP2 + 授權按鈕 """
+    side_emoji = "🟢" if sig["side"] == "long" else "🔴"
+    dir_name   = "多" if sig["side"] == "long" else "空"
+    card_color = 0x2ecc71 if sig["side"] == "long" else 0xe74c3c
+    coin_name  = symbol.split("/")[0]
     unique_callback_key = f"sykes_{coin_name.lower()}_{tf}_{sig['side']}_{int(time.time())}"
 
-    exit_mode_label = "固定限價" if sig.get("exit_mode") == "fixed" else "追蹤止損"
-
-    # 寫入待核准交易訂單池快取
     pending_orders[unique_callback_key] = {
-    "symbol": OKX_SWAP.get(symbol, symbol),
-    "direction": sig["side"],
-    "entry": sig["entry"],
-    "sl": sig["sl"],
-    "tp1": sig["tp1"],
-    "tp2": sig["tp2"],
-    "exit_mode": sig.get("exit_mode", "fixed")
+        "symbol": OKX_SWAP.get(symbol, symbol), "direction": sig["side"],
+        "entry": sig["entry"], "sl": sig["sl"], "tp1": sig["tp1"], "tp2": sig["tp2"],
+        "exit_mode": sig.get("exit_mode", "fixed"),
     }
 
-    source_tag = sig.get("source_tag", "C3")
-    source_label = f" 【{source_tag}】" if source_tag else ""
+    reason = _entry_reason(sig.get("source_tag", ""), sig["side"], tf, sig.get("dh_boost", 1.0))
     embed_payload = {
-    "title": f"{side_emoji} {coin_name} [{tf} - {dir_name}]{source_label}",
-    "description": f"**環境特徵:** {swing_tag} | {cvd_tag}",
-    "color": int(card_color, 16) if isinstance(card_color, str) else card_color,
-    "fields": [
-        {"name": "觸發時間 (TST)", "value": tw_time.strftime("%Y/%m/%d %H:%M:%S"), "inline": True},
-        {"name": "ATR 當前波動", "value": f"`{sig['atr']}`", "inline": True},
-        {"name": "離場機制", "value": f"`{exit_mode_label}`", "inline": True},
-        {"name": "規劃進場價", "value": f"**{sig['entry']}** USDT", "inline": True},
-        {"name": "安全結構止損 🛑", "value": f"`{sig['sl']}` ({sig['risk_pct']:.2f}%)", "inline": True},
-        {"name": "保證金防禦", "value": "TP1達標後自動推成本價", "inline": True},
-        {"name": f"第一目標價 TP1 (分批50%) [盈虧比 1:{sig['rr1']:.2f}]", "value": f"`{sig['tp1']}`", "inline": False},
-        {"name": f"終點目標價 TP2 (剩餘50%) [盈虧比 1:{sig['rr2']:.2f}]", "value": f"`{sig['tp2']}`", "inline": False}
-    ],
-    "footer": {"text": f"交易核心識別碼: {unique_callback_key}"}
+        "title": f"{side_emoji} {coin_name} · {tf} {dir_name}",
+        "description": f"**進場原因:** {reason}",
+        "color": card_color,
+        "fields": [
+            {"name": "進場", "value": f"**{sig['entry']}**", "inline": True},
+            {"name": "止損", "value": f"`{sig['sl']}` ({sig['risk_pct']:.2f}%)", "inline": True},
+            {"name": "保本", "value": "達標自動推成本價", "inline": True},
+            {"name": f"TP1 (50% · 1:{sig['rr1']:.1f})", "value": f"`{sig['tp1']}`", "inline": True},
+            {"name": f"TP2 (50% · 1:{sig['rr2']:.1f})", "value": f"`{sig['tp2']}`", "inline": True},
+        ],
+        "footer": {"text": unique_callback_key},
     }
 
     components_payload = [{
@@ -965,17 +969,12 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                    f"> 風險預算 {risk_usdt:.2f}U × {RISK_TOLERANCE_MULT}，拒絕超額下單")
             return
 
+        _scale_tag = (f" · ⚡CVD加碼×{position_scale}" if position_scale > 1.0
+                      else (f" · 🔻縮倉×{position_scale}" if position_scale < 1.0 else ""))
         execution_report = [
-            f"🚀 **賽克斯實盤下單鏈成功發動**",
-            f"商品代號: `{symbol_id}` | 交易方向: `{'做多 LONG' if is_buy else '做空 SHORT'}`",
-            f"配置槓桿: `{calculated_leverage}x` | 張數: `{total_contracts}`（ctVal={ct_val}）"
-            f" | 倉位價值: `{position_value:.2f}` USDT | 保證金: `{allocated_margin:.2f}` USDT"
-            f" | 風險: `{risk_usdt:.2f}` USDT ({RISK_PCT*100:.0f}%)"
+            f"🚀 OKX {symbol_id} {'多' if is_buy else '空'} 下單成功{_scale_tag}",
+            f"{calculated_leverage}x · {total_contracts}張 · 風險 {risk_usdt:.2f}U ({RISK_PCT*100:.0f}%)",
         ]
-        if position_scale > 1.0:
-            execution_report.append(f"⚡ **CVD吸收確認 → 加碼下注 ×{position_scale}**（倉位已放大）")
-        elif position_scale < 1.0:
-            execution_report.append(f"🔻 弱訊號 → 縮倉 ×{position_scale}")
 
         entry_order = ex.create_market_order(
             symbol=symbol_id,
@@ -1029,7 +1028,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     if sl_algo_id:
                         execution_report.append(f"♻️ 清掉{n_cxl}張舊TP/SL後重掛止損成功")
             if sl_algo_id:
-                execution_report.append(f"🛑 OKX Algo 止損已錨定: `{stop_loss}` (algoId: {sl_algo_id})")
+                execution_report.append(f"🛑 止損 `{stop_loss}`")
             else:
                 raise RuntimeError(f"API 回應無 algoId: {sl_result}")
         except Exception as sle:
@@ -1058,7 +1057,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     amount=tp1_qty, price=tp1_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🌓 TP1 限價單 ({tp1_qty} 張): `{tp1_px_str}` (ordId: {tp1_order_id})")
+                execution_report.append(f"🎯 TP1 `{tp1_px_str}` / TP2 `{tp2_px_str}`")
             except Exception as tp1e:
                 execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
             try:
@@ -1066,7 +1065,6 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     symbol=symbol_id, type="limit", side=exit_action,
                     amount=tp2_qty, price=tp2_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
-                execution_report.append(f"🌕 TP2 限價單 ({tp2_qty} 張): `{tp2_px_str}`")
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
         else:
@@ -1077,10 +1075,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     amount=total_contracts, price=tp1_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🌓 TP1 限價單 (全出 {total_contracts} 張): `{tp1_px_str}` (ordId: {tp1_order_id})")
+                execution_report.append(f"🎯 TP1全出 `{tp1_px_str}`(倉位小不拆半)")
             except Exception as tp1e:
                 execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
-            execution_report.append("⚠️ 倉位太小無法拆半，TP2略過改全出")
 
         # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
@@ -1109,7 +1106,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
             }
             save_active_trades()   # 持久化
-            execution_report.append("📋 已加入保本/移動止損追蹤池")
+            execution_report.append("📋 已納入保本追蹤")
 
         dc_log("\n".join(execution_report))
     except Exception as general_error:
@@ -2498,7 +2495,7 @@ class SykesTradingBot:
             "tp1": round(tp1_target, 5), "tp2": round(tp2_target, 5), "atr": round(current_atr, 4),
             "risk_pct": risk_pct * 100.0, "rr1": rr1, "rr2": rr2, "is_swing": is_swing,
             "exit_mode": p["exit_mode"], "time": datetime.now(timezone.utc).isoformat(),
-            "source_tag": signal_source_tag,
+            "source_tag": signal_source_tag, "dh_boost": dh_boost,
         }
 
         self.set_cooldown(symbol_item, tf_id)
