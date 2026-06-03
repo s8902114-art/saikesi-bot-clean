@@ -1052,13 +1052,14 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         tp2_qty = round(total_contracts - tp1_qty, 8)
         _min_amt2 = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0)
 
-        if exit_strategy == "line_full":
-            # ── 整倉麥門切線：不掛任何TP，整倉沿切線跑，由 check_trailing 偵測
-            #    「實體收盤突破切線」市價平全倉。SL 已掛(硬底兜底,不爆倉)。
-            #    WF:DH空驗+0.629/MDD20%、30m C3多驗+0.582/MDD15%(去top3仍正)。
-            execution_report.append("📈 整倉切線出場(不掛TP,沿切線跑;SL兜底)")
-        elif exit_strategy == "tp_line":
-            # ── TP1落袋半 + 剩半切線：只掛 TP1(半倉)，剩半交給 check_trailing 切線。
+        if exit_strategy in ("line_full", "swing_full"):
+            # ── 整倉趨勢跟蹤：不掛任何TP，整倉持有。SL 已掛(硬底兜底,不爆倉)。
+            #    line_full=切線突破市價平(DH空/30m C3多); swing_full=轉折移SL(1H MACD空驗+0.251)。
+            _tag = "切線突破" if exit_strategy == "line_full" else "轉折移SL"
+            execution_report.append(f"📈 整倉出場(不掛TP,{_tag};SL兜底)")
+        elif exit_strategy in ("tp_line", "swing_tp"):
+            # ── TP1落袋半 + 剩半趨勢跟蹤：只掛 TP1(半倉)。
+            #    tp_line=剩半切線; swing_tp=剩半轉折移SL(1H W底多驗+0.165)。
             if tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
                 try:
                     tp1_order = ex.create_order(
@@ -1066,12 +1067,13 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                         amount=tp1_qty, price=tp1_px_str,
                         params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                     tp1_order_id = tp1_order.get("id")
-                    execution_report.append(f"🎯 TP1 `{tp1_px_str}`(剩半沿切線跑)")
+                    _tag = "沿切線" if exit_strategy == "tp_line" else "轉折移SL"
+                    execution_report.append(f"🎯 TP1 `{tp1_px_str}`(剩半{_tag})")
                 except Exception as tp1e:
                     execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
             else:
-                # 倉小不拆半 → 退回整倉切線(不掛TP)
-                execution_report.append("📈 倉小不拆半→改整倉切線(不掛TP)")
+                # 倉小不拆半 → 退回整倉趨勢跟蹤(不掛TP)
+                execution_report.append("📈 倉小不拆半→改整倉(不掛TP)")
         elif tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
             # 固定R：可拆半 TP1 / TP2 各一半
             try:
@@ -1105,8 +1107,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
-            # 剩餘量：line_full 整倉跟切線=全倉；其他=TP1出一半後剩的半倉(tp2_qty)
-            if exit_strategy == "line_full":
+            # 剩餘量：整倉跟趨勢(line_full/swing_full)=全倉；其他=TP1出一半後剩的半倉(tp2_qty)
+            if exit_strategy in ("line_full", "swing_full"):
                 remaining_amt = str(total_contracts)
             else:
                 remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
@@ -1465,6 +1467,75 @@ def _mai_line_breakout(ex, trade) -> bool:
         return False
 
 
+def _swing_trail_update_sl(ex, trade) -> bool:
+    """
+    移動停利（切線PDF p11「用最新出現的高/低點修改保利點」）：
+    用最新轉折點(多頭最新「腳VV」/空頭最新「頭AA」)移動 SL，只往有利方向。
+    出場靠交易所 SL algo 觸發(價格碰移動後SL自動平倉)。回傳 True=有更新SL。
+    1H WF驗證:W底多 tp+移SL驗+0.165、MACD空 整倉移SL驗+0.251(雜訊少,1H以上才用)。
+    """
+    try:
+        inst_id   = trade["inst_id"]
+        symbol    = trade["symbol"]
+        direction = trade["direction"]
+        tf        = trade.get("tf_id", "1H")
+        name      = symbol.split("/")[0]
+
+        df = fetch_market_candles(inst_id, tf, fetch_limit=120)
+        if df.empty or len(df) < 6:
+            return False
+        ets = trade.get("entry_ts")
+        if ets:
+            try:
+                cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
+                sub = df[df.index >= cutoff]
+                if len(sub) >= 6:
+                    df = sub
+            except Exception:
+                pass
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+        n = len(df)
+
+        # 最新轉折點(多頭腳VV=破底翻 / 空頭頭AA=假突破)，取順趨勢序列最新者
+        last_swing = None
+        for f in range(1, n):
+            if direction == "long":
+                if lo[f] < lo[f-1] and cl[f] > hi[f-1]:
+                    if last_swing is None or lo[f] > last_swing:
+                        last_swing = lo[f]
+            else:
+                if hi[f] > hi[f-1] and cl[f] < lo[f-1]:
+                    if last_swing is None or hi[f] < last_swing:
+                        last_swing = hi[f]
+        if last_swing is None:
+            return False
+
+        cur_sl = float(trade.get("current_sl", 0) or 0)
+        # 只往有利方向移（多頭往上、空頭往下）
+        if direction == "long"  and last_swing <= cur_sl: return False
+        if direction == "short" and last_swing >= cur_sl: return False
+
+        _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+        exit_side = "sell" if direction == "long" else "buy"
+        try: sl_px = ex.price_to_precision(symbol, last_swing)
+        except Exception: sl_px = format(last_swing, "f")
+        res = _place_okx_algo_sl(
+            inst_id=inst_id, side=exit_side,
+            amount=trade["remaining_amount"], sl_trigger_px=sl_px, pos_side=direction)
+        nid = (res.get("data") or [{}])[0].get("algoId")
+        if nid:
+            trade["sl_algo_id"] = nid
+            trade["current_sl"] = last_swing
+            msg = f"📐 {name} 轉折移動停損 → {last_swing}"
+            dc_log(msg)
+            print(f"[SwingTrail] {name} SL→{last_swing}")
+            return True
+        return False
+    except Exception as e:
+        print(f"[SwingTrail] {trade.get('symbol')} 移SL失敗: {e}")
+        return False
+
+
 def check_trailing_stops_for_real():
     """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
     if not active_real_trades:
@@ -1518,6 +1589,13 @@ def check_trailing_stops_for_real():
             if trade.get("exit_strategy") == "line_full":
                 if _mai_line_breakout(ex, trade):
                     active_real_trades.pop(trade_key, None)
+                    save_active_trades()
+                continue
+
+            # ── 整倉轉折移SL(swing_full)：1H MACD空。不掛TP,整倉,用最新轉折移SL,
+            #    出場靠交易所SL algo觸發。WF:1H MACD空驗+0.251/RA0.83。
+            if trade.get("exit_strategy") == "swing_full":
+                if _swing_trail_update_sl(ex, trade):
                     save_active_trades()
                 continue
 
@@ -1597,10 +1675,17 @@ def check_trailing_stops_for_real():
 
             else:
                 # TP1 已成交
-                # ── tp_line(1H W底多)：TP1落袋半,剩半沿麥門切線跑,實體收盤破線市價平剩餘 ──
+                # ── tp_line：TP1落袋半,剩半沿麥門切線跑,實體收盤破線市價平剩餘 ──
                 if trade.get("exit_strategy") == "tp_line":
                     if _mai_line_breakout(ex, trade):
                         active_real_trades.pop(trade_key, None)
+                        save_active_trades()
+                    continue
+
+                # ── swing_tp(1H W底多)：TP1落袋半,剩半用最新轉折移SL,出場靠交易所algo ──
+                #    WF:1H W底多驗+0.165/MDD29%(兩段正+去top3都正,最穩)。
+                if trade.get("exit_strategy") == "swing_tp":
+                    if _swing_trail_update_sl(ex, trade):
                         save_active_trades()
                     continue
 
@@ -2642,21 +2727,26 @@ class SykesTradingBot:
             if is_box_short:     _signal_source.append("箱突破空")
         signal_source_tag = "+".join(_signal_source)
 
-        # ── 出場策略分派（麥門切線 PDF 正版，WF+離群終檢驗證，2026-06-03）──────
-        #   line_full = 整倉沿切線跑(不掛TP,只SL,實體收盤破切線市價平全倉)
-        #   tp_line   = TP1落袋半 + 剩半切線
-        #   ""        = 固定R(現役 TP1/TP2)
-        # 對齊 _mai_line_v2.py 結論：
-        #   DH空(驗+0.629/MDD20%,去top3+45R) / 30m C3多(驗+0.582/MDD15%,去top3+27R) → line_full
-        #   1H W底多(整倉去top3轉負) → tp_line 半倉
-        #   箱突破空(切線全輸) / 其他 → 固定R
+        # ── 出場策略分派（麥門切線/移動停利 PDF 正版，WF+離群終檢，2026-06-03）──────
+        #   line_full  = 整倉沿切線跑(不掛TP,實體收盤破切線市價平全倉)
+        #   swing_full = 整倉用最新轉折移SL(不掛TP,出場靠交易所algo) ← 1H 以上移動停利
+        #   tp_line    = TP1落袋半 + 剩半切線
+        #   swing_tp   = TP1落袋半 + 剩半用最新轉折移SL ← 1H 以上移動停利
+        #   ""         = 固定R(現役 TP1/TP2)
+        # 對齊 _mai_line_v2 / _mai_trail_1h 結論：
+        #   DH空(驗+0.629) / 30m C3多(驗+0.582) → line_full(切線)
+        #   1H W底多(驗+0.165,兩段正+去top3都正,優於切線) → swing_tp(轉折移SL)
+        #   1H MACD空(驗+0.251/RA0.83) → swing_full(整倉轉折移SL)。移動停利1H以上才用(雜訊少)。
+        #   箱突破空(切線全輸) / 1H C3空(純版不可信) / 其他 → 固定R
         exit_strategy = ""
         if is_dh_short:
             exit_strategy = "line_full"                                  # DH空：整倉切線
         elif tf_id == "30m" and direction == "long" and is_long:
             exit_strategy = "line_full"                                  # 30m C3多：整倉切線
         elif tf_id == "1H" and direction == "long" and is_double_bottom:
-            exit_strategy = "tp_line"                                    # 1H W底多：TP1+剩半切線
+            exit_strategy = "swing_tp"                                   # 1H W底多：TP1+轉折移SL
+        elif tf_id == "1H" and direction == "short" and is_macd_short:
+            exit_strategy = "swing_full"                                 # 1H MACD空：整倉轉折移SL
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
@@ -2751,9 +2841,9 @@ class SykesTradingBot:
             dc_log(f"⚡ CVD 複合信號觸發特調：{symbol_item} 30m_long → tp1=1.5R tp2=2.0R")
 
         # 金字塔資格：僅驗證過的多單(C3 15m/30m、1H W底)。排除15m雙底共振(n小且加碼變差)、MACD。
-        # 整倉切線(line_full)不加碼：整倉已沿趨勢跑，加碼會破壞切線出場的倉位一致性。
+        # 趨勢跟蹤出場(line_full/swing_full/swing_tp)不加碼：整倉/移SL已沿趨勢,加碼破壞倉位一致性。
         _pyr_elig = (direction == "long" and ("C3" in _signal_source or "雙底" in _signal_source)
-                     and exit_strategy != "line_full")
+                     and exit_strategy not in ("line_full", "swing_full", "swing_tp"))
 
         if AUTO_TRADE.get(tf_id):
             if EXCHANGE_ENABLED.get("okx", True):
