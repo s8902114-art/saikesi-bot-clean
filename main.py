@@ -1059,6 +1059,18 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             _tag = {"line_full": "切線突破", "swing_full": "轉折移SL",
                     "line_add": "切線突破+轉折加碼"}.get(exit_strategy, "切線")
             execution_report.append(f"📈 整倉出場(不掛TP,{_tag};SL兜底)")
+        elif exit_strategy == "box_trend":
+            # ── 箱突破空:整倉單一TP at 4R(不拆半),達1R保本由 check_trailing 處理。
+            #    R掃描甜蜜點4R(EV+0.234/賺賠2.8);讓趨勢跑,crypto切線被反彈洗故不用切線。
+            try:
+                tp1_order = ex.create_order(
+                    symbol=symbol_id, type="limit", side=exit_action,
+                    amount=total_contracts, price=tp1_px_str,
+                    params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                tp1_order_id = tp1_order.get("id")
+                execution_report.append(f"🎯 整倉TP `{tp1_px_str}`(4R讓跑,達1R保本)")
+            except Exception as tp1e:
+                execution_report.append(f"⚠️ 箱突破TP委託失敗: {tp1e}")
         elif exit_strategy in ("tp_line", "swing_tp", "swing_tp_1h"):
             # ── TP1落袋半 + 剩半趨勢跟蹤：只掛 TP1(半倉)。
             #    tp_line=剩半切線; swing_tp=剩半轉折移SL(1H W底多); swing_tp_1h=參1H轉折(15m MACD多)。
@@ -1109,8 +1121,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
-            # 剩餘量：整倉跟趨勢(line_full/swing_full/line_add)=全倉；其他=TP1出一半後剩的半倉
-            if exit_strategy in ("line_full", "swing_full", "line_add"):
+            # 剩餘量：整倉(line_full/swing_full/line_add/box_trend)=全倉；其他=TP1出一半後剩的半倉
+            if exit_strategy in ("line_full", "swing_full", "line_add", "box_trend"):
                 remaining_amt = str(total_contracts)
             else:
                 remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
@@ -1363,6 +1375,14 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         if exit_strategy in ("line_full", "line_add", "swing_full"):
             # 整倉趨勢跟蹤：不掛TP,整倉持有,由check_trailing切線/移SL出場(SL兜底)
             pass
+        elif exit_strategy == "box_trend":
+            # 箱突破空:整倉單一TP at 4R(全倉),達1R保本由check_trailing處理
+            tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
+                "quantity": str(round(actual_qty, 4)), "workingType": "MARK_PRICE"
+            }, headers)
+            bingx_tp1_order_id = tp1_r.json().get("data", {}).get("order", {}).get("orderId", "")
         elif exit_strategy in ("tp_line", "swing_tp", "swing_tp_1h"):
             # TP1落袋半 + 剩半趨勢跟蹤：只掛TP1半倉
             tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
@@ -1391,7 +1411,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
                            else float(entry_price) - fee_buffer_bingx
         # 剩餘量：整倉趨勢跟蹤=全倉；其他=半倉(TP1出後剩的)
-        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full") else half_qty
+        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full","box_trend") else half_qty
         # 加碼基礎量(line_add)：未疊CVD加碼的基礎單位
         _base_qty = round(actual_qty / max(position_scale, 1e-9), 4)
         trade_key = f"bingx_{bingx_symbol}_{trade_side}_{int(time.time())}"
@@ -1860,6 +1880,33 @@ def check_trailing_stops_for_real():
                     save_active_trades()
                 continue
 
+            # ── 箱突破空(box_trend)：整倉4R TP掛在交易所,這裡只做「達1R浮盈→移SL保本」(一次)
+            #    防假突破拉回。TP(4R)成交由交易所自動平,下輪偵測倉位消失移除。
+            if trade.get("exit_strategy") == "box_trend":
+                if not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
+                    try:
+                        cur = float(ex.fetch_ticker(symbol).get("last") or 0)
+                        entry = float(trade["entry_price"]); rd = float(trade.get("risk_dist", 0) or 0)
+                        if cur > 0 and rd > 0:
+                            fpnl = (entry - cur) if direction == "short" else (cur - entry)
+                            if fpnl >= rd * 1.0:    # 達1R → 移SL到保本
+                                fee_buf = entry * 0.001
+                                be_price = entry - fee_buf if direction == "short" else entry + fee_buf
+                                _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                                exit_side = "sell" if direction == "long" else "buy"
+                                try: _bx = ex.price_to_precision(symbol, be_price)
+                                except Exception: _bx = format(be_price, "f")
+                                res = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                         sl_trigger_px=_bx, pos_side=direction)
+                                nid = (res.get("data") or [{}])[0].get("algoId")
+                                if nid:
+                                    trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
+                                    trade["tp1_hit"] = True
+                                    dc_log(f"🔒 {name} 箱突破空達1R,止損移保本 {be_price}")
+                    except Exception as _be:
+                        print(f"[BoxTrend] {name} 保本判斷失敗: {_be}")
+                continue
+
             if not trade["tp1_hit"]:
                 # 安全查 TP1 狀態：無單號或查詢失敗 → 視為未成交，改走浮盈保本
                 # （修：原本 fetch_order(None) 會丟例外→整筆被跳過→保本永遠不動）
@@ -2017,6 +2064,23 @@ def check_trailing_stops_for_real():
 
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
+            # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
+            if _es == "box_trend":
+                if not trade.get("tp1_hit"):
+                    try:
+                        cur=float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                        rd=float(trade.get("risk_dist",0) or 0)
+                        if cur>0 and rd>0:
+                            fpnl=(entry-cur) if direction=="short" else (cur-entry)
+                            if fpnl>=rd*1.0:   # 達1R→移SL保本(取消舊+重掛STOP_MARKET)
+                                nid=_bingx_replace_sl(trade, be_price, remaining)
+                                if nid is not None:
+                                    trade["sl_order_id"]=nid; trade["current_sl"]=be_price
+                                    trade["tp1_hit"]=True
+                                    dc_log(f"🔒 BingX {bingx_symbol} 箱突破空達1R,止損移保本 {be_price}")
+                    except Exception as _bbe:
+                        print(f"[BingX BoxTrend] {trade_key} 保本失敗: {_bbe}")
+                continue
             if _es in ("line_full", "line_add"):
                 if _bingx_line_breakout(trade):
                     active_real_trades.pop(trade_key, None)
@@ -3048,6 +3112,8 @@ class SykesTradingBot:
             exit_strategy = "swing_full"                                 # 1H MACD空：整倉轉折移SL
         elif tf_id == "15m" and direction == "long" and is_macd_long:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
+        elif is_box_short:
+            exit_strategy = "box_trend"                                  # 箱突破空：1R保本+4R整倉大TP(讓趨勢跑)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
@@ -3074,9 +3140,10 @@ class SykesTradingBot:
     #   ※ 已移除「訊號評分／動態SL/動態倉位」層：該層未經回測且會偏離
     #     WF 驗證過的參數，回退至固定參數以恢復正期望值。
         p = p_l if direction == "long" else p_s
-        # 箱突破空專屬出場 1.5R/3.0R(順勢讓跑,WF最佳;其他空單不受影響)
+        # 箱突破空專屬出場 4R整倉大TP(讓趨勢跑;R掃描甜蜜點4R,EV+0.234/賺賠2.8最佳)
+        # box_trend:單一全倉TP at 4R + 達1R保本(check_trailing處理);切線在crypto箱突破被反彈洗,不用。
         if direction == "short" and is_box_short:
-            p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 3.0, "tp2_swing_mult": 3.0}
+            p = {**p, "tp1_mult": 4.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
