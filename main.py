@@ -776,7 +776,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
                               tf_id: str = "15m", position_scale: float = 1.0,
                               pyramid_eligible: bool = False,
-                              is_box_short: bool = False) -> None:
+                              exit_strategy: str = "") -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1052,8 +1052,28 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         tp2_qty = round(total_contracts - tp1_qty, 8)
         _min_amt2 = float(((mkt.get("limits") or {}).get("amount") or {}).get("min") or 0)
 
-        if tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
-            # 可拆半：TP1 / TP2 各一半
+        if exit_strategy == "line_full":
+            # ── 整倉麥門切線：不掛任何TP，整倉沿切線跑，由 check_trailing 偵測
+            #    「實體收盤突破切線」市價平全倉。SL 已掛(硬底兜底,不爆倉)。
+            #    WF:DH空驗+0.629/MDD20%、30m C3多驗+0.582/MDD15%(去top3仍正)。
+            execution_report.append("📈 整倉切線出場(不掛TP,沿切線跑;SL兜底)")
+        elif exit_strategy == "tp_line":
+            # ── TP1落袋半 + 剩半切線：只掛 TP1(半倉)，剩半交給 check_trailing 切線。
+            if tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
+                try:
+                    tp1_order = ex.create_order(
+                        symbol=symbol_id, type="limit", side=exit_action,
+                        amount=tp1_qty, price=tp1_px_str,
+                        params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                    tp1_order_id = tp1_order.get("id")
+                    execution_report.append(f"🎯 TP1 `{tp1_px_str}`(剩半沿切線跑)")
+                except Exception as tp1e:
+                    execution_report.append(f"⚠️ TP1委託失敗: {tp1e}")
+            else:
+                # 倉小不拆半 → 退回整倉切線(不掛TP)
+                execution_report.append("📈 倉小不拆半→改整倉切線(不掛TP)")
+        elif tp1_qty > 0 and tp2_qty >= (_min_amt2 or 0) and tp2_qty > 0:
+            # 固定R：可拆半 TP1 / TP2 各一半
             try:
                 tp1_order = ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
@@ -1071,7 +1091,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             except Exception as tp2e:
                 execution_report.append(f"⚠️ TP2委託失敗: {tp2e}")
         else:
-            # 太小無法拆半：TP1 全出、不設 TP2
+            # 固定R：太小無法拆半 → TP1 全出、不設 TP2
             try:
                 tp1_order = ex.create_order(
                     symbol=symbol_id, type="limit", side=exit_action,
@@ -1085,8 +1105,11 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # ── 加入追蹤池（解決 OKX 倉位先前完全沒被 check_trailing_stops 管理的問題）──
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
-            # 剩餘量（TP1 出一半後留給移動止損的張數）= TP2 那半
-            remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
+            # 剩餘量：line_full 整倉跟切線=全倉；其他=TP1出一半後剩的半倉(tp2_qty)
+            if exit_strategy == "line_full":
+                remaining_amt = str(total_contracts)
+            else:
+                remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
             okx_tkey = f"okx_{inst_id}_{trade_side}_{int(time.time())}"
             active_real_trades[okx_tkey] = {
                 "exchange":         "okx",
@@ -1107,7 +1130,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "init_contracts":   round(total_contracts / max(position_scale, 1e-9), 8),
                 "pyramid_added":    False,             # 是否已 +1R 加碼過
                 "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
-                "strategy":         "box_short" if is_box_short else "",
+                "exit_strategy":    exit_strategy,     # ""=固定R / line_full=整倉切線 / tp_line=TP1+剩半切線
+                "entry_ts":         int(time.time()),  # 開倉時戳(切線只看進場後的K)
+                "full_contracts":   str(total_contracts),  # 整倉張數(line_full市價平用)
             }
             save_active_trades()   # 持久化
             execution_report.append("📋 已納入保本追蹤")
@@ -1368,6 +1393,78 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         dc_log(f"❌ **BingX 下單失敗**: {e}")
 
 
+def _mai_line_breakout(ex, trade) -> bool:
+    """
+    麥門切線出場（PDF 正版）：連「下降的頭」(空)/「上升的腳」(多)成切線，
+    價格「實體收盤突破切線」→ 市價平剩餘倉。回傳 True=已平倉。
+    頭/腳轉折確認(收盤即確認，對齊回測 _mai_line_v2.py)：
+      空頭頭(假突破): hi[f]>hi[f-1] AND cl[f]<lo[f-1]
+      多頭腳(破底翻): lo[f]<lo[f-1] AND cl[f]>hi[f-1]
+    只看「進場後」的 K（entry_ts 之後），與回測從進場點累積轉折一致。
+    """
+    try:
+        inst_id   = trade["inst_id"]
+        symbol    = trade["symbol"]
+        direction = trade["direction"]
+        tf        = trade.get("tf_id", "15m")
+        name      = symbol.split("/")[0]
+
+        df = fetch_market_candles(inst_id, tf, fetch_limit=120)
+        if df.empty or len(df) < 6:
+            return False
+        # 只保留進場後的 K（不夠就用全部，避免剛開倉立刻判斷）
+        ets = trade.get("entry_ts")
+        if ets:
+            try:
+                cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
+                sub = df[df.index >= cutoff]
+                if len(sub) >= 6:
+                    df = sub
+            except Exception:
+                pass
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+        n = len(df)
+
+        # 頭/腳轉折，只收「更低的頭(空)/更高的腳(多)」=順趨勢序列
+        swings = []
+        for f in range(1, n):
+            if direction == "short":
+                if hi[f] > hi[f-1] and cl[f] < lo[f-1]:
+                    if not swings or hi[f] < swings[-1][1]:
+                        swings.append((f, hi[f]))
+            else:
+                if lo[f] < lo[f-1] and cl[f] > hi[f-1]:
+                    if not swings or lo[f] > swings[-1][1]:
+                        swings.append((f, lo[f]))
+        if len(swings) < 2:
+            return False
+        (a, pa), (b, pb) = swings[-2], swings[-1]
+        if b <= a:
+            return False
+        proj = pb + (pb - pa) / (b - a) * ((n - 1) - b)   # 切線投影到當前根
+        broke = (cl[-1] > proj) if direction == "short" else (cl[-1] < proj)
+        if not broke:
+            return False
+
+        # 實體收盤突破切線 → 市價平剩餘倉
+        rem = float(trade.get("remaining_amount", 0) or 0)
+        if rem <= 0:
+            return False
+        exit_side = "buy" if direction == "short" else "sell"
+        ex.create_market_order(
+            symbol=symbol, side=exit_side, amount=rem,
+            params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
+        _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+        msg = (f"📐 {name} 麥門切線突破（{'空' if direction=='short' else '多'}），"
+               f"市價平剩餘 {rem} 張")
+        dc_log(msg); tg_log(msg)
+        print(f"[MaiLine] {name} proj={proj:.6f} close={cl[-1]:.6f} → 平倉")
+        return True
+    except Exception as e:
+        print(f"[MaiLine] {trade.get('symbol')} 切線出場失敗: {e}")
+        return False
+
+
 def check_trailing_stops_for_real():
     """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
     if not active_real_trades:
@@ -1414,6 +1511,15 @@ def check_trailing_stops_for_real():
                             save_active_trades()
                 except Exception as _pe:
                     print(f"[Pyramid] {name} 加碼判斷失敗: {_pe}")
+
+            # ── 整倉麥門切線(line_full)：DH空 / 30m C3多 ─────────────────────
+            # 不掛TP,整倉沿切線跑,「實體收盤突破切線」→市價平全倉;SL已掛硬底兜底。
+            # 不走 TP1/保本邏輯(整倉跟趨勢,WF:DH+0.629/30m+0.582,去top3仍正)。
+            if trade.get("exit_strategy") == "line_full":
+                if _mai_line_breakout(ex, trade):
+                    active_real_trades.pop(trade_key, None)
+                    save_active_trades()
+                continue
 
             if not trade["tp1_hit"]:
                 # 安全查 TP1 狀態：無單號或查詢失敗 → 視為未成交，改走浮盈保本
@@ -1491,86 +1597,57 @@ def check_trailing_stops_for_real():
 
             else:
                 # TP1 已成交
-                if trade.get("strategy") == "box_short":
-                    # 箱突破空：麥門切線追蹤出場（pv3，連下降擺動高點成趨勢線，收盤突破→市價平剩餘）
-                    tf_wave = trade.get("tf_id", "15m")
-                    wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=35)
-                    if not wave_df.empty and len(wave_df) >= 10:
-                        hi_arr = wave_df["high"].values
-                        cl_arr = wave_df["close"].values
-                        n_w = len(hi_arr)
-                        PV = 3
-                        swings = []
-                        for j in range(PV, n_w - PV):
-                            if hi_arr[j] == hi_arr[max(0, j - PV):j + PV + 1].max():
-                                if not swings or hi_arr[j] < swings[-1][1]:
-                                    swings.append((j, hi_arr[j]))
-                        if len(swings) >= 2:
-                            (a, pa), (b, pb) = swings[-2], swings[-1]
-                            if b > a:
-                                f = n_w - 1
-                                proj = pb + (pb - pa) / (b - a) * (f - b)
-                                if cl_arr[-1] > proj:
-                                    rem = float(trade.get("remaining_amount", 0) or 0)
-                                    if rem > 0:
-                                        try:
-                                            ex.create_market_order(
-                                                symbol=symbol, side="buy", amount=rem,
-                                                params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True}
-                                            )
-                                            _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
-                                            msg = f"🔺 {name} 箱突破空 麥門切線突破，市價平剩餘倉位"
-                                            dc_log(msg); tg_log(msg)
-                                            print(f"[MaiLine] {name} 切線突破 proj={proj:.4f} close={cl_arr[-1]:.4f}")
-                                            active_real_trades.pop(trade_key, None)
-                                            save_active_trades()
-                                        except Exception as me:
-                                            print(f"[MaiLine] {name} 市價平倉失敗: {me}")
+                # ── tp_line(1H W底多)：TP1落袋半,剩半沿麥門切線跑,實體收盤破線市價平剩餘 ──
+                if trade.get("exit_strategy") == "tp_line":
+                    if _mai_line_breakout(ex, trade):
+                        active_real_trades.pop(trade_key, None)
+                        save_active_trades()
+                    continue
+
+                # 其他(固定R / 箱突破空回退固定R)：波浪偵測,當根創近20根新高/低→SL移20根低/高點
+                tf_wave = trade.get("tf_id", "15m")
+                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
+                if wave_df.empty or len(wave_df) < 20:
+                    continue
+                highs = wave_df["high"].values
+                lows  = wave_df["low"].values
+                cur_high  = highs[-1]
+                cur_low   = lows[-1]
+                prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
+                prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
+
+                new_sl = trade["current_sl"]
+                if direction == "long":
+                    # 當根創近20根新高 → 止損移至近20根最低點
+                    if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
+                        candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
+                        new_sl = max(trade["current_sl"], candidate)
                 else:
-                    # TP1 已成交，波浪偵測：當根創近20根新高/低 → 止損移至20根低點/高點
-                    tf_wave = trade.get("tf_id", "15m")
-                    wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
-                    if wave_df.empty or len(wave_df) < 20:
-                        continue
-                    highs = wave_df["high"].values
-                    lows  = wave_df["low"].values
-                    cur_high  = highs[-1]
-                    cur_low   = lows[-1]
-                    prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
-                    prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
+                    # 當根創近20根新低 → 止損移至近20根最高點
+                    if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
+                        candidate = float(highs[-20:].max())
+                        new_sl = min(trade["current_sl"], candidate)
 
-                    new_sl = trade["current_sl"]
-                    if direction == "long":
-                        # 當根創近20根新高 → 止損移至近20根最低點
-                        if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
-                            candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
-                            new_sl = max(trade["current_sl"], candidate)
-                    else:
-                        # 當根創近20根新低 → 止損移至近20根最高點
-                        if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
-                            candidate = float(highs[-20:].max())
-                            new_sl = min(trade["current_sl"], candidate)
+                if new_sl != trade["current_sl"]:
+                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                    exit_side = "sell" if direction == "long" else "buy"
+                    try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
+                    except Exception: _new_sl_px = format(new_sl, "f")
+                    sl_result = _place_okx_algo_sl(
+                        inst_id=inst_id, side=exit_side,
+                        amount=trade["remaining_amount"],
+                        sl_trigger_px=_new_sl_px,
+                        pos_side=direction
+                    )
+                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                    if new_algo_id:
+                        trade["sl_algo_id"] = new_algo_id
+                        trade["current_sl"] = new_sl
 
-                    if new_sl != trade["current_sl"]:
-                        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
-                        exit_side = "sell" if direction == "long" else "buy"
-                        try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
-                        except Exception: _new_sl_px = format(new_sl, "f")
-                        sl_result = _place_okx_algo_sl(
-                            inst_id=inst_id, side=exit_side,
-                            amount=trade["remaining_amount"],
-                            sl_trigger_px=_new_sl_px,
-                            pos_side=direction
-                        )
-                        new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
-                        if new_algo_id:
-                            trade["sl_algo_id"] = new_algo_id
-                            trade["current_sl"] = new_sl
-
-                        msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
-                        dc_log(msg)
-                        tg_log(msg)
-                        print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
+                    msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
+                    dc_log(msg)
+                    tg_log(msg)
+                    print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
@@ -2565,6 +2642,22 @@ class SykesTradingBot:
             if is_box_short:     _signal_source.append("箱突破空")
         signal_source_tag = "+".join(_signal_source)
 
+        # ── 出場策略分派（麥門切線 PDF 正版，WF+離群終檢驗證，2026-06-03）──────
+        #   line_full = 整倉沿切線跑(不掛TP,只SL,實體收盤破切線市價平全倉)
+        #   tp_line   = TP1落袋半 + 剩半切線
+        #   ""        = 固定R(現役 TP1/TP2)
+        # 對齊 _mai_line_v2.py 結論：
+        #   DH空(驗+0.629/MDD20%,去top3+45R) / 30m C3多(驗+0.582/MDD15%,去top3+27R) → line_full
+        #   1H W底多(整倉去top3轉負) → tp_line 半倉
+        #   箱突破空(切線全輸) / 其他 → 固定R
+        exit_strategy = ""
+        if is_dh_short:
+            exit_strategy = "line_full"                                  # DH空：整倉切線
+        elif tf_id == "30m" and direction == "long" and is_long:
+            exit_strategy = "line_full"                                  # 30m C3多：整倉切線
+        elif tf_id == "1H" and direction == "long" and is_double_bottom:
+            exit_strategy = "tp_line"                                    # 1H W底多：TP1+剩半切線
+
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
         # 避免 15m/30m/1H 整點同時收盤造成「一小時內同向三次訊號」。
@@ -2658,7 +2751,9 @@ class SykesTradingBot:
             dc_log(f"⚡ CVD 複合信號觸發特調：{symbol_item} 30m_long → tp1=1.5R tp2=2.0R")
 
         # 金字塔資格：僅驗證過的多單(C3 15m/30m、1H W底)。排除15m雙底共振(n小且加碼變差)、MACD。
-        _pyr_elig = (direction == "long" and ("C3" in _signal_source or "雙底" in _signal_source))
+        # 整倉切線(line_full)不加碼：整倉已沿趨勢跑，加碼會破壞切線出場的倉位一致性。
+        _pyr_elig = (direction == "long" and ("C3" in _signal_source or "雙底" in _signal_source)
+                     and exit_strategy != "line_full")
 
         if AUTO_TRADE.get(tf_id):
             if EXCHANGE_ENABLED.get("okx", True):
@@ -2667,7 +2762,7 @@ class SykesTradingBot:
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id, position_scale=dh_boost,
                     pyramid_eligible=_pyr_elig,
-                    is_box_short=is_box_short,
+                    exit_strategy=exit_strategy,
                 )
             if EXCHANGE_ENABLED.get("bingx", True):
                 execute_bingx_trade_pipeline(
