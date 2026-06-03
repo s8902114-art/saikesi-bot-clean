@@ -1283,11 +1283,15 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         pos_side = "LONG" if trade_side == "long" else "SHORT"
         exit_side = "SELL" if trade_side == "long" else "BUY"
 
-        # ★ 先驗證止損參數是否合法，再開倉
-        # BingX stopPrice 必須：做多 < 當前價；做空 > 當前價
+        # ★ 先驗證 BingX 是否支援此合約(很多幣 BingX 沒有,如 TON-USDT 報109425)→ 靜默跳過
+        # 不刷 Discord(OKX已下單,BingX缺該幣是常態),只記 Railway log。
         price_check = _bingx_request("GET", "/openApi/swap/v2/quote/price", {
             "symbol": bingx_symbol
         }, headers).json()
+        if price_check.get("code", 0) != 0 or not (price_check.get("data") or {}).get("price"):
+            print(f"[BingX] {bingx_symbol} 無此合約(BingX不支援該幣)，跳過 BingX 下單", flush=True)
+            return
+        # BingX stopPrice 必須：做多 < 當前價；做空 > 當前價
         current_px = float((price_check.get("data") or {}).get("price") or entry_price)
 
         if trade_side == "long" and stop_loss >= current_px:
