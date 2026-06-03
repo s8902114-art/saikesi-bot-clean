@@ -1168,10 +1168,12 @@ def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout:
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                                   stop_loss: float, tp1: float, tp2: float,
                                   exit_mode: str = "fixed", tf_id: str = "15m",
-                                  position_scale: float = 1.0) -> None:
+                                  position_scale: float = 1.0, exit_strategy: str = "") -> None:
     """
     BingX 永續合約下單
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
+    exit_strategy：與OKX一致(line_full/line_add/swing_full=不掛TP整倉; tp_line/swing_tp/
+                   swing_tp_1h=掛TP1半倉; ""=固定R)。趨勢跟蹤出場由check_trailing BingX段處理。
     """
     if not BINGX_API_KEY or not BINGX_SECRET_KEY:
         dc_log("⚠️ BingX API Key 未設定，跳過 BingX 下單")
@@ -1351,27 +1353,43 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             return
         bingx_sl_order_id = sl_data.get("data", {}).get("order", {}).get("orderId", "")
 
-        # TP1/TP2 均使用實際成交數量的各半（避免超過帳戶可用量）
+        # ── TP 掛單依 exit_strategy（與OKX一致）──────────────────────────────
         half_qty = round(actual_qty / 2, 4)
-        tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-            "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
-            "quantity": str(half_qty), "workingType": "MARK_PRICE"
-        }, headers)
-        bingx_tp1_order_id = tp1_r.json().get("data", {}).get("order", {}).get("orderId", "")
-
-        # TP2（fixed 模式）
-        if exit_mode == "fixed":
-            _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+        bingx_tp1_order_id = ""
+        if exit_strategy in ("line_full", "line_add", "swing_full"):
+            # 整倉趨勢跟蹤：不掛TP,整倉持有,由check_trailing切線/移SL出場(SL兜底)
+            pass
+        elif exit_strategy in ("tp_line", "swing_tp", "swing_tp_1h"):
+            # TP1落袋半 + 剩半趨勢跟蹤：只掛TP1半倉
+            tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp2, 5)),
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
                 "quantity": str(half_qty), "workingType": "MARK_PRICE"
             }, headers)
+            bingx_tp1_order_id = tp1_r.json().get("data", {}).get("order", {}).get("orderId", "")
+        else:
+            # 固定R：TP1半倉 + (fixed)TP2半倉
+            tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
+                "quantity": str(half_qty), "workingType": "MARK_PRICE"
+            }, headers)
+            bingx_tp1_order_id = tp1_r.json().get("data", {}).get("order", {}).get("orderId", "")
+            if exit_mode == "fixed":
+                _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                    "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                    "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp2, 5)),
+                    "quantity": str(half_qty), "workingType": "MARK_PRICE"
+                }, headers)
 
         # ★ 存入 active_real_trades 供保本機制追蹤
         fee_buffer_bingx = float(entry_price) * 0.001
         be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
                            else float(entry_price) - fee_buffer_bingx
+        # 剩餘量：整倉趨勢跟蹤=全倉；其他=半倉(TP1出後剩的)
+        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full") else half_qty
+        # 加碼基礎量(line_add)：未疊CVD加碼的基礎單位
+        _base_qty = round(actual_qty / max(position_scale, 1e-9), 4)
         trade_key = f"bingx_{bingx_symbol}_{trade_side}_{int(time.time())}"
         active_real_trades[trade_key] = {
             "exchange":         "bingx",
@@ -1384,13 +1402,18 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             "tp1_hit":          False,
             "current_sl":       stop_loss,
             "be_price":         be_price_bingx,
-            "remaining_qty":    str(half_qty),      # 實際成交量的一半
+            "remaining_qty":    str(_rem_qty),
             "full_qty":         str(round(actual_qty, 4)),  # 全倉量(TP1前提前保本用)
             "pos_side":         pos_side,
             "exit_side":        exit_side,
             "headers":          headers,
             "risk_dist":        abs(float(entry_price) - stop_loss),
             "tf_id":            tf_id,
+            "exit_strategy":    exit_strategy,
+            "entry_ts":         int(time.time()),
+            "init_qty":         _base_qty,    # line_add 加碼基礎量
+            "add_count":        0,
+            "add_swings_n":     0,
         }
         save_active_trades()   # 持久化：新倉立即存檔，重啟可還原
         dc_log(f"📋 BingX 倉位已加入保本追蹤：{bingx_symbol} {trade_side} SL={stop_loss} qty={actual_qty:.4f}")
@@ -1636,6 +1659,129 @@ def _mai_add_on_swing(ex, trade) -> bool:
         return False
 
 
+# ══ BingX 趨勢跟蹤(切線/移SL/加碼) — 與OKX對齊,BingX用OKX公開K偵測轉折(跨所近似)══════
+def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
+    """用 OKX 公開K(進場後)偵測順勢轉折(空頭頭AA/多頭腳VV)。回傳 (swings[(f,price)], df)。"""
+    inst_okx = OKX_SWAP.get(symbol_ccxt, symbol_ccxt)
+    df = fetch_market_candles(inst_okx, tf, fetch_limit=120)
+    if df.empty or len(df) < 6:
+        return [], df
+    if entry_ts:
+        try:
+            cutoff = pd.Timestamp(int(entry_ts), unit="s", tz="UTC")
+            sub = df[df.index >= cutoff]
+            if len(sub) >= 6: df = sub
+        except Exception:
+            pass
+    hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
+    sw = []
+    for f in range(1, n):
+        if direction == "short":
+            if hi[f] > hi[f-1] and cl[f] < lo[f-1]:
+                if not sw or hi[f] < sw[-1][1]: sw.append((f, hi[f]))
+        else:
+            if lo[f] < lo[f-1] and cl[f] > hi[f-1]:
+                if not sw or lo[f] > sw[-1][1]: sw.append((f, lo[f]))
+    return sw, df
+
+def _bingx_replace_sl(trade, sl_price, qty):
+    """BingX 取消舊SL + 掛新STOP_MARKET(指定qty)。回傳新orderId或None。"""
+    try:
+        _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                       {"symbol": trade["inst_id"], "orderId": trade.get("sl_order_id")}, trade["headers"])
+    except Exception:
+        pass
+    r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+        "symbol": trade["inst_id"], "side": trade["exit_side"], "positionSide": trade["pos_side"],
+        "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
+        "quantity": str(qty), "workingType": "MARK_PRICE"}, trade["headers"]).json()
+    if r.get("code", 0) == 0:
+        return r.get("data", {}).get("order", {}).get("orderId", "")
+    return None
+
+def _bingx_line_breakout(trade) -> bool:
+    """BingX 麥門切線突破→市價平剩餘。回傳 True=已平。"""
+    try:
+        direction = trade["direction"]; name = trade["symbol"].split("/")[0]
+        sw, df = _bingx_swings(trade["symbol"], trade.get("tf_id","15m"), trade.get("entry_ts"), direction)
+        if df.empty or len(sw) < 2: return False
+        cl = df["close"].values; n = len(df)
+        (a, pa), (b, pb) = sw[-2], sw[-1]
+        if b <= a: return False
+        proj = pb + (pb - pa) / (b - a) * ((n - 1) - b)
+        broke = (cl[-1] > proj) if direction == "short" else (cl[-1] < proj)
+        if not broke: return False
+        rem = float(trade.get("remaining_qty", 0) or 0)
+        if rem <= 0: return False
+        res = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": trade["inst_id"], "side": trade["exit_side"], "positionSide": trade["pos_side"],
+            "type": "MARKET", "quantity": str(rem)}, trade["headers"]).json()
+        if res.get("code", 0) == 0:
+            try:
+                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                               {"symbol": trade["inst_id"], "orderId": trade.get("sl_order_id")}, trade["headers"])
+            except Exception: pass
+            dc_log(f"📐 BingX {name} 麥門切線突破，市價平剩餘 {rem}")
+            return True
+        return False
+    except Exception as e:
+        print(f"[BingX MaiLine] {trade.get('symbol')} 切線出場失敗: {e}")
+        return False
+
+def _bingx_swing_trail(trade, ref_tf=None) -> bool:
+    """BingX 用最新轉折移SL(只往有利方向)。回傳 True=有更新。"""
+    try:
+        direction = trade["direction"]; name = trade["symbol"].split("/")[0]
+        tf = ref_tf or trade.get("tf_id", "1H")
+        sw, df = _bingx_swings(trade["symbol"], tf, trade.get("entry_ts"), direction)
+        if not sw: return False
+        last = sw[-1][1]; cur_sl = float(trade.get("current_sl", 0) or 0)
+        if direction == "long"  and last <= cur_sl: return False
+        if direction == "short" and last >= cur_sl: return False
+        rem = float(trade.get("remaining_qty", 0) or 0)
+        if rem <= 0: return False
+        nid = _bingx_replace_sl(trade, last, rem)
+        if nid is not None:
+            trade["sl_order_id"] = nid; trade["current_sl"] = last
+            dc_log(f"📐 BingX {name} 轉折移動停損 → {last}")
+            return True
+        return False
+    except Exception as e:
+        print(f"[BingX SwingTrail] {trade.get('symbol')} 移SL失敗: {e}")
+        return False
+
+def _bingx_add_on_swing(trade) -> bool:
+    """BingX N型轉折遞減加碼(守3)。市價加倉 + 重掛SL覆蓋新總量。回傳 True=有加碼。"""
+    try:
+        direction = trade["direction"]; name = trade["symbol"].split("/")[0]
+        add_count = int(trade.get("add_count", 0))
+        if add_count >= MAI_ADD_MAX: return False
+        base = float(trade.get("init_qty") or 0)
+        if base <= 0: return False
+        sw, df = _bingx_swings(trade["symbol"], trade.get("tf_id","15m"), trade.get("entry_ts"), direction)
+        cur_n = len(sw)
+        if cur_n <= int(trade.get("add_swings_n", 0)): return False
+        add_qty = round(base * 0.5, 4)
+        if add_qty <= 0:
+            trade["add_swings_n"] = cur_n; return False
+        add_side = "BUY" if direction == "long" else "SELL"
+        r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": trade["inst_id"], "side": add_side, "positionSide": trade["pos_side"],
+            "type": "MARKET", "quantity": str(add_qty)}, trade["headers"]).json()
+        if r.get("code", 0) != 0:
+            trade["add_swings_n"] = cur_n; return False
+        new_rem = float(trade.get("remaining_qty") or 0) + add_qty
+        trade["remaining_qty"] = str(new_rem)
+        nid = _bingx_replace_sl(trade, float(trade.get("current_sl") or 0), new_rem)
+        if nid is not None: trade["sl_order_id"] = nid
+        trade["add_count"] = add_count + 1; trade["add_swings_n"] = cur_n
+        dc_log(f"📈 BingX {name} N型轉折加碼#{add_count+1} +{add_qty}張(遞減半單,守{MAI_ADD_MAX})")
+        return True
+    except Exception as e:
+        print(f"[BingX MaiAdd] {trade.get('symbol')} 加碼失敗: {e}")
+        return False
+
+
 def check_trailing_stops_for_real():
     """ 每次掃描自動執行：偵測 TP1 成交並管理追蹤止損 """
     if not active_real_trades:
@@ -1865,7 +2011,41 @@ def check_trailing_stops_for_real():
             remaining    = trade["remaining_qty"]
             sl_order_id  = trade["sl_order_id"]
 
-            if trade["tp1_hit"]: continue  # 已保本，跳過
+            # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
+            _es = trade.get("exit_strategy", "")
+            if _es in ("line_full", "line_add"):
+                if _bingx_line_breakout(trade):
+                    active_real_trades.pop(trade_key, None)
+                elif _es == "line_add":
+                    _bingx_add_on_swing(trade)
+                continue
+            if _es == "swing_full":
+                _bingx_swing_trail(trade)
+                continue
+            if _es in ("swing_tp", "swing_tp_1h", "tp_line"):
+                if not trade.get("tp1_hit"):
+                    # 查TP1成交→重掛半倉SL於保本,進入趨勢跟蹤
+                    try:
+                        _t = _bingx_request("GET", "/openApi/swap/v2/trade/order",
+                                            {"symbol": bingx_symbol, "orderId": trade["tp1_order_id"]},
+                                            headers).json().get("data", {}).get("order", {})
+                        if _t.get("status") in ("FILLED", "filled"):
+                            nid = _bingx_replace_sl(trade, be_price, remaining)
+                            if nid is not None:
+                                trade["sl_order_id"] = nid; trade["current_sl"] = be_price
+                            trade["tp1_hit"] = True
+                            dc_log(f"✅ BingX {bingx_symbol} TP1成交,剩半進入趨勢跟蹤(保本起跳)")
+                    except Exception as _te:
+                        print(f"[BingX Trend] {trade_key} 查TP1失敗: {_te}")
+                else:
+                    if _es == "tp_line":
+                        if _bingx_line_breakout(trade):
+                            active_real_trades.pop(trade_key, None)
+                    else:
+                        _bingx_swing_trail(trade, ref_tf=("1H" if _es == "swing_tp_1h" else None))
+                continue
+
+            if trade["tp1_hit"]: continue  # 固定R:已保本，跳過
 
             # ── 浮盈提前保本(與OKX對齊)：達 be_trigger×R+fee → 全倉SL移保本價 ──
             # 用 OKX 報價當參考(同資產跨所價格近似);失敗則跳過,退回TP1成交後保本。
@@ -2977,6 +3157,7 @@ class SykesTradingBot:
                     symbol_item, direction, current_close,
                     signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                     p["exit_mode"], tf_id, position_scale=dh_boost,
+                    exit_strategy=exit_strategy,
                 )
         else:
             pos = PaperPosition()
