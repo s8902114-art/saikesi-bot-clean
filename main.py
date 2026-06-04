@@ -1892,17 +1892,34 @@ def check_trailing_stops_for_real():
                             if fpnl >= rd * 1.0:    # 達1R → 移SL到保本
                                 fee_buf = entry * 0.001
                                 be_price = entry - fee_buf if direction == "short" else entry + fee_buf
-                                _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                                 exit_side = "sell" if direction == "long" else "buy"
                                 try: _bx = ex.price_to_precision(symbol, be_price)
                                 except Exception: _bx = format(be_price, "f")
-                                res = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
-                                                         sl_trigger_px=_bx, pos_side=direction)
-                                nid = (res.get("data") or [{}])[0].get("algoId")
+                                _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                                def _place_bt():
+                                    r = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                           sl_trigger_px=_bx, pos_side=direction)
+                                    return r, (r.get("data") or [{}])[0].get("algoId")
+                                res, nid = _place_bt()
+                                if not nid:
+                                    _sc = str((res.get("data") or [{}])[0].get("sCode") or "")
+                                    if _sc == "51088":
+                                        _okx_cancel_all_algos(inst_id); time.sleep(0.3)
+                                        res, nid = _place_bt()
                                 if nid:
                                     trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
                                     trade["tp1_hit"] = True
                                     dc_log(f"🔒 {name} 箱突破空達1R,止損移保本 {be_price}")
+                                else:
+                                    try:
+                                        try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
+                                        except Exception: _osl = format(float(trade["current_sl"]), "f")
+                                        rr = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                                sl_trigger_px=_osl, pos_side=direction)
+                                        if (rr.get("data") or [{}])[0].get("algoId"):
+                                            trade["sl_algo_id"]=(rr.get("data") or [{}])[0].get("algoId")
+                                    except Exception: pass
+                                    dc_log(f"⚠️ {name} 箱突破空移保本失敗,已重掛原止損,請手動確認")
                     except Exception as _be:
                         print(f"[BoxTrend] {name} 保本判斷失敗: {_be}")
                 continue
@@ -1917,34 +1934,45 @@ def check_trailing_stops_for_real():
                     except Exception as _tpe:
                         print(f"[Trailing] {name} 查TP1失敗(改走浮盈保本): {_tpe}")
                 if tp1_status in ("closed", "filled"):
-                    # TP1 成交 → 1. 取消原止損
-                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
-
-                    # 2. 掛新止損在成本價 + 手續費（保本價略高於進場價）
+                    # TP1 成交 → 移止損到保本價(含手續費)
                     entry    = float(trade["entry_price"])
                     fee_buf  = entry * 0.001   # taker 雙邊 0.1%
                     be_price = entry + fee_buf if direction == "long" else entry - fee_buf
-                    # 用該幣價格精度（不可 round(,5)，低價幣如 SHIB 會被截成 0）
                     try: be_px = ex.price_to_precision(symbol, be_price)
                     except Exception: be_px = format(be_price, "f")
                     exit_side = "sell" if direction == "long" else "buy"
-                    sl_result = _place_okx_algo_sl(
-                        inst_id=inst_id, side=exit_side,
-                        amount=trade["remaining_amount"],
-                        sl_trigger_px=be_px,
-                        pos_side=direction
-                    )
-                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                    # 取消舊止損後掛保本(closeFraction=1全倉)
+                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                    def _place_be():
+                        r = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                               sl_trigger_px=be_px, pos_side=direction)
+                        return r, (r.get("data") or [{}])[0].get("algoId")
+                    sl_result, new_algo_id = _place_be()
+                    if not new_algo_id:
+                        # 51088「同全倉位已有TP/SL」→ 清掉所有algo再重掛(防舊止損取消後裸倉)
+                        _sc = str((sl_result.get("data") or [{}])[0].get("sCode") or "")
+                        if _sc == "51088":
+                            _okx_cancel_all_algos(inst_id); time.sleep(0.3)
+                            sl_result, new_algo_id = _place_be()
                     if new_algo_id:
                         trade["sl_algo_id"] = new_algo_id
                         trade["current_sl"] = be_price
                         trade["tp1_hit"]    = True
-
-                    # 3. DC + TG 通知
-                    msg = f"✅ TP1 已成交，止損移至保本價 {be_price}（含手續費）\n幣種：{name}"
-                    dc_log(msg)
-                    tg_log(msg)
-                    print(f"[Trailing] {name} TP1成交，SL移至保本價 {be_price}")
+                        msg = f"✅ TP1 已成交，止損移至保本價 {be_price}（含手續費）\n幣種：{name}"
+                        dc_log(msg); tg_log(msg)
+                        print(f"[Trailing] {name} TP1成交，SL移至保本價 {be_price}")
+                    else:
+                        # 移保本失敗 → 重掛原止損避免裸倉 + 警告(不發假保本通知)
+                        try:
+                            try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
+                            except Exception: _osl = format(float(trade["current_sl"]), "f")
+                            rr = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                    sl_trigger_px=_osl, pos_side=direction)
+                            rid = (rr.get("data") or [{}])[0].get("algoId")
+                            if rid: trade["sl_algo_id"] = rid
+                        except Exception as _re:
+                            print(f"[Trailing] {name} 重掛原止損失敗: {_re}")
+                        dc_log(f"⚠️ {name} TP1成交但移保本失敗，已嘗試重掛原止損 {trade['current_sl']}，請手動確認")
                 else:
                     # TP1 未成交：檢查浮盈是否達 be_trigger × R + 手續費，提前保本
                     ticker = ex.fetch_ticker(symbol)
@@ -1963,23 +1991,35 @@ def check_trailing_stops_for_real():
                     # 保本價含手續費：多單掛 entry+fee、空單掛 entry-fee（之前誤掛在raw entry沒扣費）
                     be_price = entry + fee_buffer if direction == "long" else entry - fee_buffer
                     if float_pnl >= breakeven_trigger and trade["current_sl"] != be_price:
-                        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
                         exit_side = "sell" if direction == "long" else "buy"
                         try: _be_px = ex.price_to_precision(symbol, be_price)
                         except Exception: _be_px = format(be_price, "f")
-                        sl_result = _place_okx_algo_sl(
-                            inst_id=inst_id, side=exit_side,
-                            amount=trade["remaining_amount"],
-                            sl_trigger_px=_be_px,
-                            pos_side=direction
-                        )
-                        new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
+                        _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                        def _place_be2():
+                            r = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                   sl_trigger_px=_be_px, pos_side=direction)
+                            return r, (r.get("data") or [{}])[0].get("algoId")
+                        sl_result, new_algo_id = _place_be2()
+                        if not new_algo_id:
+                            _sc = str((sl_result.get("data") or [{}])[0].get("sCode") or "")
+                            if _sc == "51088":
+                                _okx_cancel_all_algos(inst_id); time.sleep(0.3)
+                                sl_result, new_algo_id = _place_be2()
                         if new_algo_id:
                             trade["sl_algo_id"] = new_algo_id
                             trade["current_sl"] = be_price
-                        msg = f"🔒 {name} 浮盈達{be_trigger_mult}R，止損移至保本價 {be_price}（含手續費）"
-                        dc_log(msg)
-                        print(f"[Trailing] {msg}")
+                            msg = f"🔒 {name} 浮盈達{be_trigger_mult}R，止損移至保本價 {be_price}（含手續費）"
+                            dc_log(msg); print(f"[Trailing] {msg}")
+                        else:
+                            try:
+                                try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
+                                except Exception: _osl = format(float(trade["current_sl"]), "f")
+                                rr = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                        sl_trigger_px=_osl, pos_side=direction)
+                                rid = (rr.get("data") or [{}])[0].get("algoId")
+                                if rid: trade["sl_algo_id"] = rid
+                            except Exception: pass
+                            dc_log(f"⚠️ {name} 浮盈保本掛載失敗，已嘗試重掛原止損，請手動確認")
 
             else:
                 # TP1 已成交
