@@ -1591,6 +1591,17 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         return False
 
 
+def _is_rev_top(o, h, l, c, po, ph, pl, pc):
+    """空頭反轉K(加碼點,任一):看跌吞噬 / 流星長上影(打勾) / 假突破收破前低。"""
+    return ((pc > po and c < o and c <= po and o >= pc) or
+            (abs(c-o) > 0 and (h - max(o, c)) >= abs(c-o) * 2) or
+            (h > ph and c < pl))
+def _is_rev_bot(o, h, l, c, po, ph, pl, pc):
+    """多頭反轉K(加碼點,任一):看漲吞噬 / 錘子長下影 / 破底翻收過前高。"""
+    return ((pc < po and c > o and c >= po and o <= pc) or
+            (abs(c-o) > 0 and (min(o, c) - l) >= abs(c-o) * 2) or
+            (l < pl and c > ph))
+
 MAI_ADD_MAX = 3   # N型轉折加碼上限(守加碼3,加碼.pdf)
 def _mai_add_on_swing(ex, trade) -> bool:
     """
@@ -1623,14 +1634,16 @@ def _mai_add_on_swing(ex, trade) -> bool:
                     df = sub
             except Exception:
                 pass
-        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
+        op = df["open"].values; hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
+        # 加碼點=多型態反轉K(吞噬OR上影OR假突破),只收順勢更低頭/更高腳。
+        # 回測:多型態加碼 EV+1.177 > 單一假突破+0.722(加碼要多抓轉折機會,與切線「鈍」相反)。
         swings = []
         for f in range(1, n):
             if direction == "short":
-                if hi[f] > hi[f-1] and cl[f] < lo[f-1]:
+                if _is_rev_top(op[f],hi[f],lo[f],cl[f],op[f-1],hi[f-1],lo[f-1],cl[f-1]):
                     if not swings or hi[f] < swings[-1]: swings.append(hi[f])
             else:
-                if lo[f] < lo[f-1] and cl[f] > hi[f-1]:
+                if _is_rev_bot(op[f],hi[f],lo[f],cl[f],op[f-1],hi[f-1],lo[f-1],cl[f-1]):
                     if not swings or lo[f] > swings[-1]: swings.append(lo[f])
         cur_n = len(swings)
         if cur_n <= int(trade.get("add_swings_n", 0)):
@@ -1803,7 +1816,26 @@ def _bingx_add_on_swing(trade) -> bool:
         if add_count >= MAI_ADD_MAX: return False
         base = float(trade.get("init_qty") or 0)
         if base <= 0: return False
-        sw, df = _bingx_swings(trade["symbol"], trade.get("tf_id","15m"), trade.get("entry_ts"), direction)
+        # 加碼點=多型態反轉K(自己算,OKX公開K;切線仍用_bingx_swings單一吞噬)
+        inst_okx = OKX_SWAP.get(trade["symbol"], trade["symbol"])
+        df = fetch_market_candles(inst_okx, trade.get("tf_id","15m"), fetch_limit=120)
+        if df.empty or len(df) < 6: return False
+        ets = trade.get("entry_ts")
+        if ets:
+            try:
+                cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
+                subdf = df[df.index >= cutoff]
+                if len(subdf) >= 6: df = subdf
+            except Exception: pass
+        op=df["open"].values; hi=df["high"].values; lo=df["low"].values; cl=df["close"].values; n=len(df)
+        sw=[]
+        for f in range(1, n):
+            if direction == "short":
+                if _is_rev_top(op[f],hi[f],lo[f],cl[f],op[f-1],hi[f-1],lo[f-1],cl[f-1]):
+                    if not sw or hi[f] < sw[-1]: sw.append(hi[f])
+            else:
+                if _is_rev_bot(op[f],hi[f],lo[f],cl[f],op[f-1],hi[f-1],lo[f-1],cl[f-1]):
+                    if not sw or lo[f] > sw[-1]: sw.append(lo[f])
         cur_n = len(sw)
         if cur_n <= int(trade.get("add_swings_n", 0)): return False
         add_qty = round(base * 0.5, 4)
