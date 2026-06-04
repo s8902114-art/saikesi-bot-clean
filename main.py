@@ -1548,17 +1548,20 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
         n = len(df)
 
-        # 最新轉折點(多頭腳VV=破底翻 / 空頭頭AA=假突破)，取順趨勢序列最新者
+        # 移SL用「pivot 擺盪點」(前後PV根局部極值)，非單根吞噬——回測:pivot移SL頻率近3倍、
+        # EV由負轉正、MDD腰斬(1H MACD空 -0.227→+0.051、W底多 -0.125→+0.231)。
+        # 多頭取進場後最高的擺盪低(腳)、空頭取最低的擺盪高(頭)，SL只往有利移。
+        PV = 2
         last_swing = None
-        for f in range(1, n):
+        for j in range(PV, n - PV):
             if direction == "long":
-                if lo[f] < lo[f-1] and cl[f] > hi[f-1]:
-                    if last_swing is None or lo[f] > last_swing:
-                        last_swing = lo[f]
+                if lo[j] == lo[j-PV:j+PV+1].min():
+                    if last_swing is None or lo[j] > last_swing:
+                        last_swing = lo[j]
             else:
-                if hi[f] > hi[f-1] and cl[f] < lo[f-1]:
-                    if last_swing is None or hi[f] < last_swing:
-                        last_swing = hi[f]
+                if hi[j] == hi[j-PV:j+PV+1].max():
+                    if last_swing is None or hi[j] < last_swing:
+                        last_swing = hi[j]
         if last_swing is None:
             return False
 
@@ -1753,13 +1756,31 @@ def _bingx_line_breakout(trade) -> bool:
         return False
 
 def _bingx_swing_trail(trade, ref_tf=None) -> bool:
-    """BingX 用最新轉折移SL(只往有利方向)。回傳 True=有更新。"""
+    """BingX 用 pivot 擺盪點移SL(只往有利方向;非單根吞噬,回測pivot全面勝)。回傳 True=有更新。"""
     try:
         direction = trade["direction"]; name = trade["symbol"].split("/")[0]
         tf = ref_tf or trade.get("tf_id", "1H")
-        sw, df = _bingx_swings(trade["symbol"], tf, trade.get("entry_ts"), direction)
-        if not sw: return False
-        last = sw[-1][1]; cur_sl = float(trade.get("current_sl", 0) or 0)
+        inst_okx = OKX_SWAP.get(trade["symbol"], trade["symbol"])
+        df = fetch_market_candles(inst_okx, tf, fetch_limit=120)
+        if df.empty or len(df) < 6: return False
+        ets = trade.get("entry_ts")
+        if ets:
+            try:
+                cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
+                subdf = df[df.index >= cutoff]
+                if len(subdf) >= 6: df = subdf
+            except Exception: pass
+        hi = df["high"].values; lo = df["low"].values; n = len(df); PV = 2
+        last = None
+        for j in range(PV, n - PV):
+            if direction == "long":
+                if lo[j] == lo[j-PV:j+PV+1].min():
+                    if last is None or lo[j] > last: last = lo[j]
+            else:
+                if hi[j] == hi[j-PV:j+PV+1].max():
+                    if last is None or hi[j] < last: last = hi[j]
+        if last is None: return False
+        cur_sl = float(trade.get("current_sl", 0) or 0)
         if direction == "long"  and last <= cur_sl: return False
         if direction == "short" and last >= cur_sl: return False
         rem = float(trade.get("remaining_qty", 0) or 0)
