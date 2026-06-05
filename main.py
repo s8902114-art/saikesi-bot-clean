@@ -2108,51 +2108,10 @@ def check_trailing_stops_for_real():
                     continue
 
                 # 其他(固定R剩半 / 接管倉es=None)：保本後用 pivot 擺盪點移SL繼續鎖利
-                # (取代原波浪追蹤20根,更常鎖;接管倉tf_id=adopted→用1H避雜訊。回測pivot移SL>波浪)
-                tf_wave = trade.get("tf_id", "15m")
-                if tf_wave in ("adopted", "", None): tf_wave = "1H"
-                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=120)
-                _PV = 2
-                if wave_df.empty or len(wave_df) < (2*_PV + 2):
-                    continue
-                highs = wave_df["high"].values
-                lows  = wave_df["low"].values
-                nw = len(wave_df)
-                # 進場後最有利的 pivot(多頭最高擺盪低/空頭最低擺盪高)
-                best = None
-                for j in range(_PV, nw - _PV):
-                    if direction == "long":
-                        if lows[j] == lows[j-_PV:j+_PV+1].min():
-                            if best is None or lows[j] > best: best = lows[j]
-                    else:
-                        if highs[j] == highs[j-_PV:j+_PV+1].max():
-                            if best is None or highs[j] < best: best = highs[j]
-                if best is None:
-                    continue
-                new_sl = trade["current_sl"]
-                if direction == "long"  and best > new_sl: new_sl = best
-                if direction == "short" and best < new_sl: new_sl = best
-
-                if new_sl != trade["current_sl"]:
-                    _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
-                    exit_side = "sell" if direction == "long" else "buy"
-                    try: _new_sl_px = ex.price_to_precision(symbol, new_sl)
-                    except Exception: _new_sl_px = format(new_sl, "f")
-                    sl_result = _place_okx_algo_sl(
-                        inst_id=inst_id, side=exit_side,
-                        amount=trade["remaining_amount"],
-                        sl_trigger_px=_new_sl_px,
-                        pos_side=direction
-                    )
-                    new_algo_id = (sl_result.get("data") or [{}])[0].get("algoId")
-                    if new_algo_id:
-                        trade["sl_algo_id"] = new_algo_id
-                        trade["current_sl"] = new_sl
-
-                    msg = f"📐 {name} 轉折移SL鎖利 → {new_sl}（pivot擺盪點）"
-                    dc_log(msg)
-                    tg_log(msg)
-                    print(f"[Trailing] {name} 轉折移SL(pivot)→ {new_sl}")
+                # 使用 _swing_trail_update_sl：entry_ts 過濾進場後K線(修 bug：舊版用全120根
+                # 含進場前K，空頭進場前的低local high < 當前價，OKX拒單→SL永卡在保本價)
+                if _swing_trail_update_sl(ex, trade):
+                    save_active_trades()
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
