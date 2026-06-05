@@ -2061,6 +2061,7 @@ def check_trailing_stops_for_real():
                         if new_algo_id:
                             trade["sl_algo_id"] = new_algo_id
                             trade["current_sl"] = be_price
+                            trade["tp1_hit"] = True   # 保本後進入移SL階段(下輪走 else 的 pivot 移SL 繼續鎖利)
                             msg = f"🔒 {name} 浮盈達{be_trigger_mult}R，止損移至保本價 {be_price}（含手續費）"
                             dc_log(msg); print(f"[Trailing] {msg}")
                         else:
@@ -2092,29 +2093,31 @@ def check_trailing_stops_for_real():
                         save_active_trades()
                     continue
 
-                # 其他(固定R / 箱突破空回退固定R)：波浪偵測,當根創近20根新高/低→SL移20根低/高點
+                # 其他(固定R剩半 / 接管倉es=None)：保本後用 pivot 擺盪點移SL繼續鎖利
+                # (取代原波浪追蹤20根,更常鎖;接管倉tf_id=adopted→用1H避雜訊。回測pivot移SL>波浪)
                 tf_wave = trade.get("tf_id", "15m")
-                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=21)
-                if wave_df.empty or len(wave_df) < 20:
+                if tf_wave in ("adopted", "", None): tf_wave = "1H"
+                wave_df = fetch_market_candles(inst_id, tf_wave, fetch_limit=120)
+                _PV = 2
+                if wave_df.empty or len(wave_df) < (2*_PV + 2):
                     continue
                 highs = wave_df["high"].values
                 lows  = wave_df["low"].values
-                cur_high  = highs[-1]
-                cur_low   = lows[-1]
-                prev_highs = highs[-21:-1] if len(highs) >= 21 else highs[:-1]
-                prev_lows  = lows[-21:-1]  if len(lows)  >= 21 else lows[:-1]
-
+                nw = len(wave_df)
+                # 進場後最有利的 pivot(多頭最高擺盪低/空頭最低擺盪高)
+                best = None
+                for j in range(_PV, nw - _PV):
+                    if direction == "long":
+                        if lows[j] == lows[j-_PV:j+_PV+1].min():
+                            if best is None or lows[j] > best: best = lows[j]
+                    else:
+                        if highs[j] == highs[j-_PV:j+_PV+1].max():
+                            if best is None or highs[j] < best: best = highs[j]
+                if best is None:
+                    continue
                 new_sl = trade["current_sl"]
-                if direction == "long":
-                    # 當根創近20根新高 → 止損移至近20根最低點
-                    if len(prev_highs) > 0 and cur_high > float(prev_highs.max()):
-                        candidate = float(lows[-20:].min())   # 不 round，保留低價幣精度
-                        new_sl = max(trade["current_sl"], candidate)
-                else:
-                    # 當根創近20根新低 → 止損移至近20根最高點
-                    if len(prev_lows) > 0 and cur_low < float(prev_lows.min()):
-                        candidate = float(highs[-20:].max())
-                        new_sl = min(trade["current_sl"], candidate)
+                if direction == "long"  and best > new_sl: new_sl = best
+                if direction == "short" and best < new_sl: new_sl = best
 
                 if new_sl != trade["current_sl"]:
                     _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
@@ -2132,10 +2135,10 @@ def check_trailing_stops_for_real():
                         trade["sl_algo_id"] = new_algo_id
                         trade["current_sl"] = new_sl
 
-                    msg = f"🔄 波浪追蹤止損更新至 {new_sl}\n幣種：{name}"
+                    msg = f"📐 {name} 轉折移SL鎖利 → {new_sl}（pivot擺盪點）"
                     dc_log(msg)
                     tg_log(msg)
-                    print(f"[Trailing] {name} 波浪追蹤止損更新至 {new_sl}")
+                    print(f"[Trailing] {name} 轉折移SL(pivot)→ {new_sl}")
 
         except Exception as e:
             print(f"[Trailing] {name} 處理失敗: {e}")
