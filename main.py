@@ -2223,7 +2223,11 @@ def check_trailing_stops_for_real():
                         _bingx_swing_trail(trade, ref_tf=("1H" if _es == "swing_tp_1h" else None))
                 continue
 
-            if trade["tp1_hit"]: continue  # 固定R:已保本，跳過
+            if trade["tp1_hit"]:
+                # 固定R:TP1成交保本後，用 pivot 擺盪點移SL繼續鎖利（與 OKX else 分支對齊）
+                # 原本直接 continue → 保本後 SL 永遠停在進場價，不跟漲/跌。
+                _bingx_swing_trail(trade)
+                continue
 
             # ── 浮盈提前保本(與OKX對齊)：達 be_trigger×R+fee → 全倉SL移保本價 ──
             # 用 OKX 報價當參考(同資產跨所價格近似);失敗則跳過,退回TP1成交後保本。
