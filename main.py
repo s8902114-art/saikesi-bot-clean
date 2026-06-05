@@ -1782,6 +1782,7 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
     try:
         direction = trade["direction"]; name = trade["symbol"].split("/")[0]
         tf = ref_tf or trade.get("tf_id", "1H")
+        if tf in ("adopted", "", None): tf = "1H"   # 接管倉用1H避雜訊(與OKX對齊;否則拿"adopted"當時框抓K失敗)
         inst_okx = OKX_SWAP.get(trade["symbol"], trade["symbol"])
         df = fetch_market_candles(inst_okx, tf, fetch_limit=120)
         if df.empty or len(df) < 6: return False
