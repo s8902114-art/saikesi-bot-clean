@@ -2052,12 +2052,12 @@ def check_trailing_stops_for_real():
                         float_pnl = entry - cur_price
                     # 保本價含手續費：多單掛 entry+fee、空單掛 entry-fee（之前誤掛在raw entry沒扣費）
                     be_price = entry + fee_buffer if direction == "long" else entry - fee_buffer
-                    # 已保本(SL已達/優於保本價:多頭SL>=be、空頭SL<=be)的單→直接設tp1_hit
-                    # →下輪進 else 的 pivot 移SL鎖利(解決接管/已保本單卡在not tp1_hit、永不鎖利)
+                    # 已保本(SL已達/優於保本價:多頭SL>=be、空頭SL<=be)→設tp1_hit進入pivot移SL。
+                    # ⚠️ elif：_be_done時跳過浮盈保本，否則SL被倒退回保本價(已追蹤更佳的SL被覆蓋)。
                     _be_done = (float(trade["current_sl"]) >= be_price) if direction == "long" else (float(trade["current_sl"]) <= be_price)
                     if _be_done:
                         trade["tp1_hit"] = True
-                    if float_pnl >= breakeven_trigger and trade["current_sl"] != be_price:
+                    elif float_pnl >= breakeven_trigger and trade["current_sl"] != be_price:
                         exit_side = "sell" if direction == "long" else "buy"
                         try: _be_px = ex.price_to_precision(symbol, be_price)
                         except Exception: _be_px = format(be_price, "f")
