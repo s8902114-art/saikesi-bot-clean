@@ -3909,9 +3909,12 @@ def adopt_untracked_bingx_positions():
             dc_log(f"📥 BingX 已接管未追蹤倉位 {bx_sym} {direction}(進場{entry}、止損{sl_trig})→ {_es_lbl}")
         except Exception as ie:
             print(f"[BingX Adopt] {p.get('symbol','?')} 失敗: {ie}")
-    # 診斷:無論結果都印掃描總結(filter "BingX" 可在 Railway logs 確認 adopt 行為)
-    dc_log(f"ℹ️ BingX adopt 掃描 {len(positions)} 個持倉 → 接管 {adopted} 個"
-           + (f"、跳過模式不符 {skipped_mode} 個" if skipped_mode else ""))
+    # 診斷:同時 print(進Railway stdout/Deploy Logs) + dc_log(進Discord)
+    # dc_log 成功發Discord時不print,故Railway Deploy Logs只能靠print看到adopt行為。
+    _diag = (f"BingX adopt 掃描 {len(positions)} 個持倉 → 接管 {adopted} 個"
+             + (f"、跳過模式不符 {skipped_mode} 個" if skipped_mode else ""))
+    print(f"[BingX Adopt] {_diag}", flush=True)
+    dc_log(f"ℹ️ {_diag}")
     if adopted: save_active_trades()
 
 
