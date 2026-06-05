@@ -1578,6 +1578,11 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         # 只往有利方向移（多頭往上、空頭往下）
         if direction == "long"  and last_swing <= cur_sl: return False
         if direction == "short" and last_swing >= cur_sl: return False
+        # 合法側保護:新SL須在市價保護側,否則OKX拒單。★放在cancel前:否則先取消舊SL再
+        # 掛無效新SL→裸倉。接管倉entry_ts=None用全120根可能取進場前pivot落錯側,此處擋掉。
+        cur_px = float(cl[-1])
+        if direction == "short" and last_swing <= cur_px: return False
+        if direction == "long"  and last_swing >= cur_px: return False
 
         _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
         exit_side = "sell" if direction == "long" else "buy"
@@ -1806,6 +1811,11 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
         cur_sl = float(trade.get("current_sl", 0) or 0)
         if direction == "long"  and last <= cur_sl: return False
         if direction == "short" and last >= cur_sl: return False
+        # 合法側保護:新SL須在市價的保護側(空頭>市價、多頭<市價),否則交易所拒單→白掛。
+        # 接管倉 entry_ts=None 用全120根,可能取到進場前pivot落在錯側,此處擋掉。
+        cur_px = float(df["close"].iloc[-1])
+        if direction == "short" and last <= cur_px: return False
+        if direction == "long"  and last >= cur_px: return False
         rem = float(trade.get("remaining_qty", 0) or 0)
         if rem <= 0: return False
         nid = _bingx_replace_sl(trade, last, rem)
