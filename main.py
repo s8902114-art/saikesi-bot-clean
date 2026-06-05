@@ -2426,7 +2426,7 @@ DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5
 #   1) 加碼前走強平守門員(合併部位若強平在停損前→不加)
 #   2) 加碼後停損=原進場價→觸損時原單保本+加碼單虧1R,合併最大虧≈1單位(有界,不爆倉)
 #   3) 每筆只加一次  4) 預設關閉,review+觀察後再開
-PYRAMID_ENABLED = False   # 預設關;確認無誤後改 True 或加 Discord 指令
+PYRAMID_ENABLED = True    # 2026-06-05 啟用(觀察期3天已過,約定RISK5%+STEP50)
 PYRAMID_LIQ_BUF = 0.85    # 強平守門員緩衝(同下單管線)
 def _okx_pyramid_add(ex, trade) -> bool:
     """對已 +1R 的多單加碼一個單位(=原始張數),停損上移到原進場價。
@@ -3201,8 +3201,9 @@ class SykesTradingBot:
         # 對齊 _mai_line_v2 / _mai_trail_1h / _mai_add / _mai_mtf_trail：
         #   DH空(加碼驗+0.890/RA3.46) → line_add; 30m C3多(驗+0.582) → line_full
         #   1H W底多(驗+0.165) → swing_tp; 1H MACD空(驗+0.251) → swing_full
+        #   1H C3空+階梯(驗+0.263/MDD10%/RA2.54) → swing_full
         #   15m MACD多(參1H轉折驗+0.142/RA0.36) → swing_tp_1h
-        #   箱突破空/1H C3空/15m C3多 → 固定R(切線/移SL未變好)
+        #   箱突破空/15m C3多 → 固定R(切線/移SL未變好)
         exit_strategy = ""
         if is_dh_short:
             exit_strategy = "line_add"                                   # DH空：整倉切線+轉折加碼
@@ -3212,6 +3213,8 @@ class SykesTradingBot:
             exit_strategy = "swing_tp"                                   # 1H W底多：TP1+轉折移SL
         elif tf_id == "1H" and direction == "short" and is_macd_short:
             exit_strategy = "swing_full"                                 # 1H MACD空：整倉轉折移SL
+        elif tf_id == "1H" and direction == "short" and is_short:
+            exit_strategy = "swing_full"                                 # 1H C3空+階梯：整倉pivot移SL(驗+0.263/MDD10%)
         elif tf_id == "15m" and direction == "long" and is_macd_long:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
         elif is_box_short:
