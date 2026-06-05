@@ -114,7 +114,8 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
 RISK_PCT     = 0.10        # 單筆最大風險金額 = 基準 × 10%
 RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
-OKX_MIN_MMR  = 350.0       # OKX 開倉前維持保證金率門檻(%)：預估加新倉後 < 此值就跳過（/setmmr 可調）
+OKX_MIN_MMR       = 350.0  # OKX 開倉前維持保證金率門檻(%)：預估加新倉後 < 此值就跳過（!setmmr 可調）
+BINGX_MAX_RISK_RATE = 0.70 # BingX 開倉前帳戶風險率上限：預估加新倉後 > 此值就跳過（!setbingxrisk 可調）
 # ── 分段複利下注（壓 MDD；回測：每+50U → 37倍/MDD50% vs 純複利MDD96%）──
 LADDER_BASE_USDT = 10.0    # 初始下注基準（單筆風險 = 此值 × RISK_PCT 起跳）
 LADDER_STEP_USDT = 50.0    # 每多賺此金額，單筆風險才加一級（/setladder 可調）
@@ -1266,19 +1267,26 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log(f"⚠️ BingX 保證金不足：可用 {avail_usdt:.2f}，需要 {margin:.2f}")
             return
 
-        # ── BingX 風險率保護 ──────────────────────────────────────────────────
-        # BingX 風險率 = 已用保證金 / 帳戶淨值，越高越危險，接近 100% 會爆倉
-        # 公式：used_margin = equity - availableMargin
-        # 新倉開完後估算風險率，超過閾值就不開
-        BINGX_MAX_RISK_RATE = 0.70   # 最高允許風險率 70%（超過就不開新倉）
+        # ── BingX 風險率保護（帳戶級）────────────────────────────────────────
+        # BingX 風險率 = 已用保證金 / 帳戶淨值，越高越危險，接近 100% 會爆倉。
+        # BINGX_MAX_RISK_RATE 全域可調(!setbingxrisk)，預設 70%。
         equity        = float(bal.get("equity") or total_usdt)
         used_margin   = equity - avail_usdt
-        # 加上這筆新倉的保證金後，估算風險率
         projected_used = used_margin + margin
         projected_risk_rate = projected_used / equity if equity > 0 else 1.0
         if projected_risk_rate > BINGX_MAX_RISK_RATE:
             dc_log(f"⚠️ BingX 跳過 [{symbol_id}]：風險率預估 {projected_risk_rate:.0%} > {BINGX_MAX_RISK_RATE:.0%}"
                    f"（已用 {used_margin:.2f} + 新倉 {margin:.2f} / 淨值 {equity:.2f}）")
+            return
+
+        # ── BingX 強平守門員（逐筆，與 OKX 一致）────────────────────────────
+        # 估算強平距離 = (可用保證金 + 本倉保證金) / 倉位名義，若停損距 ≥ 強平距×0.85
+        # 代表強平會在止損前觸發（全倉模式連帶清掉其他倉）→ 直接跳過。
+        est_liq_dist_bx = (avail_usdt + margin) / position_value if position_value > 0 else 0.0
+        if sl_dist_pct >= est_liq_dist_bx * 0.85:
+            dc_log(f"⚠️ BingX 跳過 [{symbol_id}]：強平估算觸發在止損前，保護帳戶不下單"
+                   f"（停損距 {sl_dist_pct*100:.2f}% ≥ 估強平距 {est_liq_dist_bx*100:.2f}%×0.85；"
+                   f"可用 {avail_usdt:.2f}U／倉位 {position_value:.2f}U）")
             return
 
         # 設定槓桿（全倉模式）
@@ -3444,7 +3452,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -3585,6 +3593,20 @@ def poll_dc_commands():
                                        f"   越高越保守(留多餘保證金)、越低越積極(易爆倉風險升)")
                             else:
                                 dc_log("⚠️ 用法: `!setmmr 350`（OKX 維持保證金率門檻%，低於此值不開新倉）")
+
+                        # ── setbingxrisk：BingX 帳戶風險率上限，預估加新倉後超過就跳過 ──
+                        elif cmd == "setbingxrisk":
+                            if len(parts) >= 2 and parts[1].replace(".", "").isdigit():
+                                val = float(parts[1])
+                                if 0 < val <= 100:
+                                    BINGX_MAX_RISK_RATE = val / 100.0 if val > 1 else val
+                                    dc_log(f"⚙️ BingX 風險率上限已更新：`{BINGX_MAX_RISK_RATE:.0%}`\n"
+                                           f"   開倉前預估加新倉後風險率 > {BINGX_MAX_RISK_RATE:.0%} 就跳過。\n"
+                                           f"   越低越保守（預設70%；BingX 另有逐筆強平守門員與OKX對齊）")
+                                else:
+                                    dc_log("⚠️ 數值需在 1~100 之間（如 `!setbingxrisk 60`=60%）")
+                            else:
+                                dc_log("⚠️ 用法: `!setbingxrisk 70`（BingX 帳戶風險率上限%，超過就不開新倉）")
 
                         # ── cvd on|off ─────────────────────────────────
                         elif cmd == "cvd":
