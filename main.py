@@ -3826,17 +3826,23 @@ def adopt_untracked_bingx_positions():
 
     tracked = {(t.get("symbol"), t.get("direction")) for t in active_real_trades.values()
                if t.get("exchange") == "bingx"}
-    adopted = 0
+    adopted = 0; skipped_mode = 0
     for p in positions:
         try:
-            qty = abs(float(p.get("positionAmt") or 0))
+            amt = float(p.get("positionAmt") or 0)
+            qty = abs(amt)
             if qty <= 0: continue
             pos_side_raw = p.get("positionSide", "")
-            if pos_side_raw not in ("LONG", "SHORT"): continue
+            # 支援單向持倉模式(positionSide=BOTH)：方向由 positionAmt 正負判斷，SL掛單仍用BOTH
+            if pos_side_raw == "BOTH":
+                direction = "long" if amt > 0 else "short"
+            elif pos_side_raw in ("LONG", "SHORT"):
+                direction = "long" if pos_side_raw == "LONG" else "short"
+            else:
+                skipped_mode += 1; continue
             bx_sym = p.get("symbol", "")
             if not bx_sym: continue
             ccxt_sym = bx_sym.replace("-", "/")
-            direction = "long" if pos_side_raw == "LONG" else "short"
             if (ccxt_sym, direction) in tracked: continue
             entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
             if entry <= 0: continue
@@ -3903,6 +3909,9 @@ def adopt_untracked_bingx_positions():
             dc_log(f"📥 BingX 已接管未追蹤倉位 {bx_sym} {direction}(進場{entry}、止損{sl_trig})→ {_es_lbl}")
         except Exception as ie:
             print(f"[BingX Adopt] {p.get('symbol','?')} 失敗: {ie}")
+    # 診斷:無論結果都印掃描總結(filter "BingX" 可在 Railway logs 確認 adopt 行為)
+    dc_log(f"ℹ️ BingX adopt 掃描 {len(positions)} 個持倉 → 接管 {adopted} 個"
+           + (f"、跳過模式不符 {skipped_mode} 個" if skipped_mode else ""))
     if adopted: save_active_trades()
 
 
