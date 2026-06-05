@@ -1531,6 +1531,7 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         symbol    = trade["symbol"]
         direction = trade["direction"]
         tf        = ref_tf or trade.get("tf_id", "1H")
+        if tf in ("adopted", "", None): tf = "1H"   # 接管倉改用1H避雜訊
         name      = symbol.split("/")[0]
 
         df = fetch_market_candles(inst_id, tf, fetch_limit=120)
@@ -3776,6 +3777,7 @@ def adopt_untracked_okx_positions():
             if risk<=0: continue
             # 補 TP(接管倉常沒TP)：risk太小(止損已近保本)不補;TP只掛在現價的獲利方向(避免51006)
             tp1_id=None
+            has_tp=True   # 預設保守(查失敗→固定R)
             try:
                 cur=float(ex.fetch_ticker(sym).get("last") or 0)
                 has_tp=any(o.get("type")=="limit" and (o.get("reduceOnly") or
@@ -3800,16 +3802,22 @@ def adopt_untracked_okx_positions():
                     if placed: dc_log(f"🎯 接管倉 {sym} {side} 補TP: {' / '.join(placed)}")
             except Exception as _te:
                 print(f"[Adopt] {sym} 補TP失敗: {_te}")
+            # 根據接管時原始 TP 掛單推算 exit_strategy（根因修正）：
+            #   無TP → 整倉轉折移SL(swing_full)；有TP → 固定R半倉(走 TP1→保本→pivot 路徑)
+            inferred_es  = "swing_full" if not has_tp else ""
+            inferred_rem = str(ct) if not has_tp else str(round(ct*0.5, 8))
             tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
             active_real_trades[tkey]={
                 "exchange":"okx","inst_id":inst_id,"symbol":sym,"direction":side,
                 "entry_price":str(entry),"sl_algo_id":sl_id,"tp1_order_id":tp1_id,
-                "tp1_hit":False,"current_sl":sl_trig,"remaining_amount":str(round(ct*0.5,8)),
+                "tp1_hit":False,"current_sl":sl_trig,"remaining_amount":inferred_rem,
                 "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
+                "exit_strategy":inferred_es,
             }
             adopted+=1
-            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ 補TP+達1R自動保本")
+            _es_label = "swing_full整倉追蹤" if inferred_es == "swing_full" else "固定R半倉"
+            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ {_es_label}+達1R自動保本")
         except Exception as ie:
             print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
     if adopted: save_active_trades()
