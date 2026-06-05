@@ -3811,6 +3811,100 @@ def adopt_untracked_okx_positions():
     if adopted: save_active_trades()
 
 
+def adopt_untracked_bingx_positions():
+    """啟動時把未追蹤的 BingX 倉位納入保本追蹤（與 OKX adopt 對齊）。
+    BingX 沒有 closeFraction，需要記錄具體 qty；SL 用 STOP_MARKET 訂單追蹤。"""
+    if not _LIVE_MODE or not BINGX_API_KEY or not BINGX_SECRET_KEY:
+        return
+    try:
+        headers = {"X-BX-APIKEY": BINGX_API_KEY}
+        r = _bingx_request("GET", "/openApi/swap/v2/user/positions", {}, headers)
+        positions = (r.json().get("data") or [])
+    except Exception as e:
+        print(f"[BingX Adopt] 取持倉失敗: {e}"); return
+
+    tracked = {(t.get("symbol"), t.get("direction")) for t in active_real_trades.values()
+               if t.get("exchange") == "bingx"}
+    adopted = 0
+    for p in positions:
+        try:
+            qty = abs(float(p.get("positionAmt") or 0))
+            if qty <= 0: continue
+            pos_side_raw = p.get("positionSide", "")
+            if pos_side_raw not in ("LONG", "SHORT"): continue
+            bx_sym = p.get("symbol", "")
+            if not bx_sym: continue
+            ccxt_sym = bx_sym.replace("-", "/")
+            direction = "long" if pos_side_raw == "LONG" else "short"
+            if (ccxt_sym, direction) in tracked: continue
+            entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
+            if entry <= 0: continue
+
+            # 抓開放訂單，找 SL(STOP_MARKET) 和 TP
+            orders_r = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders",
+                                      {"symbol": bx_sym}, headers)
+            orders = (orders_r.json().get("data") or {})
+            if isinstance(orders, dict): orders = orders.get("orders") or []
+
+            sl_order_id = None; sl_trig = None; tp1_order_id = None; has_tp = False
+            for o in (orders or []):
+                o_type = str(o.get("type", "")).upper()
+                o_pos  = o.get("positionSide", "")
+                o_stop = float(o.get("stopPrice") or 0)
+                o_id   = str(o.get("orderId") or "")
+                if o_pos != pos_side_raw: continue
+                if o_type in ("STOP_MARKET", "STOP") and o_stop > 0 and not sl_order_id:
+                    sl_order_id = o_id; sl_trig = o_stop
+                if o_type in ("TAKE_PROFIT_MARKET", "TAKE_PROFIT", "LIMIT") and o_stop > 0:
+                    has_tp = True
+                    if not tp1_order_id: tp1_order_id = o_id
+
+            if not sl_trig:
+                dc_log(f"⚠️ BingX 發現未追蹤倉位 {bx_sym} {direction}(讀不到止損)→ 請手動設止損")
+                continue
+            risk = abs(entry - sl_trig)
+            if risk <= 0: continue
+
+            fee_buf  = entry * 0.001
+            be_price = (entry + fee_buf) if direction == "long" else (entry - fee_buf)
+            exit_side = "SELL" if direction == "long" else "BUY"
+            # 根據有無 TP 推算 exit_strategy 和 remaining_qty（與 OKX adopt 邏輯一致）
+            inferred_es  = "swing_full" if not has_tp else ""
+            inferred_rem = str(round(qty, 4)) if not has_tp else str(round(qty * 0.5, 4))
+
+            tkey = f"bingx_{bx_sym}_{direction}_{int(time.time())}"
+            active_real_trades[tkey] = {
+                "exchange":      "bingx",
+                "inst_id":       bx_sym,
+                "symbol":        ccxt_sym,
+                "direction":     direction,
+                "entry_price":   str(entry),
+                "sl_order_id":   sl_order_id,
+                "tp1_order_id":  tp1_order_id,
+                "tp1_hit":       False,
+                "current_sl":    sl_trig,
+                "be_price":      be_price,
+                "remaining_qty": inferred_rem,
+                "full_qty":      str(round(qty, 4)),
+                "pos_side":      pos_side_raw,
+                "exit_side":     exit_side,
+                "headers":       headers,
+                "risk_dist":     risk,
+                "tf_id":         "adopted",
+                "exit_strategy": inferred_es,
+                "entry_ts":      None,
+                "init_qty":      str(round(qty, 4)),
+                "add_count":     0,
+                "add_swings_n":  0,
+            }
+            adopted += 1
+            _es_lbl = "swing_full整倉追蹤" if inferred_es == "swing_full" else "固定R半倉"
+            dc_log(f"📥 BingX 已接管未追蹤倉位 {bx_sym} {direction}(進場{entry}、止損{sl_trig})→ {_es_lbl}")
+        except Exception as ie:
+            print(f"[BingX Adopt] {p.get('symbol','?')} 失敗: {ie}")
+    if adopted: save_active_trades()
+
+
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
@@ -3820,6 +3914,8 @@ def main_polling_loop():
     load_active_trades()
     # 接管現有未追蹤的 OKX 倉位（手動開的/重啟前丟失的）→ 讀既有止損納入自動保本
     adopt_untracked_okx_positions()
+    # 接管現有未追蹤的 BingX 倉位（與 OKX adopt 對齊，解決 redeploy 後 BingX 追蹤全失）
+    adopt_untracked_bingx_positions()
     n_sym = len(SYMBOLS)
 
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
