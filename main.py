@@ -1745,16 +1745,38 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
     return sw, df
 
 def _bingx_replace_sl(trade, sl_price, qty):
-    """BingX 取消舊SL + 掛新STOP_MARKET(指定qty)。回傳新orderId或None。"""
+    """BingX 取消該倉所有舊SL + 掛新STOP_MARKET(指定qty)。回傳新orderId或None。
+    ★清掉「該symbol該方向的所有 STOP_MARKET 單」,不只追蹤的那一個——
+    否則多次移SL/redeploy 累積一堆止損單(數量加總可能超過倉位→過量平倉/反向開倉)。"""
+    sym = trade["inst_id"]; pos = trade["pos_side"]; hdr = trade["headers"]
+    # 1) 查該 symbol 所有掛單,取消全部 STOP_MARKET(該方向)
     try:
-        _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
-                       {"symbol": trade["inst_id"], "orderId": trade.get("sl_order_id")}, trade["headers"])
+        oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders",
+                            {"symbol": sym}, hdr).json()
+        orders = oo.get("data") or {}
+        if isinstance(orders, dict): orders = orders.get("orders") or []
+        cancelled = 0
+        for o in (orders or []):
+            if (str(o.get("type", "")).upper() in ("STOP_MARKET", "STOP")
+                    and o.get("positionSide") == pos):
+                try:
+                    _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                                   {"symbol": sym, "orderId": o.get("orderId")}, hdr)
+                    cancelled += 1
+                except Exception: pass
+        if cancelled > 1:
+            print(f"[BingX-SL] {sym} 清掉 {cancelled} 個舊止損單(防累積),重掛1個", flush=True)
     except Exception:
-        pass
+        # 查單失敗→退回只取消追蹤的那個(至少不比原本差)
+        try:
+            _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                           {"symbol": sym, "orderId": trade.get("sl_order_id")}, hdr)
+        except Exception: pass
+    # 2) 掛一個新的 STOP_MARKET
     r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-        "symbol": trade["inst_id"], "side": trade["exit_side"], "positionSide": trade["pos_side"],
+        "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
         "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
-        "quantity": str(qty), "workingType": "MARK_PRICE"}, trade["headers"]).json()
+        "quantity": str(qty), "workingType": "MARK_PRICE"}, hdr).json()
     if r.get("code", 0) == 0:
         return r.get("data", {}).get("order", {}).get("orderId", "")
     return None
