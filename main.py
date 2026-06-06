@@ -1747,32 +1747,29 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
     return sw, df
 
 def _bingx_replace_sl(trade, sl_price, qty):
-    """BingX 批量取消該symbol所有掛單 + 掛新STOP_MARKET。回傳新orderId或None。
-    ★用批量取消(DELETE allOpenOrders)取代逐個cancelOrder——
-    逐個用 openOrders 的 orderId 取消會失敗(被try吞),只挂新成功→止損單每輪暴增(4→5→6)。
-    ★止血鐵則:批量取消未成功(code!=0)就「絕不挂新單」,舊單留著兜底(不裸),避免暴增。"""
-    sym = trade["inst_id"]; pos = trade["pos_side"]; hdr = trade["headers"]
-    # 1) 批量取消該 symbol 所有掛單(swing_full接管倉無TP,全是止損單)
-    ok_cancel = False
+    """★緊急止血(2026-06-07 暴增中):DELETE allOpenOrders 回 code=0 但 dedup 仍每輪+1
+    →該endpoint刪不掉這些止損單(很可能是觸發委託/計劃委託,不在普通掛單管轄)。
+    先「無條件不挂新止損」徹底止血(停止+1),同時診斷訂單真實type,
+    確認對的取消endpoint後再恢復。倉位靠現有止損單兜底(不裸)。"""
+    sym = trade["inst_id"]; hdr = trade["headers"]
+    # 診斷:印 openOrders 的 type 分布 + 樣本完整欄位,看這些止損單到底是什麼
     try:
-        dr = _bingx_request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {"symbol": sym}, hdr)
-        _code = dr.json().get("code", -1)
-        ok_cancel = (_code == 0)
-        print(f"[BingX-SL] {sym} 批量取消掛單 code={_code} ok={ok_cancel}", flush=True)
-    except Exception as _ce:
-        print(f"[BingX-SL] {sym} 批量取消異常: {_ce}", flush=True)
-    # ★止血:取消未成功→不挂新單(避免暴增)。舊止損單留著兜底,不會裸倉。
-    if not ok_cancel:
-        print(f"[BingX-SL] {sym} 取消未成功→跳過挂新止損(止血,舊單留著)", flush=True)
-        return None
-    # 2) 取消成功才挂一個新的 STOP_MARKET
-    r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-        "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
-        "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
-        "quantity": str(qty), "workingType": "MARK_PRICE"}, hdr).json()
-    if r.get("code", 0) == 0:
-        return r.get("data", {}).get("order", {}).get("orderId", "")
-    return None
+        oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym}, hdr).json()
+        _ords = oo.get("data") or {}
+        if isinstance(_ords, dict): _ords = _ords.get("orders") or []
+        if _ords:
+            _types = {}
+            for o in _ords:
+                _k = str(o.get("type"))
+                _types[_k] = _types.get(_k, 0) + 1
+            o0 = _ords[0]
+            print(f"[BingX-SL] {sym} 共{len(_ords)}筆 type分布={_types} 樣本:"
+                  f"orderId={o0.get('orderId')} type={o0.get('type')} "
+                  f"posSide={o0.get('positionSide')} reduceOnly={o0.get('reduceOnly')} "
+                  f"workingType={o0.get('workingType')}", flush=True)
+    except Exception as _e:
+        print(f"[BingX-SL] {sym} 診斷查單失敗: {_e}", flush=True)
+    return None  # ★止血:暫停挂新止損,停止暴增。確認真實type後再恢復。
 
 def _bingx_line_breakout(trade) -> bool:
     """BingX 麥門切線突破→市價平剩餘。回傳 True=已平。"""
