@@ -1901,6 +1901,11 @@ def check_trailing_stops_for_real():
 
     for trade_key in list(active_real_trades.keys()):
         trade     = active_real_trades[trade_key]
+        # ★★致命bug修復:此段用 OKX client 查持倉,只能處理 OKX 倉位。
+        # 沒有此過濾→BingX 倉位被 OKX fetch_positions 查不到→誤判已平倉→pop移除→
+        # 永遠到不了下方 BingX 段→BingX 移SL/保本從來沒運作過。BingX 由下方專段處理。
+        if trade.get("exchange") != "okx":
+            continue
         symbol    = trade["symbol"]
         inst_id   = trade["inst_id"]
         direction = trade["direction"]
