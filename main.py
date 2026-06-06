@@ -2226,7 +2226,26 @@ def check_trailing_stops_for_real():
                                     print(f"[BingX-BE] {bingx_symbol} 達1R保本→{be_price}", flush=True)
                     except Exception as _be:
                         print(f"[BingX-BE] {trade_key} 保本判斷失敗: {_be}", flush=True)
-                _bingx_swing_trail(trade)
+                moved = _bingx_swing_trail(trade)
+                # 即使沒移SL(SL已在最優位,pivot不優於它),也清理多餘止損單。
+                # 解決:之前累積的殘留止損單,因現在不觸發移SL/保本→_bingx_replace_sl不被呼叫→舊單清不掉。
+                if not moved:
+                    try:
+                        _oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders",
+                                             {"symbol": bingx_symbol}, headers).json()
+                        _ords = _oo.get("data") or {}
+                        if isinstance(_ords, dict): _ords = _ords.get("orders") or []
+                        _stops = [o for o in _ords
+                                  if str(o.get("type", "")).upper() in ("STOP_MARKET", "STOP")
+                                  and o.get("positionSide") == pos_side]
+                        if len(_stops) > 1:
+                            _csl = float(trade.get("current_sl") or 0)
+                            if _csl > 0:
+                                nid = _bingx_replace_sl(trade, _csl, remaining)  # 清全部,按current_sl重掛1個
+                                if nid: trade["sl_order_id"] = nid
+                                print(f"[BingX-Dedup] {bingx_symbol} 清理{len(_stops)}個止損→1個@{_csl}", flush=True)
+                    except Exception as _de:
+                        print(f"[BingX-Dedup] {bingx_symbol} 清理失敗: {_de}", flush=True)
                 continue
             if _es in ("swing_tp", "swing_tp_1h", "tp_line"):
                 if not trade.get("tp1_hit"):
