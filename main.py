@@ -1175,6 +1175,8 @@ def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout:
     url = f"{BINGX_BASE}{path}?{query}"
     if method == "GET":
         return requests.get(url, headers=headers, timeout=timeout)
+    elif method == "DELETE":
+        return requests.delete(url, headers=headers, timeout=timeout)
     else:
         return requests.post(url, headers=headers, timeout=timeout)
 
@@ -1745,34 +1747,25 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
     return sw, df
 
 def _bingx_replace_sl(trade, sl_price, qty):
-    """BingX 取消該倉所有舊SL + 掛新STOP_MARKET(指定qty)。回傳新orderId或None。
-    ★清掉「該symbol該方向的所有 STOP_MARKET 單」,不只追蹤的那一個——
-    否則多次移SL/redeploy 累積一堆止損單(數量加總可能超過倉位→過量平倉/反向開倉)。"""
+    """BingX 批量取消該symbol所有掛單 + 掛新STOP_MARKET。回傳新orderId或None。
+    ★用批量取消(DELETE allOpenOrders)取代逐個cancelOrder——
+    逐個用 openOrders 的 orderId 取消會失敗(被try吞),只挂新成功→止損單每輪暴增(4→5→6)。
+    ★止血鐵則:批量取消未成功(code!=0)就「絕不挂新單」,舊單留著兜底(不裸),避免暴增。"""
     sym = trade["inst_id"]; pos = trade["pos_side"]; hdr = trade["headers"]
-    # 1) 查該 symbol 所有掛單,取消全部 STOP_MARKET(該方向)
+    # 1) 批量取消該 symbol 所有掛單(swing_full接管倉無TP,全是止損單)
+    ok_cancel = False
     try:
-        oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders",
-                            {"symbol": sym}, hdr).json()
-        orders = oo.get("data") or {}
-        if isinstance(orders, dict): orders = orders.get("orders") or []
-        cancelled = 0
-        for o in (orders or []):
-            if (str(o.get("type", "")).upper() in ("STOP_MARKET", "STOP")
-                    and o.get("positionSide") == pos):
-                try:
-                    _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
-                                   {"symbol": sym, "orderId": o.get("orderId")}, hdr)
-                    cancelled += 1
-                except Exception: pass
-        if cancelled > 1:
-            print(f"[BingX-SL] {sym} 清掉 {cancelled} 個舊止損單(防累積),重掛1個", flush=True)
-    except Exception:
-        # 查單失敗→退回只取消追蹤的那個(至少不比原本差)
-        try:
-            _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
-                           {"symbol": sym, "orderId": trade.get("sl_order_id")}, hdr)
-        except Exception: pass
-    # 2) 掛一個新的 STOP_MARKET
+        dr = _bingx_request("DELETE", "/openApi/swap/v2/trade/allOpenOrders", {"symbol": sym}, hdr)
+        _code = dr.json().get("code", -1)
+        ok_cancel = (_code == 0)
+        print(f"[BingX-SL] {sym} 批量取消掛單 code={_code} ok={ok_cancel}", flush=True)
+    except Exception as _ce:
+        print(f"[BingX-SL] {sym} 批量取消異常: {_ce}", flush=True)
+    # ★止血:取消未成功→不挂新單(避免暴增)。舊止損單留著兜底,不會裸倉。
+    if not ok_cancel:
+        print(f"[BingX-SL] {sym} 取消未成功→跳過挂新止損(止血,舊單留著)", flush=True)
+        return None
+    # 2) 取消成功才挂一個新的 STOP_MARKET
     r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
         "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
