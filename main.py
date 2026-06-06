@@ -1830,6 +1830,7 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
         if nid is not None:
             trade["sl_order_id"] = nid; trade["current_sl"] = last
             dc_log(f"📐 BingX {name} 轉折移動停損 → {last}")
+            print(f"[BingX-Trail] {name} 移SL→{last}", flush=True)
             return True
         return False
     except Exception as e:
