@@ -3821,7 +3821,7 @@ def adopt_untracked_okx_positions():
                 "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
                 "exit_strategy":inferred_es,
-                "entry_ts":int(time.time()),   # 接管時間:移SL只看接管後K線,避免取進場前pivot
+                "entry_ts":int(time.time()) - 6*3600,   # 接管時間往前6h:立即有6根1H可算pivot(同BingX adopt)
             }
             adopted+=1
             _es_label = "swing_full整倉追蹤" if inferred_es == "swing_full" else "固定R半倉"
@@ -3918,7 +3918,7 @@ def adopt_untracked_bingx_positions():
                 "risk_dist":     risk,
                 "tf_id":         "adopted",
                 "exit_strategy": inferred_es,
-                "entry_ts":      int(time.time()),   # 接管時間:移SL只看接管後K線,避免取進場前pivot被合法側擋
+                "entry_ts":      int(time.time()) - 6*3600,   # 接管時間往前6h:立即有6根1H可算pivot→開了>6h的倉這輪即可移SL(開<6h的取進場前pivot會被合法側擋=不移,安全)
                 "init_qty":      str(round(qty, 4)),
                 "add_count":     0,
                 "add_swings_n":  0,
