@@ -2182,6 +2182,28 @@ def check_trailing_stops_for_real():
                     _bingx_add_on_swing(trade)
                 continue
             if _es == "swing_full":
+                # 接管倉(tf_id=adopted)加「達1R保本」兜底:不依賴K線,達浮盈立即移SL到保本,
+                # 之後再交給pivot移SL。正常swing_full(1H MACD空等)不加,保持回測純移SL。
+                # 同時印每倉浮盈診斷,看清19倉是賺是虧、該不該動。
+                if trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
+                    try:
+                        cur = float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                        rd  = float(trade.get("risk_dist", 0) or 0)
+                        if cur > 0 and rd > 0:
+                            fpnl_r = ((entry - cur) if direction == "short" else (cur - entry)) / rd
+                            sl_now = float(trade.get("current_sl") or 0)
+                            be_better = (be_price < sl_now) if direction == "short" else (be_price > sl_now)
+                            print(f"[BingX-BE] {bingx_symbol} {direction} 浮盈{fpnl_r:+.2f}R "
+                                  f"sl={sl_now} be={be_price} 可保本={be_better}", flush=True)
+                            if fpnl_r >= 1.0 and be_better:
+                                nid = _bingx_replace_sl(trade, be_price, remaining)
+                                if nid is not None:
+                                    trade["sl_order_id"] = nid; trade["current_sl"] = be_price
+                                    trade["tp1_hit"] = True
+                                    dc_log(f"🔒 BingX {bingx_symbol} 接管倉達1R,止損移保本 {be_price}")
+                                    print(f"[BingX-BE] {bingx_symbol} 達1R保本→{be_price}", flush=True)
+                    except Exception as _be:
+                        print(f"[BingX-BE] {trade_key} 保本判斷失敗: {_be}", flush=True)
                 _bingx_swing_trail(trade)
                 continue
             if _es in ("swing_tp", "swing_tp_1h", "tp_line"):
