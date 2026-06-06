@@ -1747,29 +1747,44 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
     return sw, df
 
 def _bingx_replace_sl(trade, sl_price, qty):
-    """★緊急止血(2026-06-07 暴增中):DELETE allOpenOrders 回 code=0 但 dedup 仍每輪+1
-    →該endpoint刪不掉這些止損單(很可能是觸發委託/計劃委託,不在普通掛單管轄)。
-    先「無條件不挂新止損」徹底止血(停止+1),同時診斷訂單真實type,
-    確認對的取消endpoint後再恢復。倉位靠現有止損單兜底(不裸)。"""
-    sym = trade["inst_id"]; hdr = trade["headers"]
-    # 診斷:印 openOrders 的 type 分布 + 樣本完整欄位,看這些止損單到底是什麼
+    """BingX 取消該倉所有 STOP_MARKET 止損 + 挂新1個。回傳新orderId或None。
+    ★用正確撤單 endpoint DELETE /openApi/swap/v2/trade/order(之前用POST cancelOrder
+    和DELETE allOpenOrders都刪不掉→暴增)。逐個取消確切orderId。
+    ★止血鐵則:未全清(取消數<總數)就「絕不挂新」,return None,避免暴增。"""
+    sym = trade["inst_id"]; hdr = trade["headers"]; pos = trade["pos_side"]
+    # 1) 查所有該方向 STOP_MARKET 止損單的 orderId
+    oids = []
     try:
         oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym}, hdr).json()
         _ords = oo.get("data") or {}
         if isinstance(_ords, dict): _ords = _ords.get("orders") or []
-        if _ords:
-            _types = {}
-            for o in _ords:
-                _k = str(o.get("type"))
-                _types[_k] = _types.get(_k, 0) + 1
-            o0 = _ords[0]
-            print(f"[BingX-SL] {sym} 共{len(_ords)}筆 type分布={_types} 樣本:"
-                  f"orderId={o0.get('orderId')} type={o0.get('type')} "
-                  f"posSide={o0.get('positionSide')} reduceOnly={o0.get('reduceOnly')} "
-                  f"workingType={o0.get('workingType')}", flush=True)
+        oids = [o.get("orderId") for o in _ords
+                if str(o.get("type", "")).upper() == "STOP_MARKET" and o.get("positionSide") == pos]
     except Exception as _e:
-        print(f"[BingX-SL] {sym} 診斷查單失敗: {_e}", flush=True)
-    return None  # ★止血:暫停挂新止損,停止暴增。確認真實type後再恢復。
+        print(f"[BingX-SL] {sym} 查單失敗: {_e}", flush=True)
+        return None  # 查不到→不挂(止血)
+    # 2) 逐個用 DELETE /trade/order 取消(BingX 正確撤單 endpoint)
+    cancelled = 0; first_resp = None
+    for oid in oids:
+        try:
+            cr = _bingx_request("DELETE", "/openApi/swap/v2/trade/order",
+                                {"symbol": sym, "orderId": oid}, hdr)
+            cj = cr.json()
+            if first_resp is None: first_resp = cj
+            if cj.get("code", -1) == 0: cancelled += 1
+        except Exception: pass
+    print(f"[BingX-SL] {sym} DELETE/order 取消 {cancelled}/{len(oids)} 首resp={first_resp}", flush=True)
+    # 3) ★止血:未全清就不挂新(避免暴增)。全清(或本來就0個)才挂1新。
+    if oids and cancelled < len(oids):
+        print(f"[BingX-SL] {sym} 未全清→不挂新止損(止血,舊單留著)", flush=True)
+        return None
+    r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+        "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
+        "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
+        "quantity": str(qty), "workingType": "MARK_PRICE"}, hdr).json()
+    if r.get("code", 0) == 0:
+        return r.get("data", {}).get("order", {}).get("orderId", "")
+    return None
 
 def _bingx_line_breakout(trade) -> bool:
     """BingX 麥門切線突破→市價平剩餘。回傳 True=已平。"""
