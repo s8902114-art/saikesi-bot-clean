@@ -1479,8 +1479,10 @@ def _mai_line_breakout(ex, trade) -> bool:
             try:
                 cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
                 sub = df[df.index >= cutoff]
-                if len(sub) >= 6:
-                    df = sub
+                # 只看進場/接管後K線。不足6根→這輪不動作(等積累,不回退全120避免取進場前資料)
+                if len(sub) < 6:
+                    return False
+                df = sub
             except Exception:
                 pass
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
@@ -1550,8 +1552,10 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
             try:
                 cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
                 sub = df[df.index >= cutoff]
-                if len(sub) >= 6:
-                    df = sub
+                # 只看進場/接管後K線。不足6根→這輪不動作(等積累,不回退全120避免取進場前資料)
+                if len(sub) < 6:
+                    return False
+                df = sub
             except Exception:
                 pass
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
@@ -1644,8 +1648,10 @@ def _mai_add_on_swing(ex, trade) -> bool:
             try:
                 cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
                 sub = df[df.index >= cutoff]
-                if len(sub) >= 6:
-                    df = sub
+                # 只看進場/接管後K線。不足6根→這輪不動作(等積累,不回退全120避免取進場前資料)
+                if len(sub) < 6:
+                    return False
+                df = sub
             except Exception:
                 pass
         op = df["open"].values; hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
@@ -1796,7 +1802,9 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
             try:
                 cutoff = pd.Timestamp(int(ets), unit="s", tz="UTC")
                 subdf = df[df.index >= cutoff]
-                if len(subdf) >= 6: df = subdf
+                # 只看進場/接管後K線。不足6根→不移(等積累,不回退全120避免取進場前pivot被合法側擋)
+                if len(subdf) < 6: return False
+                df = subdf
             except Exception: pass
         hi = df["high"].values; lo = df["low"].values; n = len(df); PV = 2
         last = None
@@ -3813,6 +3821,7 @@ def adopt_untracked_okx_positions():
                 "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
                 "exit_strategy":inferred_es,
+                "entry_ts":int(time.time()),   # 接管時間:移SL只看接管後K線,避免取進場前pivot
             }
             adopted+=1
             _es_label = "swing_full整倉追蹤" if inferred_es == "swing_full" else "固定R半倉"
@@ -3909,7 +3918,7 @@ def adopt_untracked_bingx_positions():
                 "risk_dist":     risk,
                 "tf_id":         "adopted",
                 "exit_strategy": inferred_es,
-                "entry_ts":      None,
+                "entry_ts":      int(time.time()),   # 接管時間:移SL只看接管後K線,避免取進場前pivot被合法側擋
                 "init_qty":      str(round(qty, 4)),
                 "add_count":     0,
                 "add_swings_n":  0,
@@ -3924,6 +3933,11 @@ def adopt_untracked_bingx_positions():
     _diag = (f"BingX adopt 掃描 {len(positions)} 個持倉 → 接管 {adopted} 個"
              + (f"、跳過模式不符 {skipped_mode} 個" if skipped_mode else ""))
     print(f"[BingX Adopt] {_diag}", flush=True)
+    for _k, _v in active_real_trades.items():
+        if _v.get("exchange") == "bingx":
+            print(f"[BingX倉] {_v.get('symbol')} {_v.get('direction')} "
+                  f"es={_v.get('exit_strategy') or '固定R'} sl={_v.get('current_sl')} "
+                  f"tp1={_v.get('tp1_hit')}", flush=True)
     dc_log(f"ℹ️ {_diag}")
     if adopted: save_active_trades()
 
