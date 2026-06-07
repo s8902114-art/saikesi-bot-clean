@@ -1825,6 +1825,21 @@ def _bingx_replace_sl(trade, sl_price, qty):
         return r.get("data", {}).get("order", {}).get("orderId", "")
     return None
 
+def _px_for_bingx(ex, trade):
+    """BingX 倉位取現價:先試 OKX 報價(跨所近似),OKX 沒這幣(如 H/TAO)→用 BingX 自己的報價。
+    修:H/TAO 等 BingX 獨有幣,OKX 無 market→ex.fetch_ticker 報錯→保本/移SL失效。"""
+    try:
+        p = _px_for_bingx(ex, trade)
+        if p > 0: return p
+    except Exception: pass
+    try:
+        r = _bingx_request("GET", "/openApi/swap/v2/quote/price",
+                           {"symbol": trade["inst_id"]}, trade["headers"]).json()
+        return float((r.get("data") or {}).get("price") or 0)
+    except Exception:
+        return 0.0
+
+
 def _bingx_line_breakout(trade) -> bool:
     """BingX 麥門切線突破→市價平剩餘。回傳 True=已平。"""
     try:
@@ -2265,7 +2280,7 @@ def check_trailing_stops_for_real():
             if _es == "box_trend":
                 if not trade.get("tp1_hit"):
                     try:
-                        cur=float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                        cur=_px_for_bingx(ex, trade)
                         rd=float(trade.get("risk_dist",0) or 0)
                         if cur>0 and rd>0:
                             fpnl=(entry-cur) if direction=="short" else (cur-entry)
@@ -2290,7 +2305,7 @@ def check_trailing_stops_for_real():
                 # 同時印每倉浮盈診斷,看清19倉是賺是虧、該不該動。
                 if trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
                     try:
-                        cur = float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                        cur = _px_for_bingx(ex, trade)
                         rd  = float(trade.get("risk_dist", 0) or 0)
                         if cur > 0 and rd > 0:
                             fpnl_r = ((entry - cur) if direction == "short" else (cur - entry)) / rd
@@ -2362,7 +2377,7 @@ def check_trailing_stops_for_real():
             try:
                 risk_b = float(trade.get("risk_dist", 0) or 0)
                 if risk_b > 0 and trade.get("current_sl") != be_price:
-                    cur_b = float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)
+                    cur_b = _px_for_bingx(ex, trade)
                     tf_kb = f"{trade.get('tf_id','15m')}_{direction}"
                     be_mb = BEST_PARAMS.get(tf_kb, {}).get("be_trigger", 1.0)
                     trig_b = risk_b * be_mb + entry * 0.001
