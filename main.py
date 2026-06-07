@@ -1600,11 +1600,18 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
         n = len(df)
 
-        # 移SL用「N字型轉折」(三波,收盤突破確認)——用戶定義,取代前後2根pivot。
-        # 做多取最有利(最高)的確認回調低、做空取最低的確認反彈高,SL只往有利移。
-        last_swing = _n_shape_turn(hi, lo, cl, direction)
+        # 移SL用「pivot 擺盪點」(前後2根局部極值)。回測:pivot 勝 N字型(N MDD暴增58~71%)→回退。
+        PV = 2
+        last_swing = None
+        for j in range(PV, n - PV):
+            if direction == "long":
+                if lo[j] == lo[j-PV:j+PV+1].min():
+                    if last_swing is None or lo[j] > last_swing: last_swing = lo[j]
+            else:
+                if hi[j] == hi[j-PV:j+PV+1].max():
+                    if last_swing is None or hi[j] < last_swing: last_swing = hi[j]
         if last_swing is None:
-            print(f"[OKX-trail] {name} 尚無N字型轉折成型,不移", flush=True)
+            print(f"[OKX-trail] {name} 找不到pivot,不移", flush=True)
             return False
 
         cur_sl = float(trade.get("current_sl", 0) or 0)
@@ -1865,9 +1872,17 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
                 if len(subdf) < 6: return False
                 df = subdf
             except Exception: pass
-        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
-        # N字型轉折(三波,收盤突破確認)——與OKX同一個 _n_shape_turn,取代前後2根pivot
-        last = _n_shape_turn(hi, lo, cl, direction)
+        hi = df["high"].values; lo = df["low"].values; n = len(df)
+        # pivot 擺盪點(前後2根局部極值)。回測勝 N字型(N MDD暴增)→回退。
+        PV = 2
+        last = None
+        for j in range(PV, n - PV):
+            if direction == "long":
+                if lo[j] == lo[j-PV:j+PV+1].min():
+                    if last is None or lo[j] > last: last = lo[j]
+            else:
+                if hi[j] == hi[j-PV:j+PV+1].max():
+                    if last is None or hi[j] < last: last = hi[j]
         if last is None: return False
         cur_sl = float(trade.get("current_sl", 0) or 0)
         if direction == "long"  and last <= cur_sl: return False
