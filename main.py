@@ -1578,17 +1578,23 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
                     if last_swing is None or hi[j] < last_swing:
                         last_swing = hi[j]
         if last_swing is None:
+            print(f"[OKX-trail] {name} 找不到pivot,不移", flush=True)
             return False
 
         cur_sl = float(trade.get("current_sl", 0) or 0)
-        # 只往有利方向移（多頭往上、空頭往下）
-        if direction == "long"  and last_swing <= cur_sl: return False
-        if direction == "short" and last_swing >= cur_sl: return False
-        # 合法側保護:新SL須在市價保護側,否則OKX拒單。★放在cancel前:否則先取消舊SL再
-        # 掛無效新SL→裸倉。接管倉entry_ts=None用全120根可能取進場前pivot落錯側,此處擋掉。
         cur_px = float(cl[-1])
-        if direction == "short" and last_swing <= cur_px: return False
-        if direction == "long"  and last_swing >= cur_px: return False
+        print(f"[OKX-trail] {name} {direction} pivot={last_swing} cur_sl={cur_sl} px={cur_px} ets={trade.get('entry_ts')}", flush=True)
+        # 只往有利方向移（多頭往上、空頭往下）
+        if direction == "long"  and last_swing <= cur_sl:
+            print(f"[OKX-trail] {name} pivot≤cur_sl 不更優,不移", flush=True); return False
+        if direction == "short" and last_swing >= cur_sl:
+            print(f"[OKX-trail] {name} pivot≥cur_sl 不更優,不移", flush=True); return False
+        # 合法側保護:新SL須在市價保護側,否則OKX拒單。★放在cancel前:否則先取消舊SL再
+        # 掛無效新SL→裸倉。
+        if direction == "short" and last_swing <= cur_px:
+            print(f"[OKX-trail] {name} pivot≤市價 錯側,不移", flush=True); return False
+        if direction == "long"  and last_swing >= cur_px:
+            print(f"[OKX-trail] {name} pivot≥市價 錯側,不移", flush=True); return False
 
         _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
         exit_side = "sell" if direction == "long" else "buy"
@@ -3902,6 +3908,13 @@ def adopt_untracked_okx_positions():
             dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ {_es_label}+達1R自動保本")
         except Exception as ie:
             print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
+    # 診斷:dump 每個 OKX 接管倉的 es/sl/tp1,看 swing_full vs 固定R 分布(進Railway logs)
+    print(f"[OKX Adopt] 接管 {adopted} 個 OKX 倉位", flush=True)
+    for _k,_v in active_real_trades.items():
+        if _v.get("exchange")=="okx":
+            print(f"[OKX倉] {_v.get('symbol')} {_v.get('direction')} "
+                  f"es={_v.get('exit_strategy') or '固定R'} sl={_v.get('current_sl')} "
+                  f"tp1={_v.get('tp1_hit')}", flush=True)
     if adopted: save_active_trades()
 
 
