@@ -1530,6 +1530,43 @@ def _mai_line_breakout(ex, trade) -> bool:
         return False
 
 
+def _n_shape_turn(hi, lo, cl, direction):
+    """N字型轉折點(三波,收盤突破確認)——用戶定義。
+    做多:波1漲(高H)→波2回調(低L)→波3「收盤>波1高H」則N成型,該回調低L為轉折點。
+         連續N的回調低構成轉折序列,回傳最有利(最高)的確認回調低。
+    做空反之:波1跌(低L)→波2反彈(高H)→波3「收盤<波1低L」成型,反彈高H為轉折,回傳最低的確認反彈高。
+    無成型則回傳 None。"""
+    n = len(cl)
+    if n < 3:
+        return None
+    best = None
+    if direction == "long":
+        phase = "up"; H = hi[0]; L = None
+        for i in range(1, n):
+            if phase == "up":
+                if hi[i] > H: H = hi[i]              # 更新波1高
+                if cl[i] < lo[i-1]:                  # 收盤破前低 → 回調開始(進波2)
+                    phase = "down"; L = lo[i]
+            else:                                     # 波2下跌
+                if lo[i] < L: L = lo[i]              # 更新波2低
+                if cl[i] > H:                        # 波3收盤突破波1高 → N成型
+                    best = L if best is None else max(best, L)
+                    phase = "up"; H = hi[i]          # 波3變新波1
+    else:  # short
+        phase = "down"; L = lo[0]; H = None
+        for i in range(1, n):
+            if phase == "down":
+                if lo[i] < L: L = lo[i]              # 更新波1低
+                if cl[i] > hi[i-1]:                  # 收盤過前高 → 反彈開始(進波2)
+                    phase = "up"; H = hi[i]
+            else:                                     # 波2反彈
+                if hi[i] > H: H = hi[i]              # 更新波2高
+                if cl[i] < L:                        # 波3收盤跌破波1低 → 成型
+                    best = H if best is None else min(best, H)
+                    phase = "down"; L = lo[i]
+    return best
+
+
 def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
     """
     移動停利（切線PDF p11「用最新出現的高/低點修改保利點」）：
@@ -1563,22 +1600,11 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
         n = len(df)
 
-        # 移SL用「pivot 擺盪點」(前後PV根局部極值)，非單根吞噬——回測:pivot移SL頻率近3倍、
-        # EV由負轉正、MDD腰斬(1H MACD空 -0.227→+0.051、W底多 -0.125→+0.231)。
-        # 多頭取進場後最高的擺盪低(腳)、空頭取最低的擺盪高(頭)，SL只往有利移。
-        PV = 2
-        last_swing = None
-        for j in range(PV, n - PV):
-            if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min():
-                    if last_swing is None or lo[j] > last_swing:
-                        last_swing = lo[j]
-            else:
-                if hi[j] == hi[j-PV:j+PV+1].max():
-                    if last_swing is None or hi[j] < last_swing:
-                        last_swing = hi[j]
+        # 移SL用「N字型轉折」(三波,收盤突破確認)——用戶定義,取代前後2根pivot。
+        # 做多取最有利(最高)的確認回調低、做空取最低的確認反彈高,SL只往有利移。
+        last_swing = _n_shape_turn(hi, lo, cl, direction)
         if last_swing is None:
-            print(f"[OKX-trail] {name} 找不到pivot,不移", flush=True)
+            print(f"[OKX-trail] {name} 尚無N字型轉折成型,不移", flush=True)
             return False
 
         cur_sl = float(trade.get("current_sl", 0) or 0)
@@ -1839,15 +1865,9 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
                 if len(subdf) < 6: return False
                 df = subdf
             except Exception: pass
-        hi = df["high"].values; lo = df["low"].values; n = len(df); PV = 2
-        last = None
-        for j in range(PV, n - PV):
-            if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min():
-                    if last is None or lo[j] > last: last = lo[j]
-            else:
-                if hi[j] == hi[j-PV:j+PV+1].max():
-                    if last is None or hi[j] < last: last = hi[j]
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
+        # N字型轉折(三波,收盤突破確認)——與OKX同一個 _n_shape_turn,取代前後2根pivot
+        last = _n_shape_turn(hi, lo, cl, direction)
         if last is None: return False
         cur_sl = float(trade.get("current_sl", 0) or 0)
         if direction == "long"  and last <= cur_sl: return False
