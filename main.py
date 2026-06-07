@@ -2016,6 +2016,41 @@ def check_trailing_stops_for_real():
             # ── 整倉轉折移SL(swing_full)：1H MACD空。不掛TP,整倉,用最新轉折移SL,
             #    出場靠交易所SL algo觸發。WF:1H MACD空驗+0.251/RA0.83。
             if trade.get("exit_strategy") == "swing_full":
+                # 接管倉達1R保本兜底(與BingX一致):達浮盈1R且SL還在虧損側→先移SL保本,
+                # 之後 N 字型移SL 繼續鎖利。be_better 防止把已鎖利的SL拉回保本。
+                if trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
+                    try:
+                        cur = float(ex.fetch_ticker(symbol).get("last") or 0)
+                        entry = float(trade["entry_price"]); rd = float(trade.get("risk_dist", 0) or 0)
+                        if cur > 0 and rd > 0:
+                            fpnl = (entry - cur) if direction == "short" else (cur - entry)
+                            fee_buf = entry * 0.001
+                            be_price = entry - fee_buf if direction == "short" else entry + fee_buf
+                            sl_now = float(trade.get("current_sl") or 0)
+                            be_better = (be_price < sl_now) if direction == "short" else (be_price > sl_now)
+                            print(f"[OKX-BE] {name} {direction} 浮盈{fpnl/rd:+.2f}R sl={sl_now} be={be_price} 可保本={be_better}", flush=True)
+                            if fpnl >= rd * 1.0 and be_better:
+                                exit_side = "sell" if direction == "long" else "buy"
+                                try: _bx = ex.price_to_precision(symbol, be_price)
+                                except Exception: _bx = format(be_price, "f")
+                                _cancel_okx_algo_order(inst_id, trade["sl_algo_id"])
+                                def _place_be_sf():
+                                    r = _place_okx_algo_sl(inst_id=inst_id, side=exit_side, amount="0",
+                                                           sl_trigger_px=_bx, pos_side=direction)
+                                    return r, (r.get("data") or [{}])[0].get("algoId")
+                                res, nid = _place_be_sf()
+                                if not nid:
+                                    _sc = str((res.get("data") or [{}])[0].get("sCode") or "")
+                                    if _sc == "51088":
+                                        _okx_cancel_all_algos(inst_id); time.sleep(0.3)
+                                        res, nid = _place_be_sf()
+                                if nid:
+                                    trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
+                                    trade["tp1_hit"] = True
+                                    dc_log(f"🔒 {name} 接管倉達1R,止損移保本 {be_price}")
+                                    print(f"[OKX-BE] {name} 達1R保本→{be_price}", flush=True)
+                    except Exception as _be:
+                        print(f"[OKX-BE] {name} 保本判斷失敗: {_be}", flush=True)
                 if _swing_trail_update_sl(ex, trade):
                     save_active_trades()
                 continue
@@ -3882,37 +3917,12 @@ def adopt_untracked_okx_positions():
                 continue
             risk=abs(entry-sl_trig)
             if risk<=0: continue
-            # 補 TP(接管倉常沒TP)：risk太小(止損已近保本)不補;TP只掛在現價的獲利方向(避免51006)
+            # 接管倉統一走 swing_full(整倉,與 BingX 一致)——不補TP。
+            # 用戶要:接管動作 = 達1R保本 + N字型移動停利(check_trailing swing_full 分支處理)。
+            # 原「有TP→固定R(等TP1才移SL)」改掉,改成主動的整倉移SL。
             tp1_id=None
-            has_tp=True   # 預設保守(查失敗→固定R)
-            try:
-                cur=float(ex.fetch_ticker(sym).get("last") or 0)
-                has_tp=any(o.get("type")=="limit" and (o.get("reduceOnly") or
-                           str((o.get("info") or {}).get("reduceOnly")).lower()=="true")
-                           for o in ex.fetch_open_orders(sym))
-                if (not has_tp) and cur>0 and risk > entry*0.003:   # risk>0.3%才補
-                    if side=="long": tp1p,tp2p,exs=entry+risk*1.2,entry+risk*2.5,"sell"
-                    else:            tp1p,tp2p,exs=entry-risk*1.2,entry-risk*2.5,"buy"
-                    try: half=float(ex.amount_to_precision(sym,ct*0.5))
-                    except Exception: half=round(ct*0.5,8)
-                    def _valid(px):  # TP需在現價的獲利方向且有距離(>0.2%)
-                        return (px>cur*1.002) if side=="long" else (px<cur*0.998)
-                    placed=[]
-                    for _px,_qty,_is1 in [(tp1p,half,True),(tp2p,round(ct-half,8),False)]:
-                        if _qty<=0 or not _valid(_px): continue
-                        try: _pxs=ex.price_to_precision(sym,_px)
-                        except Exception: _pxs=format(_px,"f")
-                        o=ex.create_order(symbol=sym,type="limit",side=exs,amount=_qty,price=_pxs,
-                                          params={"posSide":side,"tdMode":MARGIN_MODE,"reduceOnly":True})
-                        placed.append(_pxs)
-                        if _is1: tp1_id=o.get("id")
-                    if placed: dc_log(f"🎯 接管倉 {sym} {side} 補TP: {' / '.join(placed)}")
-            except Exception as _te:
-                print(f"[Adopt] {sym} 補TP失敗: {_te}")
-            # 根據接管時原始 TP 掛單推算 exit_strategy（根因修正）：
-            #   無TP → 整倉轉折移SL(swing_full)；有TP → 固定R半倉(走 TP1→保本→pivot 路徑)
-            inferred_es  = "swing_full" if not has_tp else ""
-            inferred_rem = str(ct) if not has_tp else str(round(ct*0.5, 8))
+            inferred_es  = "swing_full"
+            inferred_rem = str(ct)
             tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
             active_real_trades[tkey]={
                 "exchange":"okx","inst_id":inst_id,"symbol":sym,"direction":side,
@@ -3924,8 +3934,7 @@ def adopt_untracked_okx_positions():
                 "entry_ts":int(time.time()) - 6*3600,   # 接管時間往前6h:立即有6根1H可算pivot(同BingX adopt)
             }
             adopted+=1
-            _es_label = "swing_full整倉追蹤" if inferred_es == "swing_full" else "固定R半倉"
-            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ {_es_label}+達1R自動保本")
+            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ swing_full 達1R保本+N字型移SL")
         except Exception as ie:
             print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
     # 診斷:dump 每個 OKX 接管倉的 es/sl/tp1,看 swing_full vs 固定R 分布(進Railway logs)
