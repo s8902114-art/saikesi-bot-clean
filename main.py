@@ -3224,6 +3224,12 @@ class SykesTradingBot:
                 is_box_short, _ = _check_box_short(symbol_item, okx_bar_fmt, df)
             except Exception as _bse:
                 print(f"[Box-Short] {symbol_item} 判斷失敗: {_bse}")
+            # ICT Killzone 過濾：突破=流動性獵取,只在機構活躍時段做(UTC換算亞洲/倫敦/紐約)。
+            # 回測WF(箱頂止損):全時段 驗+0.175 → killzone過濾 驗+0.273,MDD 48%→26%。
+            if is_box_short:
+                _kzh = datetime.now(timezone.utc).hour
+                if not ((0 <= _kzh < 4) or (6 <= _kzh < 9) or (12 <= _kzh < 15) or (18 <= _kzh < 19)):
+                    is_box_short = False
 
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
@@ -3334,6 +3340,11 @@ class SykesTradingBot:
         #    牛市 −0.088、2025 急跌 −0.199(勝率0%)，全期 −0.023 負期望 → 停用。
         #    30m/long(WF驗證 +0.093 穩健) 保留。空單交給 15m 雙頂共振/C3空。
         if tf_id == "30m":
+            is_short = False
+
+        # 砍 15m C3空：含費 -0.057 純拖累(高頻堆相關性)。SNR/SMC 過濾層 WF 救不了
+        # (HTF溢價過濾訓練可救但驗證崩=crypto逆勢空結構性逆風)。保留 1H C3空(階梯壓力)。
+        if tf_id == "15m" and is_short:
             is_short = False
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
@@ -3460,6 +3471,20 @@ class SykesTradingBot:
             risk_dist  = calculated_sl - current_close
             tp1_target = current_close - risk_dist * p["tp1_mult"]
             tp2_target = current_close - risk_dist * tp2_mult
+
+        # 箱突破空：止損改用「整個箱頂 bh」(SNR 結構止損),非局部 swing high(_find_pivot_high)。
+        # 回測(含費WF):swing high -0.089 → 箱頂止損 +0.137,勝率22%→41%,MDD 99%→48%(配killzone再到26%)。
+        # 箱頂與回測 box_sigs 的 hi[i-96:i].max() 對齊(df 倒數96根不含當根)。出場維持 4R。
+        if direction == "short" and is_box_short:
+            _bh_box = float(df["high"].values[-97:-1].max())
+            calculated_sl = round(_bh_box + _get_tick_size(df), 8)
+            risk_pct = (calculated_sl - current_close) / current_close
+            if risk_pct < MIN_SL_PCT or risk_pct > MAX_SL:
+                if _dbg: print(f"[Box-SL] {symbol_item} 箱頂止損超範圍({risk_pct:.3%})→跳過", flush=True)
+                return
+            risk_dist  = calculated_sl - current_close
+            tp1_target = current_close - risk_dist * 4.0
+            tp2_target = current_close - risk_dist * 4.0
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
