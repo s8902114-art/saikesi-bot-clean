@@ -173,7 +173,7 @@ def calculate_directional_movement_index(data_df: pd.DataFrame, adx_period: int 
 _DOUBLE_PARAMS = {
     "15m": {"pivot_len": 2, "neck_expand": 1.5, "price_tol": 0.01},
     "30m": {"pivot_len": 2, "neck_expand": 1.5, "price_tol": 0.01},
-    "1H":  {"pivot_len": 5, "neck_expand": 2.0, "price_tol": 0.01},
+    "1H":  {"pivot_len": 5, "neck_expand": 1.5, "price_tol": 0.01},  # 2026-06-10 2.0→1.5:W底觸發+35%、edge維持(WF訓+0.067/驗+0.337/賺賠2.99)
     "4H":  {"pivot_len": 5, "neck_expand": 2.0, "price_tol": 0.01},
 }
 _DOUBLE_SEARCH_WIN = 60   # 往回找雙點的最大窗口（根數）
