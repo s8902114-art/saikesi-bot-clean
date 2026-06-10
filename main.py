@@ -1786,53 +1786,57 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
     return sw, df
 
 def _bingx_replace_sl(trade, sl_price, qty):
-    """BingX 取消該倉所有 STOP_MARKET 止損 + 挂新1個。回傳新orderId或None。
-    ★用正確撤單 endpoint DELETE /openApi/swap/v2/trade/order(之前用POST cancelOrder
-    和DELETE allOpenOrders都刪不掉→暴增)。逐個取消確切orderId。
-    ★止血鐵則:未全清(取消數<總數)就「絕不挂新」,return None,避免暴增。"""
+    """BingX 換止損:★place-before-cancel★——先挂新止損、確認成功,才取消舊止損。
+    絕不先清空再挂(舊版先清→挂失敗就裸倉,而且會把用戶手動止損清掉留下沒保護)。
+    closePosition 整倉平避免 110424(帶量止損名義超可用)。
+    109420(position not exist):此 positionSide 無倉位→自動試另一持倉模式(BOTH↔LONG/SHORT)。
+    回傳新orderId,或 None(=沒換成,舊/手動止損原樣保留,絕不裸倉)。"""
     sym = trade["inst_id"]; hdr = trade["headers"]; pos = trade["pos_side"]
-    # 1) 查所有該方向 STOP_MARKET 止損單的 orderId
-    oids = []
+    # 1) 先記下現有止損 orderId(稍後新單確認成功才清),查失敗也照樣嘗試挂新(不因查單失敗而不保護)
+    old_oids = []
     try:
         oo = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders", {"symbol": sym}, hdr).json()
         _ords = oo.get("data") or {}
         if isinstance(_ords, dict): _ords = _ords.get("orders") or []
-        oids = [o.get("orderId") for o in _ords
-                if str(o.get("type", "")).upper() == "STOP_MARKET" and o.get("positionSide") == pos]
+        old_oids = [o.get("orderId") for o in _ords
+                    if str(o.get("type", "")).upper() in ("STOP_MARKET", "STOP")]
     except Exception as _e:
-        print(f"[BingX-SL] {sym} 查單失敗: {_e}", flush=True)
-        return None  # 查不到→不挂(止血)
-    # 2) 逐個用 DELETE /trade/order 取消(BingX 正確撤單 endpoint)
-    cancelled = 0; first_resp = None
-    for oid in oids:
-        try:
-            cr = _bingx_request("DELETE", "/openApi/swap/v2/trade/order",
-                                {"symbol": sym, "orderId": oid}, hdr)
-            cj = cr.json()
-            if first_resp is None: first_resp = cj
-            if cj.get("code", -1) == 0: cancelled += 1
-        except Exception: pass
-    print(f"[BingX-SL] {sym} DELETE/order 取消 {cancelled}/{len(oids)} 首resp={first_resp}", flush=True)
-    # 3) ★止血:未全清就不挂新(避免暴增)。全清(或本來就0個)才挂1新。
-    if oids and cancelled < len(oids):
-        print(f"[BingX-SL] {sym} 未全清→不挂新止損(止血,舊單留著)", flush=True)
+        print(f"[BingX-SL] {sym} 查舊單失敗(仍嘗試挂新): {_e}", flush=True)
+    # 2) ★先挂新止損(closePosition 整倉)。失敗→保留舊/手動止損,return None(不裸倉)。
+    def _post_sl(ps):
+        return _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+            "symbol": sym, "side": trade["exit_side"], "positionSide": ps,
+            "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
+            "closePosition": "true", "workingType": "MARK_PRICE"}, hdr).json()
+    r = _post_sl(pos)
+    if r.get("code", 0) == 109420:   # 此 positionSide 查無倉位→持倉模式不符,試另一種
+        alt = "BOTH" if pos in ("LONG", "SHORT") else ("SHORT" if trade["direction"] == "short" else "LONG")
+        r_alt = _post_sl(alt)
+        if r_alt.get("code", 0) == 0:
+            print(f"[BingX-SL] {sym} positionSide {pos}→{alt} 修正成功", flush=True)
+            trade["pos_side"] = alt   # 記住正確模式,下次直接用
+            r = r_alt
+    if r.get("code", 0) != 0:
+        print(f"[BingX-SL] {sym} 挂新止損失敗(保留舊止損,不裸倉) resp={r}", flush=True)
         return None
-    # 用 closePosition=true 平整倉(swing_full/剩半 都是整倉出場),不指定 quantity →
-    # 避免帶量止損的名義超過可用→110424(BingX 把帶量止損當需保證金的開倉)。
-    r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-        "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
-        "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
-        "closePosition": "true", "workingType": "MARK_PRICE"}, hdr).json()
-    if r.get("code", 0) == 0:
-        return r.get("data", {}).get("order", {}).get("orderId", "")
-    print(f"[BingX-SL] {sym} 挂止損失敗 resp={r}", flush=True)
-    return None
+    new_id = r.get("data", {}).get("order", {}).get("orderId", "")
+    # 3) 新止損已成功 → 逐個 DELETE 取消舊的(留下新單)。清不掉不致命(dedup 下輪再清,不裸倉)。
+    n_cxl = 0
+    for oid in old_oids:
+        if not oid or str(oid) == str(new_id): continue
+        try:
+            cj = _bingx_request("DELETE", "/openApi/swap/v2/trade/order",
+                                {"symbol": sym, "orderId": oid}, hdr).json()
+            if cj.get("code", -1) == 0: n_cxl += 1
+        except Exception: pass
+    print(f"[BingX-SL] {sym} 換止損成功→{sl_price}(清舊{n_cxl}/{len(old_oids)})", flush=True)
+    return new_id
 
 def _px_for_bingx(ex, trade):
     """BingX 倉位取現價:先試 OKX 報價(跨所近似),OKX 沒這幣(如 H/TAO)→用 BingX 自己的報價。
     修:H/TAO 等 BingX 獨有幣,OKX 無 market→ex.fetch_ticker 報錯→保本/移SL失效。"""
     try:
-        p = _px_for_bingx(ex, trade)
+        p = float(ex.fetch_ticker(trade["symbol"]).get("last") or 0)   # OKX 跨所報價
         if p > 0: return p
     except Exception: pass
     try:
@@ -2263,6 +2267,29 @@ def check_trailing_stops_for_real():
             print(f"[Trailing] {name} 處理失敗: {e}")
 
     # ── BingX 保本追蹤 ──────────────────────────────────────────────────────
+    # ★先抓一次實時持倉,移除已平倉的追蹤——否則已關閉的倉位每15m仍嘗試挂止損→
+    #   BingX 回 109420 "position not exist" 每輪刷屏(用戶看到的一堆錯誤)。
+    #   只移除「記憶體追蹤」,不碰交易所任何掛單(已平倉本就無單;誤判最多=停止管理,倉位仍有交易所SL)。
+    _bingx_live_syms = None
+    for _tk in list(active_real_trades.keys()):
+        _t = active_real_trades[_tk]
+        if _t.get("exchange") == "bingx" and _t.get("headers"):
+            try:
+                _pr = _bingx_request("GET", "/openApi/swap/v2/user/positions", {}, _t["headers"]).json()
+                _bingx_live_syms = {p.get("symbol") for p in (_pr.get("data") or [])
+                                    if abs(float(p.get("positionAmt") or 0)) > 0}
+            except Exception as _le:
+                print(f"[BingX] 取實時持倉失敗(本輪不清理): {_le}", flush=True)
+            break
+    if _bingx_live_syms is not None:
+        for _tk in list(active_real_trades.keys()):
+            _t = active_real_trades[_tk]
+            if _t.get("exchange") != "bingx": continue
+            if _t.get("inst_id") not in _bingx_live_syms:
+                print(f"[BingX] {_t.get('inst_id')} 倉位已平→移除追蹤(不再嘗試挂止損)", flush=True)
+                active_real_trades.pop(_tk, None)
+        save_active_trades()
+
     for trade_key in list(active_real_trades.keys()):
         trade = active_real_trades[trade_key]
         if trade.get("exchange") != "bingx": continue
