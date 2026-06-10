@@ -2055,7 +2055,8 @@ def check_trailing_stops_for_real():
             if trade.get("exit_strategy") == "swing_full":
                 # 接管倉達1R保本兜底(與BingX一致):達浮盈1R且SL還在虧損側→先移SL保本,
                 # 之後 N 字型移SL 繼續鎖利。be_better 防止把已鎖利的SL拉回保本。
-                if trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
+                # ★LETRUN_BE_ENABLED=False(2026-06-10):此兜底害讓跑策略,預設關,直接走純pivot移SL。
+                if LETRUN_BE_ENABLED and trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
                         entry = float(trade["entry_price"]); rd = float(trade.get("risk_dist", 0) or 0)
@@ -2095,7 +2096,7 @@ def check_trailing_stops_for_real():
             # ── 箱突破空(box_trend)：整倉4R TP掛在交易所,這裡只做「達1R浮盈→移SL保本」(一次)
             #    防假突破拉回。TP(4R)成交由交易所自動平,下輪偵測倉位消失移除。
             if trade.get("exit_strategy") == "box_trend":
-                if not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
+                if LETRUN_BE_ENABLED and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標(達1R保本,預設關)
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
                         entry = float(trade["entry_price"]); rd = float(trade.get("risk_dist", 0) or 0)
@@ -2308,7 +2309,7 @@ def check_trailing_stops_for_real():
             _es = trade.get("exit_strategy", "")
             # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
             if _es == "box_trend":
-                if not trade.get("tp1_hit"):
+                if LETRUN_BE_ENABLED and not trade.get("tp1_hit"):   # 達1R保本,預設關(讓跑)
                     try:
                         cur=_px_for_bingx(ex, trade)
                         rd=float(trade.get("risk_dist",0) or 0)
@@ -2333,7 +2334,8 @@ def check_trailing_stops_for_real():
                 # 接管倉(tf_id=adopted)加「達1R保本」兜底:不依賴K線,達浮盈立即移SL到保本,
                 # 之後再交給pivot移SL。正常swing_full(1H MACD空等)不加,保持回測純移SL。
                 # 同時印每倉浮盈診斷,看清19倉是賺是虧、該不該動。
-                if trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
+                # ★LETRUN_BE_ENABLED=False(2026-06-10):兜底害讓跑,預設關,直接走純pivot移SL。
+                if LETRUN_BE_ENABLED and trade.get("tf_id") == "adopted" and not trade.get("tp1_hit"):
                     try:
                         cur = _px_for_bingx(ex, trade)
                         rd  = float(trade.get("risk_dist", 0) or 0)
@@ -2598,6 +2600,12 @@ DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5
 #   3) 每筆只加一次  4) 預設關閉,review+觀察後再開
 PYRAMID_ENABLED = True    # 2026-06-05 啟用(觀察期3天已過,約定RISK5%+STEP50)
 PYRAMID_LIQ_BUF = 0.85    # 強平守門員緩衝(同下單管線)
+# ── 讓跑類策略(swing_full接管倉 / box_trend)的「達1R保本兜底」開關 ───────────────
+# 2026-06-10 含費WF證實:1R保本兜底對讓跑策略是災難(DH +0.142→-0.118、1H C3空砍頭)。
+# 它當初只是接管倉的未驗證OK繃(commit 82def47,本就「正常swing_full不加」),卻因每次redeploy
+# 全倉被adopt而蓋住全部。關掉=還原回測驗證過的純pivot移SL讓跑(pivot trail本身已護回撤)。
+# 註:固定R策略(15m/1H C3 的 TP1保本/浮盈保本)不在此旗標內,維持現狀待另測。
+LETRUN_BE_ENABLED = False
 def _okx_pyramid_add(ex, trade) -> bool:
     """對已 +1R 的多單加碼一個單位(=原始張數),停損上移到原進場價。
     走強平守門員;不安全則跳過。回傳是否成功加碼。"""
