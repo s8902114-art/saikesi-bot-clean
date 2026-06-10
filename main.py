@@ -1817,12 +1817,15 @@ def _bingx_replace_sl(trade, sl_price, qty):
     if oids and cancelled < len(oids):
         print(f"[BingX-SL] {sym} 未全清→不挂新止損(止血,舊單留著)", flush=True)
         return None
+    # 用 closePosition=true 平整倉(swing_full/剩半 都是整倉出場),不指定 quantity →
+    # 避免帶量止損的名義超過可用→110424(BingX 把帶量止損當需保證金的開倉)。
     r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
         "symbol": sym, "side": trade["exit_side"], "positionSide": pos,
         "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
-        "quantity": str(qty), "workingType": "MARK_PRICE"}, hdr).json()
+        "closePosition": "true", "workingType": "MARK_PRICE"}, hdr).json()
     if r.get("code", 0) == 0:
         return r.get("data", {}).get("order", {}).get("orderId", "")
+    print(f"[BingX-SL] {sym} 挂止損失敗 resp={r}", flush=True)
     return None
 
 def _px_for_bingx(ex, trade):
@@ -2383,16 +2386,10 @@ def check_trailing_stops_for_real():
                     trig_b = risk_b * be_mb + entry * 0.001
                     fpnl_b = (cur_b - entry) if direction == "long" else (entry - cur_b)
                     if cur_b > 0 and fpnl_b >= trig_b:
-                        _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
-                                       {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
-                        _fq = trade.get("full_qty", remaining)
-                        nsl = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-                            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                            "type": "STOP_MARKET", "stopPrice": format(be_price, "f"),
-                            "quantity": str(_fq), "workingType": "MARK_PRICE"}, headers)
-                        nd = nsl.json()
-                        if nd.get("code", 0) == 0:
-                            trade["sl_order_id"] = nd.get("data", {}).get("order", {}).get("orderId", "")
+                        # 統一走 _bingx_replace_sl(DELETE撤單 + closePosition,避免110424/暴增)
+                        nid = _bingx_replace_sl(trade, be_price, trade.get("full_qty", remaining))
+                        if nid is not None:
+                            trade["sl_order_id"] = nid
                             trade["current_sl"]  = be_price
                             dc_log(f"🔒 BingX {bingx_symbol} 浮盈達{be_mb}R，止損移至保本價 {be_price}（含手續費）")
             except Exception as _eb:
@@ -2404,19 +2401,10 @@ def check_trailing_stops_for_real():
             }, headers)
             tp1_data = tp1_r.json().get("data", {}).get("order", {})
             if tp1_data.get("status") in ("FILLED", "filled"):
-                # TP1 成交 → 取消原止損，掛保本止損
-                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder", {
-                    "symbol": bingx_symbol, "orderId": sl_order_id
-                }, headers)
-                # 新止損掛在保本價（含手續費）
-                new_sl_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-                    "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
-                    "type": "STOP_MARKET", "stopPrice": format(be_price, "f"),
-                    "quantity": str(remaining), "workingType": "MARK_PRICE"
-                }, headers)
-                new_sl_data = new_sl_r.json()
-                if new_sl_data.get("code", 0) == 0:
-                    new_sl_id = new_sl_data.get("data", {}).get("order", {}).get("orderId", "")
+                # TP1 成交 → 統一走 _bingx_replace_sl(DELETE撤單 + closePosition整倉,
+                # 避免 POST cancelOrder 刪不掉暴增 + 帶量止損 110424)
+                new_sl_id = _bingx_replace_sl(trade, be_price, remaining)
+                if new_sl_id is not None:
                     trade["sl_order_id"] = new_sl_id
                     trade["current_sl"]  = be_price
                     trade["tp1_hit"]     = True
@@ -2424,7 +2412,7 @@ def check_trailing_stops_for_real():
                     dc_log(msg)
                     print(f"[BingX Trailing] {msg}")
                 else:
-                    dc_log(f"⚠️ BingX 保本止損掛載失敗：{new_sl_data}")
+                    print(f"[BingX Trailing] {bingx_symbol} TP1保本掛載失敗(見[BingX-SL]log)", flush=True)
 
         except Exception as be_err:
             print(f"[BingX Trailing] {trade_key} 處理失敗: {be_err}")
