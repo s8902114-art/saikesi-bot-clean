@@ -3354,9 +3354,14 @@ class SykesTradingBot:
                     dif, dea, _hist = calculate_macd(df["close"])
                     gold = dif.iloc[-2] <= dea.iloc[-2] and dif.iloc[-1] > dea.iloc[-1]
                     dead = dif.iloc[-2] >= dea.iloc[-2] and dif.iloc[-1] < dea.iloc[-1]
-                    # 15m 維持只做多(不變);1H 升級:死叉/金叉 + 帶量 + 逐筆tFlow(2026-06-12)
+                    # 15m 多 升級:加帶量(2026-06-12)。裸進場太鬆=驗-0.022/MDD92%(線上舊狀);
+                    #   +帶量→驗+0.168/勝58%/MDD33%,砍73%雜訊單。tFlow對15m多無增益故不加(便宜上)。
                     if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
-                        is_macd_long = True
+                        _vol15 = df["vol"].values
+                        _va15 = float(np.mean(_vol15[-21:-1])) if len(_vol15) >= 21 else 0.0
+                        if _va15 > 0 and _vol15[-1] > 1.5 * _va15:
+                            is_macd_long = True
+                            print(f"[MACD多15m] {symbol_item} 帶量✓")
                     if tf_id == "1H":
                         # 帶量(全幣):當根量 > 1.5×前20均。WF:1H空+0.056→+0.459、1H多(新)+0.465。
                         _vol = df["vol"].values
