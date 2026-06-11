@@ -66,6 +66,43 @@ from indicators import (
     check_double_top,
 )
 
+# ── 逐筆 tFlow 確認(2026-06-12 升級 1H MACD 進場)──────────────────────────────
+# 回測:1H MACD空+帶量+tFlow 驗+0.459、1H MACD多 驗+0.465(勝聚合CVD +0.378/+0.353)。
+# tFlow = 該『已完成』1H bar 的 taker 淨流(sign=-1 if isBuyerMaker else +1)。
+# 僅 BTC/ETH/SOL(有逐筆對齊回測);其他幣回 None → 只靠帶量。Binance fapi 公開免auth。
+# (內聯於 main.py:push.sh 只推 main.py,不可用外部模組。語意對齊 trading-backtest/tflow_live.py)
+_TFLOW_COINS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+_TFLOW_BASE = "https://fapi.binance.com/fapi/v1/aggTrades"
+def _tflow_last_hour(symbol):
+    now = int(time.time() * 1000); hour = 3600_000
+    end = (now // hour) * hour; start = end - hour          # 最近一根已完成 1H
+    net = 0.0; n = 0; from_id = None; guard = 0
+    while guard < 400:
+        guard += 1
+        params = {"symbol": symbol, "limit": 1000}
+        if from_id is None: params["startTime"] = start; params["endTime"] = end
+        else: params["fromId"] = from_id
+        d = requests.get(_TFLOW_BASE, params=params, timeout=15).json()
+        if not isinstance(d, list) or not d: break
+        stop = False
+        for x in d:
+            if x["T"] >= end: stop = True; break
+            if x["T"] < start: continue
+            net += float(x["q"]) * (-1.0 if x["m"] else 1.0); n += 1
+        if stop or d[-1]["T"] >= end or len(d) < 1000: break
+        from_id = d[-1]["a"] + 1
+    return net, n
+def tflow_confirm(symbol, direction):
+    """進場確認閘。空:net<0;多:net>0。非3幣/thin/失敗回 (None,...) → 交給帶量。"""
+    if symbol not in _TFLOW_COINS: return None, "non-tape coin"
+    try:
+        net, n = _tflow_last_hour(symbol)
+    except Exception as e:
+        return None, f"tflow err {e}"
+    if n < 50: return None, f"thin n={n}"
+    ok = (net < 0) if direction == "short" else (net > 0)
+    return ok, f"tFlow net={net:+.1f} n={n}"
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 核心全局配置與金鑰設定 (USER CONFIGURATION)
@@ -307,10 +344,10 @@ BEST_PARAMS: Dict[str, Dict[str, Any]] = {
 "sl_atr_buffer": 0.5, "structure_lookback": 5, "exit_mode": "fixed",
 "qqe_rsi": 8, "qqe_sf": 2, "qqe_factor": 3.0
 },
-# 1H/short：BE 延後至 1.5R（出場優化 WF 驗證，三組合合併 +0.079）
-#    TP1=1.0 TP2=2.0 BE=1.5 BUF=0.5 PVT=3
+# 1H/short：TP1=1.5（2026-06-12 升級:MACD空 swing_tp=TP1.5半倉+剩半轉折移SL,WF驗+0.459）
+#    C3+階梯空走 swing_full 不掛TP→不受此值影響;僅 MACD空 與 罕見1H雙頂固定R 用到。BE=1.5。
 "1H_short": {
-"tp1_mult": 1.0,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.5,
+"tp1_mult": 1.5,  "tp2_intraday_mult": 2.0,  "tp2_swing_mult": 2.0, "be_trigger": 1.5,
 "sl_atr_buffer": 0.5, "structure_lookback": 3, "exit_mode": "fixed",
 "qqe_rsi": 5, "qqe_sf": 7, "qqe_factor": 4.238
 },
@@ -3322,11 +3359,25 @@ class SykesTradingBot:
                     dif, dea, _hist = calculate_macd(df["close"])
                     gold = dif.iloc[-2] <= dea.iloc[-2] and dif.iloc[-1] > dea.iloc[-1]
                     dead = dif.iloc[-2] >= dea.iloc[-2] and dif.iloc[-1] < dea.iloc[-1]
-                    # 15m 只做多、1H 只做空（WF 驗證通過的兩個方向）
+                    # 15m 維持只做多(不變);1H 升級:死叉/金叉 + 帶量 + 逐筆tFlow(2026-06-12)
                     if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
                         is_macd_long = True
-                    if tf_id == "1H" and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
-                        is_macd_short = True
+                    if tf_id == "1H":
+                        # 帶量(全幣):當根量 > 1.5×前20均。WF:1H空+0.056→+0.459、1H多(新)+0.465。
+                        _vol = df["vol"].values
+                        _va = float(np.mean(_vol[-21:-1])) if len(_vol) >= 21 else 0.0
+                        _vol_ok = _va > 0 and _vol[-1] > 1.5 * _va
+                        _bn_sym = symbol_item.replace("/", "")     # BTC/USDT → BTCUSDT
+                        if _vol_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                            _tfok, _tfr = tflow_confirm(_bn_sym, "short")
+                            if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量
+                                is_macd_short = True
+                                print(f"[MACD空] {symbol_item} 帶量✓ {_tfr}")
+                        if _vol_ok and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                            _tfok, _tfr = tflow_confirm(_bn_sym, "long")
+                            if _tfok is not False:
+                                is_macd_long = True
+                                print(f"[MACD多] {symbol_item} 帶量✓ {_tfr}")
             except Exception as _macd_err:
                 print(f"[MACD] {symbol_item} {tf_id} 計算失敗: {_macd_err}")
 
@@ -3401,7 +3452,9 @@ class SykesTradingBot:
         elif tf_id == "1H" and direction == "long" and is_double_bottom:
             exit_strategy = "swing_tp"                                   # 1H W底多：TP1+轉折移SL
         elif tf_id == "1H" and direction == "short" and is_macd_short:
-            exit_strategy = "swing_full"                                 # 1H MACD空：整倉轉折移SL
+            exit_strategy = "swing_tp"                                   # 1H MACD空(升級):TP1.5半倉+剩半轉折移SL(驗+0.459>swing_full+0.293,tp1_mult已設1.5)
+        elif tf_id == "1H" and direction == "long" and is_macd_long:
+            exit_strategy = "swing_full"                                 # 1H MACD多(新增):整倉轉折移SL讓跑(驗+0.605>TP1.5+0.465,順勢抱)
         elif tf_id == "1H" and direction == "short" and is_short:
             exit_strategy = "swing_full"                                 # 1H C3空+階梯：整倉pivot移SL(驗+0.263/MDD10%)
         elif tf_id == "15m" and direction == "long" and is_macd_long:
