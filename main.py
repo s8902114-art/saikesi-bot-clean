@@ -72,36 +72,31 @@ from indicators import (
 # 僅 BTC/ETH/SOL(有逐筆對齊回測);其他幣回 None → 只靠帶量。Binance fapi 公開免auth。
 # (內聯於 main.py:push.sh 只推 main.py,不可用外部模組。語意對齊 trading-backtest/tflow_live.py)
 _TFLOW_COINS = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
-_TFLOW_BASE = "https://fapi.binance.com/fapi/v1/aggTrades"
+# 輕量端點:一次回傳整小時 taker 買量/賣量,buyVol-sellVol 號 = 逐筆 sq_sum 號(2026-06-12 三幣實測號全一致、值近同)。
+# 取代分頁 aggTrades(~10s)→ 一個 call、瞬間。bot 本來就用 takerlongshortRatio(_fetch_binance_ls_taker)。
+_TFLOW_BASE = "https://fapi.binance.com/futures/data/takerlongshortRatio"
 def _tflow_last_hour(symbol):
+    """回傳 (net=buyVol-sellVol, ok)。ok=False 表示沒對齊到完成小時列 → 退回帶量。"""
     now = int(time.time() * 1000); hour = 3600_000
-    end = (now // hour) * hour; start = end - hour          # 最近一根已完成 1H
-    net = 0.0; n = 0; from_id = None; guard = 0
-    while guard < 400:
-        guard += 1
-        params = {"symbol": symbol, "limit": 1000}
-        if from_id is None: params["startTime"] = start; params["endTime"] = end
-        else: params["fromId"] = from_id
-        d = requests.get(_TFLOW_BASE, params=params, timeout=15).json()
-        if not isinstance(d, list) or not d: break
-        stop = False
-        for x in d:
-            if x["T"] >= end: stop = True; break
-            if x["T"] < start: continue
-            net += float(x["q"]) * (-1.0 if x["m"] else 1.0); n += 1
-        if stop or d[-1]["T"] >= end or len(d) < 1000: break
-        from_id = d[-1]["a"] + 1
-    return net, n
+    start = (now // hour) * hour - hour                     # 最近一根已完成 1H 的起點
+    r = requests.get(_TFLOW_BASE, params={"symbol": symbol, "period": "1h", "limit": 6}, timeout=10).json()
+    if not isinstance(r, list): return 0.0, False
+    for x in r:
+        if int(x["timestamp"]) == start:
+            bv = float(x["buyVol"]); sv = float(x["sellVol"])
+            if bv + sv <= 0: return 0.0, False
+            return bv - sv, True
+    return 0.0, False
 def tflow_confirm(symbol, direction):
-    """進場確認閘。空:net<0;多:net>0。非3幣/thin/失敗回 (None,...) → 交給帶量。"""
+    """進場確認閘。空:net<0;多:net>0。非3幣/無資料/失敗回 (None,...) → 交給帶量。"""
     if symbol not in _TFLOW_COINS: return None, "non-tape coin"
     try:
-        net, n = _tflow_last_hour(symbol)
+        net, ok = _tflow_last_hour(symbol)
     except Exception as e:
         return None, f"tflow err {e}"
-    if n < 50: return None, f"thin n={n}"
-    ok = (net < 0) if direction == "short" else (net > 0)
-    return ok, f"tFlow net={net:+.1f} n={n}"
+    if not ok: return None, "tflow no-data"
+    res = (net < 0) if direction == "short" else (net > 0)
+    return res, f"tFlow net={net:+.1f}"
 
 # ══════════════════════════════════════════════════════════════════════════════
 
