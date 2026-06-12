@@ -2776,6 +2776,7 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
 
 
 # ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF +0.193,出場1.5R/3R)──────────────
+VEGAS_SHORT_ENABLED = True   # 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
 BOX_SHORT_ENABLED = True
 def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """箱突破做空：96根窄箱(range<8%)收盤跌破箱底 + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
@@ -3276,6 +3277,34 @@ class SykesTradingBot:
                 if not ((0 <= _kzh < 4) or (6 <= _kzh < 9) or (12 <= _kzh < 15) or (18 <= _kzh < 19)):
                     is_box_short = False
 
+        # ── 維加斯大通道 fade 做空(15m,2026-06-13)：價由下回測大通道(e576/676)被當壓力擋下
+        #   + 1H空方共振 + CVD↓ + ls≥2(擠多頭軋空)。WF驗+0.182/勝53%/MDD16%/各年不虧,牛市也正。
+        #   = 第一支「牛市也能賺」的15m逆勢空(靠1H共振蓋過上漂)。出場固定R(預設"")。
+        is_vegas_short = False; _veg_r = ""
+        if VEGAS_SHORT_ENABLED and tf_id == "15m":
+            try:
+                _bd = float(min(ema576.iloc[-1], ema676.iloc[-1]))   # 大通道下緣
+                _prev_below = float(df["close"].iloc[-2]) < _bd        # 前一根在大通道下(由下往上)
+                _retest = abs(current_close - _bd) <= 0.5 * current_atr  # 回測下緣±0.5ATR
+                _rejected = current_close < _bd and current_close < float(df["open"].iloc[-1])  # 被擋回+收黑
+                if _prev_below and _retest and _rejected:
+                    _ls_v, _ = _fetch_binance_ls_taker(symbol_item)   # ls≥2(便宜,快取)先擋
+                    if _ls_v is not None and _ls_v >= 2.0:
+                        _cona_v = CONA_PERP.get(symbol_item)
+                        if _cona_v:
+                            _e = int(time.time()*1000); _s = _e - (BAR_SECONDS["15m"]*40*1000)
+                            _cvd_v = calculate_cumulative_volume_delta(_cona_v, okx_bar_fmt, _s, _e)
+                            if len(_cvd_v) >= 4 and _cvd_v.iloc[-1] < _cvd_v.iloc[-4]:   # CVD↓
+                                _d1v = fetch_market_candles(okx_swap_symbol, "1H")
+                                if not _d1v.empty and len(_d1v) > 600:
+                                    _e144v = _d1v["close"].ewm(span=144, adjust=False).mean()
+                                    _e576v = _d1v["close"].ewm(span=576, adjust=False).mean()
+                                    if _e144v.iloc[-1] < _e576v.iloc[-1] and _d1v["close"].iloc[-1] < _e144v.iloc[-1]:
+                                        is_vegas_short = True; _veg_r = f"ls{_ls_v:.1f}+1H空+CVD↓"
+                                        print(f"[Vegas空] {symbol_item} 回測大通道被擋 {_veg_r}")
+            except Exception as _vse:
+                print(f"[Vegas-Short] {symbol_item} 判斷失敗: {_vse}")
+
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
         # C3 空訊號成立後，要求進場價在某條階梯 Fibo 線 ±0.5×ATR 內才放行。
@@ -3422,7 +3451,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short
 
         if not combined_long and not combined_short:
             return
@@ -3450,6 +3479,7 @@ class SykesTradingBot:
             if is_macd_short:    _signal_source.append("MACD動能")
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_box_short:     _signal_source.append("箱突破空")
+            if is_vegas_short:   _signal_source.append("維加斯大通道空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
@@ -3561,6 +3591,18 @@ class SykesTradingBot:
             risk_dist  = calculated_sl - current_close
             tp1_target = current_close - risk_dist * 4.0
             tp2_target = current_close - risk_dist * 4.0
+
+        # 維加斯空：止損放「大通道上緣 e576/676 + 0.3ATR」(對齊回測),固定R出場(TP1.0/TP2.5)。
+        if direction == "short" and is_vegas_short and not is_box_short:
+            _bu_v = float(max(ema576.iloc[-1], ema676.iloc[-1]))
+            calculated_sl = round(_bu_v + 0.3 * current_atr, 8)
+            risk_pct = (calculated_sl - current_close) / current_close
+            if risk_pct < MIN_SL_PCT or risk_pct > MAX_SL:
+                if _dbg: print(f"[Vegas-SL] {symbol_item} 大通道止損超範圍({risk_pct:.3%})→跳過", flush=True)
+                return
+            risk_dist  = calculated_sl - current_close
+            tp1_target = current_close - risk_dist * p["tp1_mult"]          # 固定R 1.0
+            tp2_target = current_close - risk_dist * p["tp2_intraday_mult"] # 2.5
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
