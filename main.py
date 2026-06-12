@@ -3962,10 +3962,43 @@ def _fetch_coingecko_top100() -> list:
         print(f"[SYMBOLS] CoinGecko 抓取失敗: {e}", flush=True)
     return []
 
+TOP_MOVERS_N        = 25            # 漲幅前N + 跌幅前N(共~50)加入掃描
+MIN_MOVER_VOLCCY    = 10_000_000.0  # 流動性門檻:24h成交額(volCcy24h)需 ≥ 此值,濾掉插針山寨
+def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOVER_VOLCCY) -> list:
+    """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻)。
+    漲幅榜→動量/突破多單廣度;跌幅榜→breakdown空/box 候選。回傳 inst_id 列表。"""
+    try:
+        r = requests.get("https://www.okx.com/api/v5/market/tickers",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code != 200:
+            print(f"[SYMBOLS] OKX tickers HTTP {r.status_code}", flush=True); return []
+        movers = []
+        for t in r.json().get("data", []):
+            inst = t.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
+                continue
+            try:
+                last = float(t["last"]); op = float(t["open24h"]); vc = float(t.get("volCcy24h", 0) or 0)
+            except (KeyError, ValueError, TypeError):
+                continue
+            if op <= 0 or vc < min_volccy:        # 流動性門檻
+                continue
+            movers.append((inst, (last - op) / op))
+        if not movers:
+            return []
+        movers.sort(key=lambda x: x[1], reverse=True)
+        gainers = [m[0] for m in movers[:top_n]]
+        losers  = [m[0] for m in movers[-top_n:]]
+        print(f"[SYMBOLS] OKX 漲跌幅榜:漲{len(gainers)}+跌{len(losers)}(流動性≥{min_volccy/1e6:.0f}M)", flush=True)
+        return gainers + losers
+    except Exception as e:
+        print(f"[SYMBOLS] OKX 漲跌幅榜抓取失敗: {e}", flush=True)
+        return []
+
 def build_dynamic_symbols() -> bool:
     """
     重建 SYMBOLS + OKX_SWAP：
-      CoinGecko 市值前100（排除穩定幣）× OKX 有上線永續合約
+      CoinGecko 市值前100（排除穩定幣）× OKX 永續  +  OKX 每日漲跌幅前25(配流動性門檻)
     失敗時回傳 False，SYMBOLS 保持不變。
     """
     global SYMBOLS, OKX_SWAP, _symbols_last_updated
@@ -4004,6 +4037,16 @@ def build_dynamic_symbols() -> bool:
         inst_id = f"{coin}-USDT-SWAP"
         if inst_id in okx_swaps:
             new_symbols[inst_id] = f"{coin}/USDT"
+
+    # 加每日漲跌幅榜(配流動性門檻)→ 擴廣度,波動在哪訊號在哪(2026-06-13)
+    _n_before = len(new_symbols)
+    for inst_id in _fetch_okx_top_movers():
+        if inst_id in okx_swaps and inst_id not in new_symbols:
+            coin = inst_id.split("-")[0]
+            if coin not in STABLECOINS:
+                new_symbols[inst_id] = f"{coin}/USDT"
+    if len(new_symbols) > _n_before:
+        print(f"[SYMBOLS] 漲跌幅榜額外加入 {len(new_symbols)-_n_before} 幣 → 共 {len(new_symbols)}", flush=True)
 
     if len(new_symbols) < 10:
         print(f"[SYMBOLS] ⚠️ 動態列表僅 {len(new_symbols)} 個，回退備援列表", flush=True)
@@ -4248,9 +4291,9 @@ def main_polling_loop():
 
             check_trailing_stops_for_real()
 
-            # 每週自動更新幣種列表（7天 = 604800秒）
-            if time.time() - _symbols_last_updated > 604800:
-                print("[SYMBOLS] 距上次更新超過7天，自動重新抓取...", flush=True)
+            # 每日自動更新幣種列表（1天 = 86400秒)：market cap 變動小,但漲跌幅榜需日更才有意義
+            if time.time() - _symbols_last_updated > 86400:
+                print("[SYMBOLS] 距上次更新超過1天，自動重新抓取(含漲跌幅榜)...", flush=True)
                 build_dynamic_symbols()
 
             for tf in active_tfs_to_run:
