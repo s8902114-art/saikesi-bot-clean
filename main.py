@@ -144,7 +144,7 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
-RISK_PCT     = 0.10        # 單筆最大風險金額 = 基準 × 10%
+RISK_PCT     = 0.05        # 單筆最大風險金額 = 基準 × 5%(2026-06-13 預設降5%:真出場帳戶MDD壓低)
 RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
 OKX_MIN_MMR       = 350.0  # OKX 開倉前維持保證金率門檻(%)：預估加新倉後 < 此值就跳過（!setmmr 可調）
 BINGX_MAX_RISK_RATE = 0.70 # BingX 開倉前帳戶風險率上限：預估加新倉後 > 此值就跳過（!setbingxrisk 可調）
@@ -2630,7 +2630,7 @@ DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5
 #   1) 加碼前走強平守門員(合併部位若強平在停損前→不加)
 #   2) 加碼後停損=原進場價→觸損時原單保本+加碼單虧1R,合併最大虧≈1單位(有界,不爆倉)
 #   3) 每筆只加一次  4) 預設關閉,review+觀察後再開
-PYRAMID_ENABLED = True    # 2026-06-05 啟用(觀察期3天已過,約定RISK5%+STEP50)
+PYRAMID_ENABLED = False   # 2026-06-13 關閉:橫盤=純風險放大;改用突破訊號position_scale×1.5集中下注
 PYRAMID_LIQ_BUF = 0.85    # 強平守門員緩衝(同下單管線)
 # ── 讓跑類策略(swing_full接管倉 / box_trend)的「達1R保本兜底」開關 ───────────────
 # 2026-06-10 含費WF證實:1R保本兜底對讓跑策略是災難(DH +0.142→-0.118、1H C3空砍頭)。
@@ -3248,6 +3248,18 @@ class SykesTradingBot:
                 is_dh_short, _dh_short_r = _check_dh_short(symbol_item, okx_bar_fmt, df)
             except Exception as _dse:
                 print(f"[DH-Short] {symbol_item} 判斷失敗: {_dse}")
+            # 2026-06-13 regime閘:DH是熊市空單(按年:2022 EV+7.3/+72.9R,2024-25牛市轉負-30R)。
+            #   只在 4H EMA200 下彎(下跌趨勢)才放行,牛市自動噤聲。加碼保留(熊市加碼+72.9>純跑+44.6)。
+            if is_dh_short:
+                try:
+                    _d4dh = fetch_market_candles(okx_swap_symbol, "4H")
+                    if not _d4dh.empty and len(_d4dh) > 200:
+                        _e2dh = _d4dh["close"].ewm(span=200, adjust=False).mean()
+                        if _e2dh.iloc[-1] >= _e2dh.iloc[-2]:   # 沒下彎 → 非熊 → 取消
+                            is_dh_short = False
+                            print(f"[DH-Short] {symbol_item} 4H非下跌趨勢,regime閘擋下")
+                except Exception as _dhr:
+                    print(f"[DH-Short] {symbol_item} regime閘失敗(放行): {_dhr}")
 
         # ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF+0.193,出場1.5R/3R)──
         is_box_short = False
@@ -3309,13 +3321,22 @@ class SykesTradingBot:
             print(f"[DBG DOGE/15m] ════════════════════════\n", flush=True)
         # ────────────────────────────────────────────────────────
 
+        # ── 突破閘(2026-06-13):治「在支撐區空/壓力區多=追漲追跌」。動量策略(MACD/W底)要求
+        #   價格已真的穿過前96根S/R才進(空:跌破前96低;多:突破前96高)。WF:1H空+0.33→+0.52、
+        #   1H多+0.28→+0.51、15m多+0.19→+0.65、W底+0.21→+0.34,MDD全到3-8%。
+        #   突破訊號 position_scale×1.5(少而重,帳戶MDD反降56-58%)。回踩/反轉(C3/DH/共振)不適用,不套。
+        _h96 = df["high"].values; _l96 = df["low"].values
+        _brk_up = len(_h96) >= 97 and current_close > float(_h96[-97:-1].max())   # 多:突破前96高
+        _brk_dn = len(_l96) >= 97 and current_close < float(_l96[-97:-1].min())   # 空:跌破前96低
+
         # ── 雙底(W底)第二套訊號（OR 邏輯，獨立觸發）──────────────────────
         # 回測結論（backtest_wm_variants.py）：
         #   W底做多：1H +0.265、15m +0.068（C現狀版穩健）→ 僅 1H 啟用，與 WF 一致
         #   M頭做空：四版兩時框幾乎全賠 → 單獨關閉
         # 故：雙底僅 1H 做多；雙頂(M頭)單獨做空已停用。
         if tf_id == "1H":
-            is_double_bottom = check_double_bottom(df, tf_id)
+            is_double_bottom = check_double_bottom(df, tf_id) and _brk_up   # +突破閘
+            if is_double_bottom: dh_boost = 1.5                             # 突破高品質→×1.5
         else:
             is_double_bottom = False
         is_double_top = False   # M頭單獨做空回測全賠，停用（共振版見下）
@@ -3356,28 +3377,28 @@ class SykesTradingBot:
                     dead = dif.iloc[-2] >= dea.iloc[-2] and dif.iloc[-1] < dea.iloc[-1]
                     # 15m 多 升級:加帶量(2026-06-12)。裸進場太鬆=驗-0.022/MDD92%(線上舊狀);
                     #   +帶量→驗+0.168/勝58%/MDD33%,砍73%雜訊單。tFlow對15m多無增益故不加(便宜上)。
-                    if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                    if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long") and _brk_up:
                         _vol15 = df["vol"].values
                         _va15 = float(np.mean(_vol15[-21:-1])) if len(_vol15) >= 21 else 0.0
                         if _va15 > 0 and _vol15[-1] > 1.5 * _va15:
-                            is_macd_long = True
-                            print(f"[MACD多15m] {symbol_item} 帶量✓")
+                            is_macd_long = True; dh_boost = 1.5            # 帶量+突破→×1.5
+                            print(f"[MACD多15m] {symbol_item} 帶量+突破✓")
                     if tf_id == "1H":
-                        # 帶量(全幣):當根量 > 1.5×前20均。WF:1H空+0.056→+0.459、1H多(新)+0.465。
+                        # 帶量(全幣)+逐筆tFlow+突破閘。WF:1H空+0.33→+0.52、1H多+0.28→+0.51,MDD→6%。
                         _vol = df["vol"].values
                         _va = float(np.mean(_vol[-21:-1])) if len(_vol) >= 21 else 0.0
                         _vol_ok = _va > 0 and _vol[-1] > 1.5 * _va
                         _bn_sym = symbol_item.replace("/", "")     # BTC/USDT → BTCUSDT
-                        if _vol_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                        if _vol_ok and _brk_dn and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "short")
-                            if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量
-                                is_macd_short = True
-                                print(f"[MACD空] {symbol_item} 帶量✓ {_tfr}")
-                        if _vol_ok and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                            if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量+突破
+                                is_macd_short = True; dh_boost = 1.5
+                                print(f"[MACD空] {symbol_item} 帶量+突破✓ {_tfr}")
+                        if _vol_ok and _brk_up and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "long")
                             if _tfok is not False:
-                                is_macd_long = True
-                                print(f"[MACD多] {symbol_item} 帶量✓ {_tfr}")
+                                is_macd_long = True; dh_boost = 1.5
+                                print(f"[MACD多] {symbol_item} 帶量+突破✓ {_tfr}")
             except Exception as _macd_err:
                 print(f"[MACD] {symbol_item} {tf_id} 計算失敗: {_macd_err}")
 
