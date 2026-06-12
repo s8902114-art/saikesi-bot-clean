@@ -3358,6 +3358,9 @@ class SykesTradingBot:
         _h96 = df["high"].values; _l96 = df["low"].values
         _brk_up = len(_h96) >= 97 and current_close > float(_h96[-97:-1].max())   # 多:突破前96高
         _brk_dn = len(_l96) >= 97 and current_close < float(_l96[-97:-1].min())   # 空:跌破前96低
+        if tf_id == "1H" and not _brk_dn:   # 1H空額外:跌破維加斯大通道也算(訊號×3、WF驗+0.39,補1H空量)
+            try: _brk_dn = current_close < float(min(ema576.iloc[-1], ema676.iloc[-1]))
+            except Exception: pass
 
         # ── 雙底(W底)第二套訊號（OR 邏輯，獨立觸發）──────────────────────
         # 回測結論（backtest_wm_variants.py）：
