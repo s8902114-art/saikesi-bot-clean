@@ -3468,7 +3468,8 @@ class SykesTradingBot:
         #   箱突破空/15m C3多 → 固定R(切線/移SL未變好)
         exit_strategy = ""
         if is_dh_short:
-            exit_strategy = "line_add"                                   # DH空：整倉切線+轉折加碼
+            exit_strategy = "line_full"                                  # DH空：整倉切線讓跑(2026-06-13關加碼:
+            #   按年顯示加碼只在強熊好(2022),震盪/牛市害它(2024純跑+0.32 vs 加碼-0.02)。切線出場不變,只去加碼。
         elif tf_id == "30m" and direction == "long" and is_long:
             exit_strategy = "line_full"                                  # 30m C3多：整倉切線
         elif tf_id == "1H" and direction == "long" and is_double_bottom:
