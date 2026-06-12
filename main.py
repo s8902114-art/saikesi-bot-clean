@@ -49,6 +49,7 @@ for pkg in REQUIRED_PACKAGES:
 import requests
 import numpy as np
 import pandas as pd
+import daily_report   # 每日00:00(UTC)復盤(record_entry進場記;daily_tick主迴圈發)
 import ccxt
 from flask import Flask, request, jsonify
 
@@ -3597,6 +3598,10 @@ class SykesTradingBot:
                                                "swing_tp", "swing_tp_1h"))
 
         if AUTO_TRADE.get(tf_id):
+            try:
+                daily_report.record_entry(symbol_item, tf_id, direction, signal_source_tag or exit_strategy)
+            except Exception:
+                pass
             if EXCHANGE_ENABLED.get("okx", True):
                 execute_okx_trade_pipeline(
                     okx_swap_symbol, direction, current_close,
@@ -4290,6 +4295,15 @@ def main_polling_loop():
                 continue
 
             check_trailing_stops_for_real()
+
+            # 每日 00:00(UTC) 復盤發 Discord(daily_tick 內部每日去重,僅 00:xx 時段建 client)
+            try:
+                if datetime.now(timezone.utc).hour == 0:
+                    _rep = daily_report.daily_tick(_initialize_ccxt_client())
+                    if _rep:
+                        dc_log(_rep)
+            except Exception as _re:
+                print(f"[DailyReport] 失敗: {_re}", flush=True)
 
             # 每日自動更新幣種列表（1天 = 86400秒)：market cap 變動小,但漲跌幅榜需日更才有意義
             if time.time() - _symbols_last_updated > 86400:

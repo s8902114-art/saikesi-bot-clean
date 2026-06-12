@@ -15,7 +15,7 @@ for i in 1 2 3 4 5; do
 done
 
 # Stage 並 commit 新變更
-git add main.py backtest.py auto_push.py push.sh requirements.txt Procfile runtime.txt 2>&1
+git add main.py backtest.py auto_push.py push.sh requirements.txt Procfile runtime.txt daily_report.py 2>&1
 
 if git diff --cached --quiet; then
     echo "[push] 無新變更，直接推送現有 commit..."
