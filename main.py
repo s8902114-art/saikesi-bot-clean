@@ -2806,6 +2806,36 @@ def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tu
         return False, ""
 
 
+OI_SQUEEZE_ENABLED = True   # 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑
+def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_swap_symbol: str):
+    """主力建倉壓縮突破(1H):12h窄幅壓縮<3% + 帶量突破range(噴出) + 12h OI升>5%(建倉) + 4H regime順向。
+    coiled spring:壓得越緊彈越大。回 'long'/'short'/None。WF驗+0.309/賺賠3.1/MDD6%/各年正(讓跑出場)。"""
+    try:
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; vol = df["vol"].values
+        if len(cl) < 25: return None
+        rh = float(hi[-13:-1].max()); rl = float(lo[-13:-1].min())
+        if rl <= 0 or (rh - rl) / rl > 0.03: return None              # 12h壓縮<3%(coiled spring)
+        side = "long" if cl[-1] > rh else ("short" if cl[-1] < rl else None)
+        if side is None: return None
+        va = float(np.mean(vol[-21:-1]))
+        if not (va > 0 and vol[-1] > 1.5 * va): return None           # 帶量突破=噴出
+        cona = CONA_PERP.get(symbol_item)
+        if not cona: return None
+        _e = int(time.time() * 1000); _s = _e - (BAR_SECONDS["1H"] * 16 * 1000)
+        oi = fetch_open_interest_series(cona, okx_bar_fmt, _s, _e)
+        if len(oi) < 13 or oi.iloc[-13] <= 0: return None
+        if (oi.iloc[-1] - oi.iloc[-13]) / oi.iloc[-13] < 0.05: return None   # 12h OI升>5%(主力建倉)
+        d4 = fetch_market_candles(okx_swap_symbol, "4H")
+        if d4.empty or len(d4) < 60: return None
+        e50 = d4["close"].ewm(span=50, adjust=False).mean()
+        up4h = e50.iloc[-1] > e50.iloc[-2]
+        if (side == "long" and not up4h) or (side == "short" and up4h): return None   # 4H regime順向
+        return side
+    except Exception as e:
+        print(f"[OI-Squeeze] {symbol_item} 失敗: {e}")
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
 # 輸入：各指標布林值與數值
@@ -3460,9 +3490,19 @@ class SykesTradingBot:
         if tf_id == "15m" and is_short:
             is_short = False
 
+        # ── 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑。雙向。
+        is_oisq_long = False; is_oisq_short = False
+        if OI_SQUEEZE_ENABLED and tf_id == "1H":
+            try:
+                _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
+                if _sq == "long":  is_oisq_long = True;  print(f"[OI壓縮突破] {symbol_item} 多(噴出)")
+                elif _sq == "short": is_oisq_short = True; print(f"[OI壓縮突破] {symbol_item} 空(噴出)")
+            except Exception as _sqe:
+                print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
+
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short
 
         if not combined_long and not combined_short:
             return
@@ -3482,6 +3522,7 @@ class SykesTradingBot:
             if is_double_bottom: _signal_source.append("雙底")
             if is_reson_long:    _signal_source.append("雙底+RSI共振")
             if is_macd_long:     _signal_source.append("MACD動能")
+            if is_oisq_long:     _signal_source.append("OI壓縮突破")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -3491,6 +3532,7 @@ class SykesTradingBot:
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
+            if is_oisq_short:    _signal_source.append("OI壓縮突破")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
@@ -3525,6 +3567,8 @@ class SykesTradingBot:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
         elif is_box_short:
             exit_strategy = "box_trend"                                  # 箱突破空：1R保本+4R整倉大TP(讓趨勢跑)
+        elif is_oisq_long or is_oisq_short:
+            exit_strategy = "swing_full"                                 # OI壓縮突破：整倉轉折移SL讓跑(抓噴出尾,驗+0.309/賺賠3.1/MDD6%)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
@@ -3614,6 +3658,19 @@ class SykesTradingBot:
             risk_dist  = calculated_sl - current_close
             tp1_target = current_close - risk_dist * p["tp1_mult"]          # 固定R 1.0
             tp2_target = current_close - risk_dist * p["tp2_intraday_mult"] # 2.5
+
+        # OI壓縮突破:止損放「12h range 對邊 ± 0.3ATR」(對齊回測)。讓跑出場(swing_full)不掛固定TP。
+        if is_oisq_long or is_oisq_short:
+            _rh_sq = float(df["high"].values[-13:-1].max()); _rl_sq = float(df["low"].values[-13:-1].min())
+            if is_oisq_long:  calculated_sl = round(_rl_sq - 0.3 * current_atr, 8)
+            else:             calculated_sl = round(_rh_sq + 0.3 * current_atr, 8)
+            risk_pct = abs(calculated_sl - current_close) / current_close
+            if risk_pct < MIN_SL_PCT or risk_pct > MAX_SL:
+                if _dbg: print(f"[OISq-SL] {symbol_item} range止損超範圍({risk_pct:.3%})→跳過", flush=True)
+                return
+            risk_dist  = abs(current_close - calculated_sl)
+            tp1_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 1.5  # 讓跑不掛固定TP,此值僅供顯示
+            tp2_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 3.0
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
