@@ -2827,6 +2827,12 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
         oi = fetch_open_interest_series(cona, okx_bar_fmt, _s, _e)
         if len(oi) < 13 or oi.iloc[-13] <= 0: return None
         if (oi.iloc[-1] - oi.iloc[-13]) / oi.iloc[-13] < 0.05: return None   # 12h OI升>5%(主力建倉)
+        # CVD確認方向(防假突破:真突破帶主動流,假突破沒)。多需CVD↑、空需CVD↓。WF:勝率43%→50%、+0.309→+0.395。
+        _ce = int(time.time() * 1000); _cs = _ce - (BAR_SECONDS["1H"] * 6 * 1000)
+        cvd = calculate_cumulative_volume_delta(cona, okx_bar_fmt, _cs, _ce)
+        if len(cvd) >= 4:
+            if side == "long" and not (cvd.iloc[-1] > cvd.iloc[-4]): return None
+            if side == "short" and not (cvd.iloc[-1] < cvd.iloc[-4]): return None
         d4 = fetch_market_candles(okx_swap_symbol, "4H")
         if d4.empty or len(d4) < 60: return None
         e50 = d4["close"].ewm(span=50, adjust=False).mean()
@@ -3497,8 +3503,8 @@ class SykesTradingBot:
         if OI_SQUEEZE_ENABLED and tf_id == "1H":
             try:
                 _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
-                if _sq == "long":  is_oisq_long = True;  print(f"[主力建多] {symbol_item} 壓縮突破噴出")
-                elif _sq == "short": is_oisq_short = True; print(f"[主力建空] {symbol_item} 壓縮突破噴出")
+                if _sq == "long":  is_oisq_long = True;  dh_boost = 1.5; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
+                elif _sq == "short": is_oisq_short = True; dh_boost = 1.5; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
