@@ -1288,7 +1288,10 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
                     coin_max_lev = int(float(lev_data.get("maxShortLeverage") or MAX_LEVERAGE))
             except Exception:
                 coin_max_lev = MAX_LEVERAGE
-            leverage = max(1, min(coin_max_lev, MAX_LEVERAGE))
+            # 2026-06-13:全倉+風險制下注→升槓桿不改倉位/風險,只少鎖保證金(全倉下強平反而更遠)。
+            #   直接用 BingX 幣種實際上限(很多幣>150,黃金500x),不再壓到 MAX_LEVERAGE。
+            #   coin_max_lev 本身即 BingX 該幣風險上限(隨波動率設),沿用安全。上限1000防API異常。
+            leverage = max(1, min(coin_max_lev, 1000))
         else:
             # 逐倉模式：維持原本動態槓桿邏輯
             leverage = max(1, min(int(50.0 / (sl_dist_pct * 100.0)), MAX_LEVERAGE))
@@ -3422,7 +3425,11 @@ class SykesTradingBot:
                         _va = float(np.mean(_vol[-21:-1])) if len(_vol) >= 21 else 0.0
                         _vol_ok = _va > 0 and _vol[-1] > 1.5 * _va
                         _bn_sym = symbol_item.replace("/", "")     # BTC/USDT → BTCUSDT
-                        if _vol_ok and _brk_dn and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                        # 避地板:離10日低(240根)<1ATR=貼地板易被彈→不空(已跌破日低=真突破則放行)。WF驗+0.567→+0.631。
+                        _lo1h = df["low"].values
+                        _dlow = float(_lo1h[-240:].min()) if len(_lo1h) >= 240 else float(_lo1h.min())
+                        _floor_ok = (current_close < _dlow) or ((current_close - _dlow) >= 1.0 * current_atr)
+                        if _vol_ok and _brk_dn and _floor_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "short")
                             if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量+突破
                                 is_macd_short = True; dh_boost = 1.5
