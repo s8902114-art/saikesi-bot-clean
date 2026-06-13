@@ -511,6 +511,8 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     if "MACD" in s:       bits.append("MACD 動能 + 4H 趨勢同向")
     if "數據獵手空" in s:  bits.append("大級別2B假突破 + CVD頂背離 + OI升 + 散戶爆多")
     if "箱突破空" in s:    bits.append("跌破盤整箱底 + 帶量 + CVD↓ + OI升(順勢)")
+    if "維加斯大通道空" in s: bits.append("回測維加斯大通道被擋 + 1H空方共振 + CVD↓ + 散戶爆多(fade)")
+    if "主力建" in s:      bits.append("12h窄幅壓縮 + 帶量突破 + OI升建倉 + 4H順向(主力建倉噴出)")
     if tf == "1H" and side == "short":
         bits.append("靠階梯壓力位")
     if dh_boost and dh_boost > 1.0:
@@ -3495,8 +3497,8 @@ class SykesTradingBot:
         if OI_SQUEEZE_ENABLED and tf_id == "1H":
             try:
                 _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
-                if _sq == "long":  is_oisq_long = True;  print(f"[OI壓縮突破] {symbol_item} 多(噴出)")
-                elif _sq == "short": is_oisq_short = True; print(f"[OI壓縮突破] {symbol_item} 空(噴出)")
+                if _sq == "long":  is_oisq_long = True;  print(f"[主力建多] {symbol_item} 壓縮突破噴出")
+                elif _sq == "short": is_oisq_short = True; print(f"[主力建空] {symbol_item} 壓縮突破噴出")
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
@@ -3522,7 +3524,7 @@ class SykesTradingBot:
             if is_double_bottom: _signal_source.append("雙底")
             if is_reson_long:    _signal_source.append("雙底+RSI共振")
             if is_macd_long:     _signal_source.append("MACD動能")
-            if is_oisq_long:     _signal_source.append("OI壓縮突破")
+            if is_oisq_long:     _signal_source.append("主力建多")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -3532,7 +3534,7 @@ class SykesTradingBot:
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
-            if is_oisq_short:    _signal_source.append("OI壓縮突破")
+            if is_oisq_short:    _signal_source.append("主力建空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
