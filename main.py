@@ -3354,13 +3354,14 @@ class SykesTradingBot:
             print(f"[DBG DOGE/15m] ════════════════════════\n", flush=True)
         # ────────────────────────────────────────────────────────
 
-        # ── 突破閘(2026-06-13):治「在支撐區空/壓力區多=追漲追跌」。動量策略(MACD/W底)要求
-        #   價格已真的穿過前96根S/R才進(空:跌破前96低;多:突破前96高)。WF:1H空+0.33→+0.52、
-        #   1H多+0.28→+0.51、15m多+0.19→+0.65、W底+0.21→+0.34,MDD全到3-8%。
-        #   突破訊號 position_scale×1.5(少而重,帳戶MDD反降56-58%)。回踩/反轉(C3/DH/共振)不適用,不套。
-        _h96 = df["high"].values; _l96 = df["low"].values
-        _brk_up = len(_h96) >= 97 and current_close > float(_h96[-97:-1].max())   # 多:突破前96高
-        _brk_dn = len(_l96) >= 97 and current_close < float(_l96[-97:-1].min())   # 空:跌破前96低
+        # ── 突破閘(2026-06-13,回看24根=用戶指正96太長→進場太晚成本爛):動量策略(MACD/W底)要求
+        #   價格已穿過前24根S/R才進(空:跌破前24低;多:突破前24高)。回看96→24:1H空+0.567→+0.655、
+        #   1H多+0.218→+0.410、15m多/W底持平但訊號更多。更早觸發=更好成本+更多訊號。
+        #   突破訊號 position_scale×1.5(少而重)。回踩/反轉(C3/DH/共振)不適用,不套。
+        _N_BRK = 24
+        _hN = df["high"].values; _lN = df["low"].values
+        _brk_up = len(_hN) >= _N_BRK+1 and current_close > float(_hN[-(_N_BRK+1):-1].max())   # 多:突破前24高
+        _brk_dn = len(_lN) >= _N_BRK+1 and current_close < float(_lN[-(_N_BRK+1):-1].min())   # 空:跌破前24低
         if tf_id == "1H" and not _brk_dn:   # 1H空額外:跌破維加斯大通道也算(訊號×3、WF驗+0.39,補1H空量)
             try: _brk_dn = current_close < float(min(ema576.iloc[-1], ema676.iloc[-1]))
             except Exception: pass
