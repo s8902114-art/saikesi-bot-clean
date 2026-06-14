@@ -3516,6 +3516,22 @@ class SykesTradingBot:
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
+        # ★2026-06-15 空單regime閘(實盤診斷:6/7-13空169筆-29;6/8空51筆0%勝-17.8;但6/10跌日空76%勝+11.7)。
+        #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。非DH積極空單要求4H確認下跌(EMA200下彎+價在其下)才放行。
+        if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or (is_short and tf_id == "1H")):
+            try:
+                _d4s = fetch_market_candles(okx_swap_symbol, "4H")
+                if not _d4s.empty and len(_d4s) > 200:
+                    _e2s = _d4s["close"].ewm(span=200, adjust=False).mean()
+                    _4h_dn = (_e2s.iloc[-1] < _e2s.iloc[-2]) and (float(_d4s["close"].iloc[-1]) < float(_e2s.iloc[-1]))
+                    if not _4h_dn:
+                        if is_box_short or is_vegas_short or is_macd_short or is_oisq_short or is_short:
+                            print(f"[空regime閘] {symbol_item} 4H非下跌→擋積極空單")
+                        is_box_short = is_vegas_short = is_macd_short = is_oisq_short = False
+                        if tf_id == "1H": is_short = False
+            except Exception as _r4e:
+                print(f"[空regime閘] {symbol_item} 失敗(放行): {_r4e}")
+
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long
         combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short
