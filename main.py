@@ -3517,16 +3517,16 @@ class SykesTradingBot:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
         # ★2026-06-15 空單regime閘(實盤診斷:6/7-13空169筆-29;6/8空51筆0%勝-17.8;但6/10跌日空76%勝+11.7)。
-        #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。非DH積極空單要求4H確認下跌(EMA200下彎+價在其下)才放行。
+        #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。用「價在4H EMA50之下」=靈敏(單日下殺即跌破,抓6/10;
+        #   持續上漲時價在EMA50上,擋6/8)。比EMA200斜率快=不會太晚、又不擋掉單日下殺的好空。非DH積極空單適用。
         if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or (is_short and tf_id == "1H")):
             try:
                 _d4s = fetch_market_candles(okx_swap_symbol, "4H")
-                if not _d4s.empty and len(_d4s) > 200:
-                    _e2s = _d4s["close"].ewm(span=200, adjust=False).mean()
-                    _4h_dn = (_e2s.iloc[-1] < _e2s.iloc[-2]) and (float(_d4s["close"].iloc[-1]) < float(_e2s.iloc[-1]))
+                if not _d4s.empty and len(_d4s) > 60:
+                    _e50s = _d4s["close"].ewm(span=50, adjust=False).mean()
+                    _4h_dn = float(_d4s["close"].iloc[-1]) < float(_e50s.iloc[-1])   # 價在4H EMA50之下=下行
                     if not _4h_dn:
-                        if is_box_short or is_vegas_short or is_macd_short or is_oisq_short or is_short:
-                            print(f"[空regime閘] {symbol_item} 4H非下跌→擋積極空單")
+                        print(f"[空regime閘] {symbol_item} 4H在EMA50之上(非下行)→擋積極空單")
                         is_box_short = is_vegas_short = is_macd_short = is_oisq_short = False
                         if tf_id == "1H": is_short = False
             except Exception as _r4e:
