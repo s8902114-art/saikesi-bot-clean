@@ -2630,6 +2630,10 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
 DH_CVD_ENABLED = True   # 開關：15m 多 CVD吸收加碼（C方案）
 BOOST_MULT     = 1.0    # ★2026-06-15 加碼總開關(止血關閉):1.0=不加碼;改回1.5重新啟用所有×1.5加碼
 DH_BOOST_MULT  = BOOST_MULT    # CVD吸收確認時的下注加碼倍數(回測C×1.5;現由 BOOST_MULT 總控)
+# ★2026-06-15 市值幣集合:讓跑類(swing_full/line_full)市值幣維持讓跑,山寨改半倉2.5R落袋(噴到頂鎖利防吐回,如COAI)
+MAJOR_COINS = {"BTC/USDT","ETH/USDT","SOL/USDT","BNB/USDT","XRP/USDT","DOGE/USDT","ADA/USDT",
+               "AVAX/USDT","LINK/USDT","DOT/USDT","TRX/USDT","BCH/USDT","LTC/USDT","TON/USDT","SUI/USDT"}
+ALT_LOCK_R     = 2.5    # 山寨讓跑單達此R先落袋半倉+移BE(防COAI式噴到頂吐回)
 
 # ── 金字塔加碼（+1R 加單，僅多單）──────────────────────────────────────────────
 # 回測(WF)金字塔翻倍成長但MDD大增;OKX同方向會合併成一個部位,故實作=「+1R加大部位
@@ -3683,6 +3687,18 @@ class SykesTradingBot:
             risk_dist  = abs(current_close - calculated_sl)
             tp1_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 1.5  # 讓跑不掛固定TP,此值僅供顯示
             tp2_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 3.0
+
+        # ★山寨讓跑改半倉2.5R落袋(2026-06-15,COAI教訓:山寨噴到頂用swing_full一路抱會吐回)。
+        #   市值幣維持讓跑(不會這樣噴崩);山寨(非MAJOR)讓跑類→swing_tp 半倉2.5R落袋+BE+剩半trail。多空通用。
+        if symbol_item not in MAJOR_COINS and exit_strategy in ("swing_full", "line_full"):
+            exit_strategy = "swing_tp"
+            _rd = abs(current_close - calculated_sl)
+            if direction == "long":
+                tp1_target = current_close + _rd * ALT_LOCK_R
+                tp2_target = current_close + _rd * (ALT_LOCK_R + 2.0)
+            else:
+                tp1_target = current_close - _rd * ALT_LOCK_R
+                tp2_target = current_close - _rd * (ALT_LOCK_R + 2.0)
 
         risk_delta = abs(current_close - calculated_sl) or 1e-9
         rr1 = abs(tp1_target - current_close) / risk_delta
