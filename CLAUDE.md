@@ -19,19 +19,21 @@
 
 | 時框 | 做多 | 做空 |
 |---|---|---|
-| **15m** | C3(+CVD吸收/ls<1.0 ×1.5)、雙底+RSI共振、**MACD動能+帶量+突破** | 雙頂+RSI共振、數據獵手空(僅4H下跌、切線無加碼)、箱突破空(箱頂+killzone)、**★維加斯大通道fade空(回測e576/676被擋+1H空方共振+CVD↓+ls≥2,固定R,WF驗+0.182牛市也正)** |
-| **30m** | C3切線 | ❌ 停用 |
-| **1H** | 雙底W底+突破、**MACD多+帶量+tFlow+突破(新)** | C3+階梯壓力、**MACD空+帶量+tFlow+突破(前96低或跌破維加斯大通道)** |
+| **15m** | C3(+CVD吸收/ls<1.0 ×1.5)、雙底+RSI共振、**MACD動能+帶量+突破24** | 雙頂+RSI共振、數據獵手空(僅4H下跌、切線無加碼)、箱突破空(箱頂+killzone)、**維加斯大通道fade空(回測e576/676被擋+1H空方共振+CVD↓+ls≥2,固定R,牛市也正)** |
+| **30m** | C3讓跑 | ❌ 停用 |
+| **1H** | 雙底W底+突破、MACD多+帶量+tFlow+突破24、**★主力建倉壓縮突破(×1.5,讓跑)** | C3+階梯壓力、MACD空+帶量+tFlow+(突破24低 或 跌破維加斯大通道)、**★主力建倉壓縮突破(×1.5,讓跑)** |
 
-### ★2026-06-13 重大更新(治多空雙巴+補空單,全經WF)
-1. **突破閘**:動量策略(MACD空/多、W底)要求穿過前96根S/R才進(治「支撐區空/壓力區多=追漲追跌」)。WF:1H空+0.33→+0.52、15m多+0.19→+0.65、MDD全到3-8%。突破訊號 position_scale×1.5(走dh_boost,少而重)。C3/box/DH/共振不套(回踩/反轉不相容)。
-2. **★維加斯大通道fade空(VEGAS_SHORT_ENABLED)**:第一支牛市也賺的15m逆勢空。價由下回測大通道e576/676下緣±0.5ATR被擋+收黑 + 1H空方共振(e144<e576且close<e144) + CVD↓ + ls≥2.0(軋空)。止損=大通道上緣+0.3ATR,固定R。WF驗+0.182/勝53%/MDD16%/各年不虧。新策略首部署需盯`[Vegas空]`。
-3. **1H MACD空**:跌破前96低 或 跌破維加斯大通道 任一即可(補1H空量×3,+0.39)。
-4. **DH空**:加4H下跌regime閘(只在跌勢做,牛市自動噤聲)+ 關加碼(line_add→line_full,加碼只強熊好)。
-5. **PYRAMID_ENABLED=False**(橫盤純風險);**RISK_PCT預設0.10→0.05**。
-6. **掃描廣度**:加OKX每日漲跌幅前25(volCcy24h≥10M流動性門檻),幣種列表改日更(波動在哪訊號在哪)。
-7. **每日報告部署**:00:00 UTC(台08:00)發Discord復盤(`daily_report.py`,record_entry+daily_tick已接)。
-- ★方法論:測出負EV要對照「隨機做空基準率-0.38」(crypto上漂),負≠無料;15m逆勢空要堆夠MTF+數據edge才過線。見上層 `trading-backtest/` `_vegas_c3_aux.py`/`_breakout_all.py`/`_dh_gate.py`。
+### ★2026-06-13 重大更新(治多空雙巴+補多空訊號,全經WF)
+1. **突破閘(回看24根)**:動量(MACD空/多、W底)要求穿前24根S/R才進(治追漲追跌)。回看96→24(用戶指正96太長進場太晚):1H空+0.567→+0.655、1H多+0.218→+0.410。突破訊號 position_scale×1.5。C3/DH/box/共振不套。
+2. **維加斯大通道fade空(VEGAS_SHORT_ENABLED)**:牛市也賺的15m逆勢空。回測e576/676下緣±0.5ATR被擋+收黑+1H空方共振(e144<e576且close<e144)+CVD↓+ls≥2。固定R,WF+0.182各年不虧。
+3. **★主力建倉壓縮突破(OI_SQUEEZE_ENABLED,1H雙向)**:12h窄幅壓縮<3%(coiled spring)+帶量突破+12h OI升>5%(建倉)+CVD確認方向(防假突破)+4H regime順向。止損=range對邊±0.3ATR,**×1.5,讓跑(swing_full抓噴出)**。WF驗+0.395/勝50%/賺賠2.8/MDD5%/各年正。訊號卡顯示「主力建多/主力建空」。用戶逼出的成果。
+4. **1H MACD空**:跌破前24低 或 跌破維加斯大通道;+避地板濾(離10日低<1ATR不空)。
+5. **DH空**:4H下跌regime閘(牛市噤聲)+關加碼(line_add→line_full)。
+6. **BingX槓桿**:全倉用幣種實際上限(>150x/黃金500x,封頂1000);全倉+風險制下注→升槓桿不改倉位只少鎖保證金、強平更遠。
+7. **PYRAMID=False;RISK_PCT預設0.10→0.05**。
+8. **掃描廣度**:加OKX每日漲跌幅前25(volCcy24h≥10M),幣種列表日更。
+9. **每日報告部署**:00:00 UTC(台08:00)發Discord復盤(daily_report.py)。
+- ★方法論鐵則:測出負EV要對照基準率(隨機做空-0.38,crypto上漂)→負≠無料,可能是「有edge但蓋不過趨勢」(當確認層)。逆勢空要堆夠MTF+結構+數據才過線。OI建倉=確認層非觸發器,但「緊壓縮+帶量突破+CVD」例外(主力建倉策略)。腳本見上層 `trading-backtest/_vegas_c3_aux.py`/`_comp_improve.py`/`_squeeze_fake.py`/`_breakout_all.py`。
 
 **ls_ratio/taker_ratio 資料源**：Binance `globalLongShortAccountRatio`+`takerlongshortRatio`
 (免費,快取5分,`_fetch_binance_ls_taker`)。DH_SHORT_ENABLED toggle。
