@@ -2628,7 +2628,8 @@ def _check_cvd_absorption(symbol_item: str, tf_id: str, okx_bar_fmt: str,
 
 # ── 數據獵手 CVD 過濾（WF 驗證版，與上面三層吸收不同）───────────────────────────
 DH_CVD_ENABLED = True   # 開關：15m 多 CVD吸收加碼（C方案）
-DH_BOOST_MULT  = 1.5    # CVD吸收確認時的下注加碼倍數（回測C×1.5最佳：成長↑且MDD略降）
+BOOST_MULT     = 1.0    # ★2026-06-15 加碼總開關(止血關閉):1.0=不加碼;改回1.5重新啟用所有×1.5加碼
+DH_BOOST_MULT  = BOOST_MULT    # CVD吸收確認時的下注加碼倍數(回測C×1.5;現由 BOOST_MULT 總控)
 
 # ── 金字塔加碼（+1R 加單，僅多單）──────────────────────────────────────────────
 # 回測(WF)金字塔翻倍成長但MDD大增;OKX同方向會合併成一個部位,故實作=「+1R加大部位
@@ -3411,7 +3412,7 @@ class SykesTradingBot:
         # 故：雙底僅 1H 做多；雙頂(M頭)單獨做空已停用。
         if tf_id == "1H":
             is_double_bottom = check_double_bottom(df, tf_id) and _brk_up   # +突破閘
-            if is_double_bottom: dh_boost = 1.5                             # 突破高品質→×1.5
+            if is_double_bottom: dh_boost = BOOST_MULT                             # 突破高品質→×1.5
         else:
             is_double_bottom = False
         is_double_top = False   # M頭單獨做空回測全賠，停用（共振版見下）
@@ -3456,7 +3457,7 @@ class SykesTradingBot:
                         _vol15 = df["vol"].values
                         _va15 = float(np.mean(_vol15[-21:-1])) if len(_vol15) >= 21 else 0.0
                         if _va15 > 0 and _vol15[-1] > 1.5 * _va15:
-                            is_macd_long = True; dh_boost = 1.5            # 帶量+突破→×1.5
+                            is_macd_long = True; dh_boost = BOOST_MULT            # 帶量+突破→×1.5
                             print(f"[MACD多15m] {symbol_item} 帶量+突破✓")
                     if tf_id == "1H":
                         # 帶量(全幣)+逐筆tFlow+突破閘。WF:1H空+0.33→+0.52、1H多+0.28→+0.51,MDD→6%。
@@ -3471,12 +3472,12 @@ class SykesTradingBot:
                         if _vol_ok and _brk_dn and _floor_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "short")
                             if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量+突破
-                                is_macd_short = True; dh_boost = 1.5
+                                is_macd_short = True; dh_boost = BOOST_MULT
                                 print(f"[MACD空] {symbol_item} 帶量+突破✓ {_tfr}")
                         if _vol_ok and _brk_up and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "long")
                             if _tfok is not False:
-                                is_macd_long = True; dh_boost = 1.5
+                                is_macd_long = True; dh_boost = BOOST_MULT
                                 print(f"[MACD多] {symbol_item} 帶量+突破✓ {_tfr}")
             except Exception as _macd_err:
                 print(f"[MACD] {symbol_item} {tf_id} 計算失敗: {_macd_err}")
@@ -3503,8 +3504,8 @@ class SykesTradingBot:
         if OI_SQUEEZE_ENABLED and tf_id == "1H":
             try:
                 _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
-                if _sq == "long":  is_oisq_long = True;  dh_boost = 1.5; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
-                elif _sq == "short": is_oisq_short = True; dh_boost = 1.5; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
+                if _sq == "long":  is_oisq_long = True;  dh_boost = BOOST_MULT; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
+                elif _sq == "short": is_oisq_short = True; dh_boost = BOOST_MULT; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
