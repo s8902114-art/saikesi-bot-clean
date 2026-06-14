@@ -3399,9 +3399,12 @@ class SykesTradingBot:
         #   突破訊號 position_scale×1.5(少而重)。回踩/反轉(C3/DH/共振)不適用,不套。
         _N_BRK = 24
         _hN = df["high"].values; _lN = df["low"].values
-        _brk_up = len(_hN) >= _N_BRK+1 and current_close > float(_hN[-(_N_BRK+1):-1].max())   # 多:突破前24高
-        _brk_dn = len(_lN) >= _N_BRK+1 and current_close < float(_lN[-(_N_BRK+1):-1].min())   # 空:跌破前24低
-        if tf_id == "1H" and not _brk_dn:   # 1H空額外:跌破維加斯大通道也算(訊號×3、WF驗+0.39,補1H空量)
+        # ★防盤整假突破(2026-06-15,用戶觀察「大多盤整→突破假突破虧」):ADX<20=盤整,不做突破。
+        #   WF:1H MACD多 +0.640→+0.825、賺賠2.2→3.2、砍45%盤整爛單。ADX>25太嚴。治-46%主因。
+        _adx_trend = (current_adx >= 20)   # NaN→False→盤整期不突破(安全)
+        _brk_up = _adx_trend and len(_hN) >= _N_BRK+1 and current_close > float(_hN[-(_N_BRK+1):-1].max())   # 多:突破前24高+有趨勢
+        _brk_dn = _adx_trend and len(_lN) >= _N_BRK+1 and current_close < float(_lN[-(_N_BRK+1):-1].min())   # 空:跌破前24低+有趨勢
+        if tf_id == "1H" and _adx_trend and not _brk_dn:   # 1H空額外:跌破維加斯大通道也算(訊號×3、WF驗+0.39,補1H空量)
             try: _brk_dn = current_close < float(min(ema576.iloc[-1], ema676.iloc[-1]))
             except Exception: pass
 
