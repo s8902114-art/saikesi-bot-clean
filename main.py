@@ -99,6 +99,30 @@ def tflow_confirm(symbol, direction):
     res = (net < 0) if direction == "short" else (net > 0)
     return res, f"tFlow net={net:+.1f}"
 
+# ── 15m tFlow 滾動z(2026-06-16 新增 15m MACD空用)──────────────────────────────
+# period=5m 抓近9h → 滾動12桶(=1h)淨流 + 該序列z-score。對齊回測 _macd_15m_improve.py
+# (5分桶 buyVol-sellVol ≈ 逐筆 sq_sum、滾動12、z over ~96)。比 period=1h 時鐘桶能做「零延遲滾動」。
+# 回測(3幣WF):15m MACD空 +tFlow|z|>1.0 +swing_full(pivot) 訓+0.148/驗+0.254/MDD24%(訓驗同向=穩)。
+def tflow_z(symbol):
+    """回傳 (net_1h, z, ok)。僅3幣;非3幣/資料不足回 ok=False → 該15m空不放行。"""
+    try:
+        r = requests.get(_TFLOW_BASE, params={"symbol": symbol, "period": "5m", "limit": 108}, timeout=10).json()
+    except Exception:
+        return 0.0, 0.0, False
+    if not isinstance(r, list) or len(r) < 60:
+        return 0.0, 0.0, False
+    r = sorted(r, key=lambda x: int(x["timestamp"]))            # 由舊到新
+    net5 = [float(x["buyVol"]) - float(x["sellVol"]) for x in r]
+    roll = [sum(net5[i-11:i+1]) for i in range(11, len(net5))]  # 滾動12桶=1h淨流
+    if len(roll) < 12:
+        return 0.0, 0.0, False
+    cur = roll[-1]; base = roll[:-1]
+    mu = sum(base) / len(base)
+    sd = (sum((x - mu) ** 2 for x in base) / len(base)) ** 0.5
+    if sd <= 0:
+        return cur, 0.0, True
+    return cur, (cur - mu) / sd, True
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 # 核心全局配置與金鑰設定 (USER CONFIGURATION)
@@ -3474,6 +3498,19 @@ class SykesTradingBot:
                         if _va15 > 0 and _vol15[-1] > 1.5 * _va15:
                             is_macd_long = True; dh_boost = BOOST_MULT            # 帶量+突破→×1.5
                             print(f"[MACD多15m] {symbol_item} 帶量+突破✓")
+                    # ★15m MACD空(2026-06-16 新增,限BTC/ETH/SOL):4H↓+死叉+difslope+帶量+逐筆tFlow滾動z。
+                    #   回測3幣WF:+tFlow|z|>1.0 訓+0.148/驗+0.254/MDD24%(訓驗同向=穩)。出場swing_full(pivot,見3593+段)。
+                    #   只3幣(tflow_z限定)=天然避開無逐筆數據的山寨;不套突破閘(對齊回測,15m空無突破)。
+                    if tf_id == "15m" and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                        _bn15 = symbol_item.replace("/", "")
+                        if _bn15 in _TFLOW_COINS:
+                            _vol15s = df["vol"].values
+                            _va15s = float(np.mean(_vol15s[-21:-1])) if len(_vol15s) >= 21 else 0.0
+                            if _va15s > 0 and _vol15s[-1] > 1.5 * _va15s:
+                                _net15, _z15, _zok15 = tflow_z(_bn15)
+                                if _zok15 and _net15 < 0 and abs(_z15) >= 1.0:
+                                    is_macd_short = True; dh_boost = BOOST_MULT
+                                    print(f"[MACD空15m] {symbol_item} 帶量+tFlow空(net={_net15:+.0f} z={_z15:+.2f})✓")
                     if tf_id == "1H":
                         # 帶量(全幣)+逐筆tFlow+突破閘。WF:1H空+0.33→+0.52、1H多+0.28→+0.51,MDD→6%。
                         _vol = df["vol"].values
@@ -3607,6 +3644,8 @@ class SykesTradingBot:
             exit_strategy = "swing_full"                                 # 1H C3空+階梯：整倉pivot移SL(驗+0.263/MDD10%)
         elif tf_id == "15m" and direction == "long" and is_macd_long:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
+        elif tf_id == "15m" and direction == "short" and is_macd_short:
+            exit_strategy = "swing_full"                                 # ★15m MACD空(新)：整倉pivot移SL(保守版,回測訓+0.148/驗+0.254/MDD24%)
         elif is_box_short:
             exit_strategy = "box_trend"                                  # 箱突破空：1R保本+4R整倉大TP(讓趨勢跑)
         elif is_oisq_long or is_oisq_short:
