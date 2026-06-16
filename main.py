@@ -3419,6 +3419,14 @@ class SykesTradingBot:
         # 故：雙底僅 1H 做多；雙頂(M頭)單獨做空已停用。
         if tf_id == "1H":
             is_double_bottom = check_double_bottom(df, tf_id) and _brk_up   # +突破閘
+            # ★W底 gap≤6%(2026-06-16):底(止損)到進場>6%=山寨追太高(WLD式 0.4271→0.50)→撤W底。
+            #   回測(3幣WF):+0.363→+0.375、MDD 11%→9%,主流幣均僅3.8%、擋掉WLD式極端。早撤=讓下游
+            #   combined_long/exit_strategy 全一致(避免算完risk才撤造成exit_strategy殘留)。
+            if is_double_bottom:
+                _wb_sl = _find_pivot_low(df, p_l["structure_lookback"], p_l.get("sl_atr_buffer", 0.0))
+                if _wb_sl < current_close and (current_close - _wb_sl) / current_close > 0.06:
+                    is_double_bottom = False
+                    if _dbg: print(f"[W底gap] {symbol_item} 底到進場{(current_close-_wb_sl)/current_close:.1%}>6%→撤W底", flush=True)
             if is_double_bottom: dh_boost = BOOST_MULT                             # 突破高品質→×1.5
         else:
             is_double_bottom = False
@@ -3590,7 +3598,9 @@ class SykesTradingBot:
         elif tf_id == "1H" and direction == "long" and is_double_bottom:
             exit_strategy = "swing_tp"                                   # 1H W底多：TP1+轉折移SL
         elif tf_id == "1H" and direction == "short" and is_macd_short:
-            exit_strategy = "swing_tp"                                   # 1H MACD空(升級):TP1.5半倉+剩半轉折移SL(驗+0.459>swing_full+0.293,tp1_mult已設1.5)
+            exit_strategy = "line_full"                                  # ★1H MACD空→麥門切線整倉出場(2026-06-16):
+            #   3幣WF驗證段:切線+0.795/MDD9% >> 現役pivot移SL +0.390、N字型+0.649、固定2R+0.655。
+            #   crypto上漂=空單肉短,切線收盤破線即平=全場最強空單出場。山寨經3709行2.5R落袋規則銀行化。
         elif tf_id == "1H" and direction == "long" and is_macd_long:
             exit_strategy = "swing_full"                                 # 1H MACD多(新增):整倉轉折移SL讓跑(驗+0.605>TP1.5+0.465,順勢抱)
         elif tf_id == "1H" and direction == "short" and is_short:
