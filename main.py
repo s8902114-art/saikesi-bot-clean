@@ -1353,12 +1353,21 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
                    f"可用 {avail_usdt:.2f}U／倉位 {position_value:.2f}U）")
             return
 
-        # 設定槓桿（全倉模式）
+        # ★先設保證金模式=全倉(CROSSED)。marginType 是獨立端點,之前誤塞在 /trade/leverage 裡被
+        #   BingX 忽略→實際一直用合約預設逐倉(ISOLATED)。此為「BingX 下到逐倉」根因修正(2026-06-16)。
+        #   已有持倉的幣 BingX 會拒改(無妨,既有倉不轉);新倉/無倉幣會正確設成全倉。
+        try:
+            _bingx_request("POST", "/openApi/swap/v2/trade/marginType", {
+                "symbol": bingx_symbol, "marginType": "CROSSED"
+            }, headers)
+        except Exception as _mt_e:
+            print(f"[BingX] {bingx_symbol} 設全倉失敗(可能已有持倉,既有倉不轉): {_mt_e}", flush=True)
+
+        # 設定槓桿
         _bingx_request("POST", "/openApi/swap/v2/trade/leverage", {
             "symbol": bingx_symbol,
             "side": "LONG" if trade_side == "long" else "SHORT",
             "leverage": str(leverage),
-            "marginType": "CROSSED"
         }, headers)
 
         # 計算張數
