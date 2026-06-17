@@ -3450,7 +3450,10 @@ class SykesTradingBot:
         #   W底做多：1H +0.265、15m +0.068（C現狀版穩健）→ 僅 1H 啟用，與 WF 一致
         #   M頭做空：四版兩時框幾乎全賠 → 單獨關閉
         # 故：雙底僅 1H 做多；雙頂(M頭)單獨做空已停用。
-        if tf_id == "1H":
+        # ★2026-06-16 W底限主流幣:17幣實測,W底 edge 只在 BTC/ETH/SOL 成立(訓+0.25/驗+0.21),
+        #   山寨全負(訓-0.11/驗-0.03/MDD71%,gap≤6%也救不活訓-0.14)→這是WLD式山寨W底虧損的根因。
+        #   MACD多/空 edge 在山寨成立(故不限),唯W底型態在山寨無效→只在主流做。
+        if tf_id == "1H" and symbol_item in ("BTC/USDT", "ETH/USDT", "SOL/USDT"):
             is_double_bottom = check_double_bottom(df, tf_id) and _brk_up   # +突破閘
             # ★W底 gap≤6%(2026-06-16):底(止損)到進場>6%=山寨追太高(WLD式 0.4271→0.50)→撤W底。
             #   回測(3幣WF):+0.363→+0.375、MDD 11%→9%,主流幣均僅3.8%、擋掉WLD式極端。早撤=讓下游
