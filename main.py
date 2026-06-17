@@ -3551,6 +3551,10 @@ class SykesTradingBot:
         # 1H 的 C3 做空（+0.073）與 15m C3 多空不受影響。
         if tf_id == "1H":
             is_long = False
+        # ★2026-06-16 30m C3多 限主流:17幣實測,30m C3多 山寨訓-0.03/驗+0.005=無edge(主流驗+0.173)。
+        #   C3順勢型態在山寨無效(同W底),只在 BTC/ETH/SOL 做。MACD/1H C3空 在山寨成立故不限。
+        if tf_id == "30m" and is_long and symbol_item not in ("BTC/USDT", "ETH/USDT", "SOL/USDT"):
+            is_long = False
 
         # ── 30m/short 停用：分區回測顯示只在 2022 慢熊有效(+0.195)，
         #    牛市 −0.088、2025 急跌 −0.199(勝率0%)，全期 −0.023 負期望 → 停用。
