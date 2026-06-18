@@ -1926,7 +1926,7 @@ def _px_for_bingx(ex, trade):
 # 用戶COAI/WLD虧損的出場端解:山寨多單獲利中,若OI開始降(主力出貨)+價在跌→在崩盤吐回前先跑。
 # 參數對齊回測 _oi_exit_alt.py:獲利中(cl>entry) 且 oi[-1]<oi[-4](降3根) 且 cl[-1]<cl[-2]。
 # WF山寨 +0.385→+0.445/勝67%/MDD↓(主流上害,故限非主流)。全程guard,任何失敗回False不影響原移SL/平倉。
-OI_EARLY_EXIT_ENABLED = False    # Discord 之後可開;預設關=死碼零風險
+OI_EARLY_EXIT_ENABLED = True     # 山寨多單OI降早出啟用(用戶決定一次上;guard完整、限非主流、參數對齊回測)
 
 def _oi_drop_exit_long(trade) -> bool:
     """山寨多單OI降早出:獲利中+OI降3根+價在跌→True(該平)。失敗一律False。"""
