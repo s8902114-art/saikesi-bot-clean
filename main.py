@@ -2118,11 +2118,18 @@ def check_trailing_stops_for_real():
                 for p in positions
             )
             if not has_pos:
-                print(f"[Trailing] {name} 倉位已關閉，移除追蹤")
-                active_real_trades.pop(trade_key, None)
+                # ★防孤兒倉(2026-06-18):單次查無可能是API瞬斷/symbol格式不符(SOL案例),
+                #   需連2輪查無才移除,避免把還開著的倉踢出追蹤變孤兒(失管)。
+                _miss = int(trade.get("_pos_miss", 0)) + 1
+                if _miss < 2:
+                    trade["_pos_miss"] = _miss; save_active_trades(); continue
+                print(f"[Trailing] {name} 倉位已關閉(連{_miss}輪查無)，移除追蹤")
+                active_real_trades.pop(trade_key, None); save_active_trades()
                 continue
+            if trade.get("_pos_miss"):
+                trade["_pos_miss"] = 0   # 查到倉=重置誤判計數
 
-            # ── 山寨多單 OI降早出(預設關,OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
+            # ── 山寨多單 OI降早出(OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
                 try:
                     ex.create_market_order(symbol=symbol, side="sell",
