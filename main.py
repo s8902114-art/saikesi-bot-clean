@@ -1842,7 +1842,11 @@ def _bingx_swings(symbol_ccxt, tf, entry_ts, direction):
         try:
             cutoff = pd.Timestamp(int(entry_ts), unit="s", tz="UTC")
             sub = df[df.index >= cutoff]
-            if len(sub) >= 6: df = sub
+            # ★bugfix 2026-06-18:進場後不足6根→回傳空(不畫切線),對齊OKX _mai_line_breakout。
+            #   舊版會fall through用「進場前」120根舊轉折畫切線,害剛開倉<3h的單被誤砍(SOL 30m多案例)。
+            if len(sub) < 6:
+                return [], df
+            df = sub
         except Exception:
             pass
     hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; n = len(df)
