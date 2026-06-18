@@ -1119,8 +1119,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             _tag = {"line_full": "切線突破", "swing_full": "轉折移SL",
                     "line_add": "切線突破+轉折加碼"}.get(exit_strategy, "切線")
             execution_report.append(f"📈 整倉出場(不掛TP,{_tag};SL兜底)")
-        elif exit_strategy == "box_trend":
-            # ── 箱突破空:整倉單一TP at 4R(不拆半),達1R保本由 check_trailing 處理。
+        elif exit_strategy in ("box_trend", "hf_1r"):
+            # ── 整倉單一TP:box_trend=4R讓跑/達1R保本;hf_1r=高頻固定1R全平/達0.5R保本(不讓跑)。
             #    R掃描甜蜜點4R(EV+0.234/賺賠2.8);讓趨勢跑,crypto切線被反彈洗故不用切線。
             try:
                 tp1_order = ex.create_order(
@@ -1128,9 +1128,10 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                     amount=total_contracts, price=tp1_px_str,
                     params={"posSide": trade_side, "tdMode": MARGIN_MODE, "reduceOnly": True})
                 tp1_order_id = tp1_order.get("id")
-                execution_report.append(f"🎯 整倉TP `{tp1_px_str}`(4R讓跑,達1R保本)")
+                _ttag = "高頻1R全平,達0.5R保本" if exit_strategy == "hf_1r" else "4R讓跑,達1R保本"
+                execution_report.append(f"🎯 整倉TP `{tp1_px_str}`({_ttag})")
             except Exception as tp1e:
-                execution_report.append(f"⚠️ 箱突破TP委託失敗: {tp1e}")
+                execution_report.append(f"⚠️ 整倉TP委託失敗: {tp1e}")
         elif exit_strategy in ("tp_line", "swing_tp", "swing_tp_1h"):
             # ── TP1落袋半 + 剩半趨勢跟蹤：只掛 TP1(半倉)。
             #    tp_line=剩半切線; swing_tp=剩半轉折移SL(1H W底多); swing_tp_1h=參1H轉折(15m MACD多)。
@@ -1182,11 +1183,12 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
             # 剩餘量：整倉(line_full/swing_full/line_add/box_trend)=全倉；其他=TP1出一半後剩的半倉
-            if exit_strategy in ("line_full", "swing_full", "line_add", "box_trend"):
+            if exit_strategy in ("line_full", "swing_full", "line_add", "box_trend", "hf_1r"):
                 remaining_amt = str(total_contracts)
             else:
                 remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
-            okx_tkey = f"okx_{inst_id}_{trade_side}_{int(time.time())}"
+            # key 含 exit_strategy + 毫秒:高頻平行倉與讓跑倉同秒下單不撞號(各跑各的)
+            okx_tkey = f"okx_{inst_id}_{trade_side}_{exit_strategy or 'fixR'}_{int(time.time()*1000)}"
             active_real_trades[okx_tkey] = {
                 "exchange":         "okx",
                 "inst_id":          inst_id,
@@ -1456,8 +1458,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         if exit_strategy in ("line_full", "line_add", "swing_full"):
             # 整倉趨勢跟蹤：不掛TP,整倉持有,由check_trailing切線/移SL出場(SL兜底)
             pass
-        elif exit_strategy == "box_trend":
-            # 箱突破空:整倉單一TP at 4R(全倉),達1R保本由check_trailing處理
+        elif exit_strategy in ("box_trend", "hf_1r"):
+            # 整倉單一TP:box_trend=4R/達1R保本;hf_1r=高頻固定1R全平/達0.5R保本。TP全倉掛交易所自動成交。
             tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
@@ -1492,10 +1494,11 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
                            else float(entry_price) - fee_buffer_bingx
         # 剩餘量：整倉趨勢跟蹤=全倉；其他=半倉(TP1出後剩的)
-        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full","box_trend") else half_qty
+        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full","box_trend","hf_1r") else half_qty
         # 加碼基礎量(line_add)：未疊CVD加碼的基礎單位
         _base_qty = round(actual_qty / max(position_scale, 1e-9), 4)
-        trade_key = f"bingx_{bingx_symbol}_{trade_side}_{int(time.time())}"
+        # key 含 exit_strategy + 毫秒:高頻平行倉與讓跑倉不撞號(各跑各的)
+        trade_key = f"bingx_{bingx_symbol}_{trade_side}_{exit_strategy or 'fixR'}_{int(time.time()*1000)}"
         active_real_trades[trade_key] = {
             "exchange":         "bingx",
             "inst_id":          bingx_symbol,
@@ -1927,6 +1930,7 @@ def _px_for_bingx(ex, trade):
 # 參數對齊回測 _oi_exit_alt.py:獲利中(cl>entry) 且 oi[-1]<oi[-4](降3根) 且 cl[-1]<cl[-2]。
 # WF山寨 +0.385→+0.445/勝67%/MDD↓(主流上害,故限非主流)。全程guard,任何失敗回False不影響原移SL/平倉。
 OI_EARLY_EXIT_ENABLED = True     # 山寨多單OI降早出啟用(用戶決定一次上;guard完整、限非主流、參數對齊回測)
+HF_1R_ENABLED = True             # 高頻固定1R平行層:現役3格(1H C3空/1H MACD空/15m MACD多)訊號成立時多開一筆固定1R/0.5R保本獨立倉,各跑各的
 
 def _oi_drop_exit_long(trade) -> bool:
     """山寨多單OI降早出:獲利中+OI降3根+價在跌→True(該平)。失敗一律False。"""
@@ -2221,14 +2225,17 @@ def check_trailing_stops_for_real():
 
             # ── 箱突破空(box_trend)：整倉4R TP掛在交易所,這裡只做「達1R浮盈→移SL保本」(一次)
             #    防假突破拉回。TP(4R)成交由交易所自動平,下輪偵測倉位消失移除。
-            if trade.get("exit_strategy") == "box_trend":
-                if LETRUN_BE_ENABLED and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標(達1R保本,預設關)
+            if trade.get("exit_strategy") in ("box_trend", "hf_1r"):
+                _is_hf = trade.get("exit_strategy") == "hf_1r"   # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
+                _be_trig = 0.5 if _is_hf else 1.0
+                _be_active = True if _is_hf else LETRUN_BE_ENABLED
+                if _be_active and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
                         entry = float(trade["entry_price"]); rd = float(trade.get("risk_dist", 0) or 0)
                         if cur > 0 and rd > 0:
                             fpnl = (entry - cur) if direction == "short" else (cur - entry)
-                            if fpnl >= rd * 1.0:    # 達1R → 移SL到保本
+                            if fpnl >= rd * _be_trig:    # hf=0.5R / box=1R → 移SL到保本
                                 fee_buf = entry * 0.001
                                 be_price = entry - fee_buf if direction == "short" else entry + fee_buf
                                 exit_side = "sell" if direction == "long" else "buy"
@@ -2248,7 +2255,7 @@ def check_trailing_stops_for_real():
                                 if nid:
                                     trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
                                     trade["tp1_hit"] = True
-                                    dc_log(f"🔒 {name} 箱突破空達1R,止損移保本 {be_price}")
+                                    dc_log(f"🔒 {name} {'高頻達0.5R' if _is_hf else '箱突破空達1R'},止損移保本 {be_price}")
                                 else:
                                     try:
                                         try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
@@ -2452,19 +2459,22 @@ def check_trailing_stops_for_real():
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
             # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
-            if _es == "box_trend":
-                if LETRUN_BE_ENABLED and not trade.get("tp1_hit"):   # 達1R保本,預設關(讓跑)
+            if _es in ("box_trend", "hf_1r"):
+                _is_hf = _es == "hf_1r"             # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
+                _be_trig = 0.5 if _is_hf else 1.0
+                _be_active = True if _is_hf else LETRUN_BE_ENABLED
+                if _be_active and not trade.get("tp1_hit"):
                     try:
                         cur=_px_for_bingx(ex, trade)
                         rd=float(trade.get("risk_dist",0) or 0)
                         if cur>0 and rd>0:
                             fpnl=(entry-cur) if direction=="short" else (cur-entry)
-                            if fpnl>=rd*1.0:   # 達1R→移SL保本(取消舊+重掛STOP_MARKET)
+                            if fpnl>=rd*_be_trig:   # hf=0.5R / box=1R→移SL保本(取消舊+重掛STOP_MARKET)
                                 nid=_bingx_replace_sl(trade, be_price, remaining)
                                 if nid is not None:
                                     trade["sl_order_id"]=nid; trade["current_sl"]=be_price
                                     trade["tp1_hit"]=True
-                                    dc_log(f"🔒 BingX {bingx_symbol} 箱突破空達1R,止損移保本 {be_price}")
+                                    dc_log(f"🔒 BingX {bingx_symbol} {'高頻達0.5R' if _is_hf else '箱突破空達1R'},止損移保本 {be_price}")
                     except Exception as _bbe:
                         print(f"[BingX BoxTrend] {trade_key} 保本失敗: {_bbe}")
                 continue
@@ -3916,6 +3926,34 @@ class SykesTradingBot:
                     p["exit_mode"], tf_id, position_scale=dh_boost,
                     exit_strategy=exit_strategy,
                 )
+
+            # ── 高頻固定1R 平行層(各跑各的,觸發就都開):現役3格訊號成立→多開一筆hf_1r獨立倉 ──
+            #   1H C3空(is_short) / 1H MACD空(is_macd_short) / 15m MACD多(is_macd_long)。
+            #   固定1R全平 + 0.5R保本 + 不讓跑(高頻快累積本金)。與讓跑倉同訊號各開一筆,不去重。
+            #   15m MACD多只限主流(BTC/ETH/SOL,回測山寨負+會與OI降早出打架);1H空不限市值(全層正)。
+            _hf_major = symbol_item.split("/")[0] in ("BTC", "ETH", "SOL")
+            _hf_cell = ((tf_id == "1H" and direction == "short" and (is_short or is_macd_short)) or
+                        (tf_id == "15m" and direction == "long" and is_macd_long and _hf_major))
+            if HF_1R_ENABLED and _hf_cell:
+                _hf_sl = signal_payload["sl"]
+                _hf_risk = abs(current_close - _hf_sl)
+                if _hf_risk > 0:
+                    _hf_tp = round(current_close + _hf_risk, 6) if direction == "long" \
+                             else round(current_close - _hf_risk, 6)
+                    try:
+                        if EXCHANGE_ENABLED.get("okx", True):
+                            execute_okx_trade_pipeline(
+                                okx_swap_symbol, direction, current_close,
+                                _hf_sl, _hf_tp, _hf_tp, p["exit_mode"], tf_id,
+                                position_scale=1.0, pyramid_eligible=False, exit_strategy="hf_1r")
+                        if EXCHANGE_ENABLED.get("bingx", True):
+                            execute_bingx_trade_pipeline(
+                                symbol_item, direction, current_close,
+                                _hf_sl, _hf_tp, _hf_tp, p["exit_mode"], tf_id,
+                                position_scale=1.0, exit_strategy="hf_1r")
+                        dc_log(f"⚡ 高頻固定1R平行倉:{symbol_item} {tf_id} {direction} TP@1R=`{_hf_tp}`")
+                    except Exception as _hfe:
+                        print(f"[HF-1R] {symbol_item} 平行倉失敗: {_hfe}")
         else:
             pos = PaperPosition()
             pos.open = True; pos.side = direction; pos.entry = current_close
