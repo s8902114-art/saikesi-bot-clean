@@ -1922,6 +1922,38 @@ def _px_for_bingx(ex, trade):
         return 0.0
 
 
+# ── 山寨多單 OI降早出(2026-06-18,預設關)──────────────────────────────────────
+# 用戶COAI/WLD虧損的出場端解:山寨多單獲利中,若OI開始降(主力出貨)+價在跌→在崩盤吐回前先跑。
+# 參數對齊回測 _oi_exit_alt.py:獲利中(cl>entry) 且 oi[-1]<oi[-4](降3根) 且 cl[-1]<cl[-2]。
+# WF山寨 +0.385→+0.445/勝67%/MDD↓(主流上害,故限非主流)。全程guard,任何失敗回False不影響原移SL/平倉。
+OI_EARLY_EXIT_ENABLED = False    # Discord 之後可開;預設關=死碼零風險
+
+def _oi_drop_exit_long(trade) -> bool:
+    """山寨多單OI降早出:獲利中+OI降3根+價在跌→True(該平)。失敗一律False。"""
+    try:
+        if not OI_EARLY_EXIT_ENABLED: return False
+        if trade.get("direction") != "long": return False
+        symbol_item = trade.get("symbol", "")
+        if symbol_item.split("/")[0] in ("BTC", "ETH", "SOL"): return False   # 主流上害,只山寨
+        tf_id = trade.get("tf_id", "1H")
+        if tf_id in ("adopted", "", None): tf_id = "1H"
+        bar = BAR_TO_CONA.get(tf_id); cona = CONA_PERP.get(symbol_item)
+        if not bar or not cona: return False
+        entry = float(trade["entry_price"])
+        inst_okx = OKX_SWAP.get(symbol_item, symbol_item)
+        df = fetch_market_candles(inst_okx, tf_id, fetch_limit=10)
+        if df.empty or len(df) < 3: return False
+        cl = df["close"].values
+        if cl[-1] <= entry: return False           # 只在獲利中
+        if not (cl[-1] < cl[-2]): return False     # 價在跌
+        end_ts = int(time.time() * 1000); start_ts = end_ts - BAR_SECONDS[tf_id] * 12 * 1000
+        oi = fetch_open_interest_series(cona, bar, start_ts, end_ts)
+        if len(oi) < 4: return False
+        return bool(oi.iloc[-1] < oi.iloc[-4])      # OI降3根=主力出貨
+    except Exception:
+        return False
+
+
 def _bingx_line_breakout(trade) -> bool:
     """BingX 麥門切線突破→市價平剩餘。回傳 True=已平。"""
     try:
@@ -2089,6 +2121,18 @@ def check_trailing_stops_for_real():
                 print(f"[Trailing] {name} 倉位已關閉，移除追蹤")
                 active_real_trades.pop(trade_key, None)
                 continue
+
+            # ── 山寨多單 OI降早出(預設關,OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
+            if _oi_drop_exit_long(trade):
+                try:
+                    ex.create_market_order(symbol=symbol, side="sell",
+                        amount=float(trade.get("remaining_amount", 0) or 0),
+                        params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                    _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+                    dc_log(f"📉 {name} OI降早出(主力出貨),市價平倉")
+                except Exception as _oie:
+                    print(f"[OI-Exit] {name} 平倉失敗: {_oie}")
+                active_real_trades.pop(trade_key, None); save_active_trades(); continue
 
             # ── 金字塔加碼：驗證過的多單(C3/W底)達 +1R 且未加過 → 加一單位 ──────────
             if (PYRAMID_ENABLED and trade.get("exchange") == "okx" and direction == "long"
@@ -2379,6 +2423,24 @@ def check_trailing_stops_for_real():
             pos_side     = trade["pos_side"]
             remaining    = trade["remaining_qty"]
             sl_order_id  = trade["sl_order_id"]
+
+            # ── 山寨多單 OI降早出(預設關,與OKX對齊):主力出貨即跑,救COAI式吐回 ──
+            if _oi_drop_exit_long(trade):
+                try:
+                    _rem = float(trade.get("remaining_qty", 0) or 0)
+                    if _rem > 0:
+                        _r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                            "type": "MARKET", "quantity": str(_rem)}, headers).json()
+                        if _r.get("code", 0) == 0:
+                            try:
+                                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                                               {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
+                            except Exception: pass
+                            dc_log(f"📉 BingX {bingx_symbol} OI降早出(主力出貨),市價平倉")
+                            active_real_trades.pop(trade_key, None); save_active_trades(); continue
+                except Exception as _oie:
+                    print(f"[BingX OI-Exit] {trade_key} 失敗: {_oie}")
 
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
