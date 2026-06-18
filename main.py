@@ -3543,10 +3543,16 @@ class SykesTradingBot:
                                 is_macd_short = True; dh_boost = BOOST_MULT
                                 print(f"[MACD空] {symbol_item} 帶量+突破✓ {_tfr}")
                         if _vol_ok and _brk_up and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                            # ★延伸濾≤4ATR(2026-06-18):進場離e144>4ATR=噴過頭不追,治COAI/WLD/NEAR追頂。
+                            #   WF:1H MACD多 +0.681→+0.905、山寨+0.385→+0.822/MDD3%。只套1H MACD多,不套W底/反轉/15m。
+                            _e144 = float(df["close"].ewm(span=144, adjust=False).mean().iloc[-1])
+                            _ext_ok = current_atr <= 0 or (current_close - _e144) / current_atr <= 4.0
                             _tfok, _tfr = tflow_confirm(_bn_sym, "long")
-                            if _tfok is not False:
+                            if _ext_ok and _tfok is not False:
                                 is_macd_long = True; dh_boost = BOOST_MULT
                                 print(f"[MACD多] {symbol_item} 帶量+突破✓ {_tfr}")
+                            elif not _ext_ok:
+                                print(f"[MACD多] {symbol_item} 噴過頭>4ATR,延伸濾擋(治追頂)")
             except Exception as _macd_err:
                 print(f"[MACD] {symbol_item} {tf_id} 計算失敗: {_macd_err}")
 
