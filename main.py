@@ -2228,7 +2228,7 @@ def check_trailing_stops_for_real():
             if trade.get("exit_strategy") in ("box_trend", "hf_1r"):
                 _is_hf = trade.get("exit_strategy") == "hf_1r"   # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
                 _be_trig = 0.5 if _is_hf else 1.0
-                _be_active = True if _is_hf else LETRUN_BE_ENABLED
+                _be_active = False if _is_hf else LETRUN_BE_ENABLED  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
                 if _be_active and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
@@ -2462,7 +2462,7 @@ def check_trailing_stops_for_real():
             if _es in ("box_trend", "hf_1r"):
                 _is_hf = _es == "hf_1r"             # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
                 _be_trig = 0.5 if _is_hf else 1.0
-                _be_active = True if _is_hf else LETRUN_BE_ENABLED
+                _be_active = False if _is_hf else LETRUN_BE_ENABLED  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
                 if _be_active and not trade.get("tp1_hit"):
                     try:
                         cur=_px_for_bingx(ex, trade)
@@ -3191,6 +3191,7 @@ class SykesTradingBot:
         self.cooldown_dict: Dict[str, float] = {}
         self.dir_cooldown:  Dict[str, float] = {}   # 跨時框同幣同向去重（key=symbol_direction）
         self.last_bar_ts:   Dict[str, int]   = {}   # K棒去重：同一根K棒不重複觸發
+        self.hf_last_bar:   Dict[str, int]   = {}   # 高頻層K棒去重(key=symbol_tf_dir),同根不重複下hf倉
         self.consec_losses = 0
         self.circuit_break_until: Optional[float] = None
         self.paper_positions: Dict[str, PaperPosition] = {}
@@ -3333,6 +3334,49 @@ class SykesTradingBot:
         adx_series  = calculate_directional_movement_index(df, 14)
         current_atr = atr_series.iloc[-1]
         current_adx = adx_series.iloc[-1]
+
+    # 2b. ── 高頻固定1R 獨立偵測(各跑各的,不靠主訊號):15m/30m MACD空多帶量,全市值,純固定1R無保本 ──
+        #   驗證(live停損_find_pivot,含費WF,拆T1/T2/T3全正):15m空+0.103/勝59% 30m空+0.097 15m多+0.070
+        #   30m多+0.032,均勝55-59%(~6成)。SL=live同款pivot+ATR緩衝;TP=進場±1R掛交易所;0.5R保本已拿掉。
+        if HF_1R_ENABLED and tf_id in ("15m", "30m") and AUTO_TRADE.get(tf_id) and bar_ts != 0:
+            try:
+                _hf4h = fetch_market_candles(okx_swap_symbol, "4H")
+                if not _hf4h.empty and len(_hf4h) > 200:
+                    _e2 = _hf4h["close"].ewm(span=200, adjust=False).mean()
+                    _up4 = _e2.iloc[-1] > _e2.iloc[-2]
+                    _hd, _ha, _hh = calculate_macd(df["close"])
+                    _gold = _hd.iloc[-2] <= _ha.iloc[-2] and _hd.iloc[-1] > _ha.iloc[-1]
+                    _dead = _hd.iloc[-2] >= _ha.iloc[-2] and _hd.iloc[-1] < _ha.iloc[-1]
+                    _vv = df["vol"].values
+                    _vavg = float(np.mean(_vv[-21:-1])) if len(_vv) >= 21 else 0.0
+                    _vok = _vavg > 0 and _vv[-1] > 1.5 * _vavg
+                    _hfd = None
+                    if _vok and _up4 and _gold and macd_difslope_ok(_hd, "long"): _hfd = "long"
+                    elif _vok and (not _up4) and _dead and macd_difslope_ok(_hd, "short"): _hfd = "short"
+                    if _hfd:
+                        _hk = f"{symbol_item}_{tf_id}_{_hfd}_hf"
+                        if self.hf_last_bar.get(_hk) != bar_ts:   # 每根K只下一次,防輪詢重複洗單
+                            _hp = BEST_PARAMS.get(f"{tf_id}_{_hfd}", {})
+                            _hsl = (_find_pivot_low(df, _hp.get("structure_lookback", 5), _hp.get("sl_atr_buffer", 0.0))
+                                    if _hfd == "long" else
+                                    _find_pivot_high(df, _hp.get("structure_lookback", 5), _hp.get("sl_atr_buffer", 0.0)))
+                            _hrisk = abs(current_close - _hsl)
+                            if _hsl and _hrisk > 0 and 0.001 < _hrisk / current_close <= MAX_SL:
+                                _htp = round(current_close + _hrisk, 6) if _hfd == "long" else round(current_close - _hrisk, 6)
+                                self.hf_last_bar[_hk] = bar_ts
+                                try:
+                                    if EXCHANGE_ENABLED.get("okx", True):
+                                        execute_okx_trade_pipeline(okx_swap_symbol, _hfd, current_close,
+                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0,
+                                            pyramid_eligible=False, exit_strategy="hf_1r")
+                                    if EXCHANGE_ENABLED.get("bingx", True):
+                                        execute_bingx_trade_pipeline(symbol_item, _hfd, current_close,
+                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0, exit_strategy="hf_1r")
+                                    dc_log(f"⚡ 高頻固定1R({tf_id} MACD{_hfd}帶量):{symbol_item} 進場`{current_close}` SL`{round(_hsl,6)}` TP@1R`{_htp}`")
+                                except Exception as _he:
+                                    print(f"[HF-1R] {symbol_item} {tf_id} 平行倉失敗: {_he}")
+            except Exception as _hfe:
+                print(f"[HF-1R-detect] {symbol_item} {tf_id} 偵測失敗: {_hfe}")
 
     # 3. Vegas 通道
         ema12  = df["close"].ewm(span=12,  adjust=False).mean()
@@ -3930,10 +3974,8 @@ class SykesTradingBot:
             # ── 高頻固定1R 平行層(各跑各的,觸發就都開):現役3格訊號成立→多開一筆hf_1r獨立倉 ──
             #   1H C3空(is_short) / 1H MACD空(is_macd_short) / 15m MACD多(is_macd_long)。
             #   固定1R全平 + 0.5R保本 + 不讓跑(高頻快累積本金)。與讓跑倉同訊號各開一筆,不去重。
-            #   15m MACD多只限主流(BTC/ETH/SOL,回測山寨負+會與OI降早出打架);1H空不限市值(全層正)。
-            _hf_major = symbol_item.split("/")[0] in ("BTC", "ETH", "SOL")
-            _hf_cell = ((tf_id == "1H" and direction == "short" and (is_short or is_macd_short)) or
-                        (tf_id == "15m" and direction == "long" and is_macd_long and _hf_major))
+            #   只留 1H(C3空/MACD空,全市值);15m/30m MACD多空由獨立偵測區塊處理(見scan早段hf區塊)。
+            _hf_cell = (tf_id == "1H" and direction == "short" and (is_short or is_macd_short))
             if HF_1R_ENABLED and _hf_cell:
                 _hf_sl = signal_payload["sl"]
                 _hf_risk = abs(current_close - _hf_sl)
