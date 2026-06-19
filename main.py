@@ -181,6 +181,8 @@ SIGNAL_COOLDOWN = 1800     # 同一商品相同時框的訊號冷卻時間 (秒)
 DIR_SIGNAL_COOLDOWN = 3600 # 同幣同方向跨時框去重：1 小時內只下一次（避免 15m/30m/1H 整點同時觸發）
 MAX_CONSEC_LOSS = 3       # 最大連續虧損次數限制，達標後觸發熔斷
 PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
+DAILY_STOP_ENABLED = True  # 每日虧損熔斷:當日從日初錢包跌破X%→停開新倉到隔日UTC(擋齊漲血洗的災難日肥尾)
+DAILY_LOSS_PCT = 0.20      # 每日最大虧損(錢包%),達標停新倉;既有倉照常管理(SL/TP/移SL)。Discord !dailystop 可調
 
 # 系統底層控制開關
 
@@ -734,6 +736,45 @@ def fetch_open_interest_series(cona_symbol: str, cona_interval: str, start_times
 # 接續上篇：OKX 實盤風控倉位自動計算與分批委託鏈 (ORDER EXECUTION)
 
 # ══════════════════════════════════════════════════════════════════════════════
+
+_daily_stop = {"day": None, "start": None, "active": False, "last": 0.0}
+def _daily_stop_active() -> bool:
+    """每日虧損熔斷:當日從日初錢包跌破 DAILY_LOSS_PCT → True(停開新倉)。隔日UTC自動解。
+    只擋新倉,不碰既有倉管理(在 scan 開頭 return,check_trailing 照常跑)。失敗/非live 回 False 不擋。"""
+    if not DAILY_STOP_ENABLED or not _LIVE_MODE:
+        return False
+    import datetime as _dt
+    now = time.time()
+    today = _dt.datetime.now(_dt.timezone.utc).date().isoformat()
+    if _daily_stop["day"] != today:   # 新的一天→重置
+        _daily_stop.update({"day": today, "start": None, "active": False, "last": 0.0})
+    if _daily_stop["active"]:
+        return True
+    if now - _daily_stop["last"] < 60:   # 快取60s,少打API
+        return False
+    _daily_stop["last"] = now
+    try:
+        bd = _initialize_ccxt_client().fetch_balance()
+        w = None
+        for _ccy in ((bd.get("info", {}).get("data") or [{}])[0].get("details") or []):
+            if _ccy.get("ccy") == "USDT":
+                w = float(_ccy.get("cashBal") or _ccy.get("availBal") or 0.0); break
+        if w is None:
+            w = float((bd.get("USDT") or {}).get("total") or 0.0)
+        if w <= 0:
+            return False
+        if _daily_stop["start"] is None:
+            _daily_stop["start"] = w; return False
+        dd = (w - _daily_stop["start"]) / _daily_stop["start"]
+        if dd <= -DAILY_LOSS_PCT:
+            _daily_stop["active"] = True
+            dc_log(f"🛑 **每日虧損熔斷**:今日從 {_daily_stop['start']:.2f}U → {w:.2f}U ({dd:+.0%}),"
+                   f"停開新倉至隔日UTC。既有倉照常管理。")
+            return True
+    except Exception as _dse:
+        print(f"[DailyStop] 檢查失敗(不擋): {_dse}")
+    return False
+
 
 def _initialize_ccxt_client() -> ccxt.okx:
     client = ccxt.okx({
@@ -3301,6 +3342,8 @@ class SykesTradingBot:
         if self.check_circuit_breaker():
             if _dbg: print(f"[DBG DOGE/15m] ⛔ circuit_breaker 觸發，跳出", flush=True)
             return
+        if _daily_stop_active():   # 每日虧損熔斷:只擋新倉,既有倉由 check_trailing 照常管理
+            return
         if self.is_cooldown(symbol_item, tf_id):
             if _dbg: print(f"[DBG DOGE/15m] ⏳ 冷卻中，跳出", flush=True)
             return
@@ -3363,18 +3406,22 @@ class SykesTradingBot:
                             _hrisk = abs(current_close - _hsl)
                             if _hsl and _hrisk > 0 and 0.001 < _hrisk / current_close <= MAX_SL:
                                 _htp = round(current_close + _hrisk, 6) if _hfd == "long" else round(current_close - _hrisk, 6)
+                                # ★空→hf_1r固定1R(快進快出,15m空+0.103/勝59%);多→swing_full讓跑(平滑曲線+對沖,
+                                #   WF驗證段含費拆層全正15m+0.107/賺賠2,固定1R多沒用報酬/MDD1.3故改讓跑)。
+                                _hf_es = "hf_1r" if _hfd == "short" else "swing_full"
+                                _tag = "固定1R" if _hfd == "short" else "讓跑"
                                 self.hf_last_bar[_hk] = bar_ts
                                 try:
                                     if EXCHANGE_ENABLED.get("okx", True):
                                         execute_okx_trade_pipeline(okx_swap_symbol, _hfd, current_close,
                                             _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0,
-                                            pyramid_eligible=False, exit_strategy="hf_1r")
+                                            pyramid_eligible=False, exit_strategy=_hf_es)
                                     if EXCHANGE_ENABLED.get("bingx", True):
                                         execute_bingx_trade_pipeline(symbol_item, _hfd, current_close,
-                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0, exit_strategy="hf_1r")
-                                    dc_log(f"⚡ 高頻固定1R({tf_id} MACD{_hfd}帶量):{symbol_item} 進場`{current_close}` SL`{round(_hsl,6)}` TP@1R`{_htp}`")
+                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0, exit_strategy=_hf_es)
+                                    dc_log(f"⚡ 高頻層({tf_id} MACD{_hfd}帶量·{_tag}):{symbol_item} 進場`{current_close}` SL`{round(_hsl,6)}`")
                                 except Exception as _he:
-                                    print(f"[HF-1R] {symbol_item} {tf_id} 平行倉失敗: {_he}")
+                                    print(f"[HF] {symbol_item} {tf_id} 平行倉失敗: {_he}")
             except Exception as _hfe:
                 print(f"[HF-1R-detect] {symbol_item} {tf_id} 偵測失敗: {_hfe}")
 
@@ -4105,7 +4152,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE, DAILY_LOSS_PCT, DAILY_STOP_ENABLED
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -4225,6 +4272,21 @@ def poll_dc_commands():
                                     dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
                             else:
                                 dc_log("⚠️ 用法: `!risk 10`（輸入每倉風險百分比）")
+
+                        # ── dailystop：每日虧損熔斷%（虧到此%停新倉到隔日UTC；0=關閉）──
+                        elif cmd == "dailystop":
+                            if len(parts) >= 2 and parts[1].replace("%", "").replace(".", "").isdigit():
+                                v = float(parts[1].replace("%", ""))
+                                if v <= 0:
+                                    DAILY_STOP_ENABLED = False
+                                    dc_log("⚙️ 每日虧損熔斷已**關閉**")
+                                else:
+                                    DAILY_STOP_ENABLED = True
+                                    DAILY_LOSS_PCT = round(v / 100, 4) if v > 1 else round(v, 4)
+                                    _daily_stop["active"] = False
+                                    dc_log(f"⚙️ 每日虧損熔斷: 當日虧到 `-{DAILY_LOSS_PCT*100:.0f}%` 停開新倉(隔日UTC解,既有倉照管)")
+                            else:
+                                dc_log("⚠️ 用法: `!dailystop 20`(虧20%停) / `!dailystop 0`(關閉)")
 
                         # ── setladder：分段複利級距（每多賺 N U 才把單筆風險加一級）──
                         elif cmd == "setladder":
