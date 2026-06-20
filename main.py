@@ -4649,7 +4649,7 @@ def adopt_untracked_okx_positions():
                 "pos_side":side,"risk_dist":risk,"tf_id":"adopted",
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
                 "exit_strategy":inferred_es,
-                "entry_ts":int(time.time()) - 6*3600,   # 接管時間往前6h:立即有6根1H可算pivot(同BingX adopt)
+                "entry_ts":int(time.time()) - 24*3600,  # ★往前24h(2026-06-20):redeploy重撿會重設entry_ts,6h只6根K→trail找不到pivot;24h給夠pivot(錯側由合法側檢查擋)
             }
             adopted+=1
             dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ swing_full 達1R保本+N字型移SL")
@@ -4752,7 +4752,7 @@ def adopt_untracked_bingx_positions():
                 "risk_dist":     risk,
                 "tf_id":         "adopted",
                 "exit_strategy": inferred_es,
-                "entry_ts":      int(time.time()) - 6*3600,   # 接管時間往前6h:立即有6根1H可算pivot→開了>6h的倉這輪即可移SL(開<6h的取進場前pivot會被合法側擋=不移,安全)
+                "entry_ts":      int(time.time()) - 24*3600,  # ★往前24h(2026-06-20):被redeploy重撿時entry_ts會重設,6h只給6根K→pivot湊不齊trail不動(BingX全卡原停損bug根因)。24h給24根K,trail找得到pivot;錯側進場前pivot由合法側檢查擋掉=安全
                 "init_qty":      str(round(qty, 4)),
                 "add_count":     0,
                 "add_swings_n":  0,
