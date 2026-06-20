@@ -184,7 +184,7 @@ PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 DAILY_STOP_ENABLED = True  # 每日虧損熔斷:當日從日初錢包跌破X%→停開新倉到隔日UTC(擋齊漲血洗的災難日肥尾)
 DAILY_LOSS_PCT = 0.30      # 每日最大虧損(錢包%):-30%=只有齊漲血洗的災難日才觸發,正常小虧連發(讓跑書呼吸)不打斷。Discord !dailystop 可調
 DIR_BALANCE_ENABLED = True # 方向平衡:防整本全做空/全做多→一個反彈全清。主導方向比另一方多 MAX_DIR_SKEW 倉時擋該方向新倉
-MAX_DIR_SKEW = 12          # 兩所合計(每筆OKX+BingX各1=2),12≈6個邏輯倉的偏斜上限。Discord !dirskew 可調(0=關)
+MAX_DIR_SKEW = 8           # 邏輯倉偏斜上限(同幣同向不管幾所算1):主導方向比另一方多8個幣就擋該方向新倉。Discord !dirskew 可調(0=關)
 
 # 系統底層控制開關
 
@@ -780,11 +780,14 @@ def _daily_stop_active() -> bool:
 
 def _dir_skew_block(new_dir: str) -> bool:
     """方向平衡:若新方向已過度集中(主導 - 另一方向 >= MAX_DIR_SKEW)→擋該方向新倉。
-    防整本全做空(或全做多)被一個反彈/崩盤一次清光。回 True=擋。"""
+    防整本全做空(或全做多)被一個反彈/崩盤一次清光。回 True=擋。
+    ★按「邏輯倉」算:同幣同向不管在OKX/BingX幾所只算1個方向曝險(兩所獨立帳戶,不能相加)。"""
     if not DIR_BALANCE_ENABLED or MAX_DIR_SKEW <= 0:
         return False
-    longs = sum(1 for t in active_real_trades.values() if t.get("direction") == "long")
-    shorts = sum(1 for t in active_real_trades.values() if t.get("direction") == "short")
+    def _coin(t):   # OKX "BCH-USDT-SWAP" / BingX "BCH/USDT" → "BCH"
+        return str(t.get("symbol", "")).replace("/", "-").split("-")[0]
+    longs  = len({_coin(t) for t in active_real_trades.values() if t.get("direction") == "long"})
+    shorts = len({_coin(t) for t in active_real_trades.values() if t.get("direction") == "short"})
     if new_dir == "short" and (shorts - longs) >= MAX_DIR_SKEW:
         return True
     if new_dir == "long" and (longs - shorts) >= MAX_DIR_SKEW:
