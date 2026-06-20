@@ -184,7 +184,7 @@ PAUSE_HOURS = 24           # 熔斷冷卻時間 (小時)
 DAILY_STOP_ENABLED = True  # 每日虧損熔斷:當日從日初錢包跌破X%→停開新倉到隔日UTC(擋齊漲血洗的災難日肥尾)
 DAILY_LOSS_PCT = 0.30      # 每日最大虧損(錢包%):-30%=只有齊漲血洗的災難日才觸發,正常小虧連發(讓跑書呼吸)不打斷。Discord !dailystop 可調
 DIR_BALANCE_ENABLED = True # 方向平衡:防整本全做空/全做多→一個反彈全清。主導方向比另一方多 MAX_DIR_SKEW 倉時擋該方向新倉
-MAX_DIR_SKEW = 8           # 邏輯倉偏斜上限(同幣同向不管幾所算1):主導方向比另一方多8個幣就擋該方向新倉。Discord !dirskew 可調(0=關)
+MAX_DIR_SKEW = 15          # 每所方向偏斜上限:主導方向比另一方多15個幣才擋(放鬆=只防荒謬集中,熊市正常空單不binding)。Discord !dirskew 可調(0=關)
 
 # 系統底層控制開關
 
