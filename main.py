@@ -186,7 +186,7 @@ DAILY_LOSS_PCT = 0.30      # 每日最大虧損(錢包%):-30%=只有齊漲血洗
 DIR_BALANCE_ENABLED = True # 方向平衡:防整本全做空/全做多→一個反彈全清。主導方向比另一方多 MAX_DIR_SKEW 倉時擋該方向新倉
 MAX_DIR_SKEW = 15          # 每所方向偏斜上限:主導方向比另一方多15個幣才擋(放鬆=只防荒謬集中,熊市正常空單不binding)。Discord !dirskew 可調(0=關)
 CONC_RISK_ENABLED = True   # 風險預算:同向倉堆太多時,新倉風險遞減(不擋單=不丟edge,但總曝險有界=squeeze那天虧得小)
-CONC_FREE = 6              # 每所同向「全倉」名額;超過後新倉 ×(CONC_FREE/倉數),總同向曝險≈CONC_FREE R
+CONC_FREE = 10             # 每所同向「全倉」名額;超過後新倉 ×(CONC_FREE/倉數),總同向曝險≈CONC_FREE R
 CONC_FLOOR = 0.3           # 風險遞減下限(不會縮到太小)。Discord !concrisk N 可調(0=關)
 
 # 系統底層控制開關
