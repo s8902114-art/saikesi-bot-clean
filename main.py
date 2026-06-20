@@ -1922,12 +1922,20 @@ def _bingx_replace_sl(trade, sl_price, qty):
     except Exception as _e:
         print(f"[BingX-SL] {sym} 查舊單失敗(仍嘗試挂新): {_e}", flush=True)
     # 2) ★先挂新止損(closePosition 整倉)。失敗→保留舊/手動止損,return None(不裸倉)。
-    def _post_sl(ps):
-        return _bingx_request("POST", "/openApi/swap/v2/trade/order", {
-            "symbol": sym, "side": trade["exit_side"], "positionSide": ps,
-            "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
-            "closePosition": "true", "workingType": "MARK_PRICE"}, hdr).json()
+    def _post_sl(ps, use_qty=True):
+        # ★bugfix 2026-06-20:帶 quantity(BCH等需要,否則109400「quantity or stopPrice is must」→移SL一直失敗)。
+        #   110424(名義超可用)時改 closePosition 整倉平 fallback。
+        _p = {"symbol": sym, "side": trade["exit_side"], "positionSide": ps,
+              "type": "STOP_MARKET", "stopPrice": format(float(sl_price), "f"),
+              "workingType": "MARK_PRICE"}
+        if use_qty and qty and float(qty) > 0:
+            _p["quantity"] = str(qty)
+        else:
+            _p["closePosition"] = "true"
+        return _bingx_request("POST", "/openApi/swap/v2/trade/order", _p, hdr).json()
     r = _post_sl(pos)
+    if r.get("code", 0) == 110424:   # 名義超可用→改整倉 closePosition
+        r = _post_sl(pos, use_qty=False)
     if r.get("code", 0) == 109420:   # 此 positionSide 查無倉位→持倉模式不符,試另一種
         alt = "BOTH" if pos in ("LONG", "SHORT") else ("SHORT" if trade["direction"] == "short" else "LONG")
         r_alt = _post_sl(alt)
