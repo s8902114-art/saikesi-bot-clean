@@ -778,16 +778,15 @@ def _daily_stop_active() -> bool:
     return False
 
 
-def _dir_skew_block(new_dir: str) -> bool:
-    """方向平衡:若新方向已過度集中(主導 - 另一方向 >= MAX_DIR_SKEW)→擋該方向新倉。
-    防整本全做空(或全做多)被一個反彈/崩盤一次清光。回 True=擋。
-    ★按「邏輯倉」算:同幣同向不管在OKX/BingX幾所只算1個方向曝險(兩所獨立帳戶,不能相加)。"""
+def _dir_skew_block(new_dir: str, exch: str) -> bool:
+    """方向平衡:某交易所該方向已過度集中(主導 - 另一方向 >= MAX_DIR_SKEW)→擋該所該方向新倉。
+    防單一帳戶全做空(或全做多)被一反彈一次清光。★個別算:每所數自己的實際持倉(兩所獨立、且不是每幣兩所都開)。回 True=擋。"""
     if not DIR_BALANCE_ENABLED or MAX_DIR_SKEW <= 0:
         return False
-    def _coin(t):   # OKX "BCH-USDT-SWAP" / BingX "BCH/USDT" → "BCH"
-        return str(t.get("symbol", "")).replace("/", "-").split("-")[0]
-    longs  = len({_coin(t) for t in active_real_trades.values() if t.get("direction") == "long"})
-    shorts = len({_coin(t) for t in active_real_trades.values() if t.get("direction") == "short"})
+    longs  = sum(1 for t in active_real_trades.values()
+                 if t.get("exchange") == exch and t.get("direction") == "long")
+    shorts = sum(1 for t in active_real_trades.values()
+                 if t.get("exchange") == exch and t.get("direction") == "short")
     if new_dir == "short" and (shorts - longs) >= MAX_DIR_SKEW:
         return True
     if new_dir == "long" and (longs - shorts) >= MAX_DIR_SKEW:
@@ -3431,7 +3430,7 @@ class SykesTradingBot:
                                     if _hfd == "long" else
                                     _find_pivot_high(df, _hp.get("structure_lookback", 5), _hp.get("sl_atr_buffer", 0.0)))
                             _hrisk = abs(current_close - _hsl)
-                            if _hsl and _hrisk > 0 and 0.001 < _hrisk / current_close <= MAX_SL and not _dir_skew_block(_hfd):
+                            if _hsl and _hrisk > 0 and 0.001 < _hrisk / current_close <= MAX_SL:
                                 _htp = round(current_close + _hrisk, 6) if _hfd == "long" else round(current_close - _hrisk, 6)
                                 # ★空→hf_1r固定1R(快進快出,15m空+0.103/勝59%);多→swing_full讓跑(平滑曲線+對沖,
                                 #   WF驗證段含費拆層全正15m+0.107/賺賠2,固定1R多沒用報酬/MDD1.3故改讓跑)。
@@ -3439,11 +3438,11 @@ class SykesTradingBot:
                                 _tag = "固定1R" if _hfd == "short" else "讓跑"
                                 self.hf_last_bar[_hk] = bar_ts
                                 try:
-                                    if EXCHANGE_ENABLED.get("okx", True):
+                                    if EXCHANGE_ENABLED.get("okx", True) and not _dir_skew_block(_hfd, "okx"):
                                         execute_okx_trade_pipeline(okx_swap_symbol, _hfd, current_close,
                                             _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0,
                                             pyramid_eligible=False, exit_strategy=_hf_es)
-                                    if EXCHANGE_ENABLED.get("bingx", True):
+                                    if EXCHANGE_ENABLED.get("bingx", True) and not _dir_skew_block(_hfd, "bingx"):
                                         execute_bingx_trade_pipeline(symbol_item, _hfd, current_close,
                                             _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0, exit_strategy=_hf_es)
                                     dc_log(f"⚡ 高頻層({tf_id} MACD{_hfd}帶量·{_tag}):{symbol_item} 進場`{current_close}` SL`{round(_hsl,6)}`")
@@ -4024,29 +4023,32 @@ class SykesTradingBot:
                      and exit_strategy not in ("line_full", "line_add", "swing_full",
                                                "swing_tp", "swing_tp_1h"))
 
-        if AUTO_TRADE.get(tf_id) and _dir_skew_block(direction):
-            dc_log(f"⚖️ 方向平衡:{symbol_item} {direction} 方向已過度集中,跳過此單(防整本一面倒被反彈全清)")
-            return
         if AUTO_TRADE.get(tf_id):
             try:
                 daily_report.record_entry(symbol_item, tf_id, direction, signal_source_tag or exit_strategy)
             except Exception:
                 pass
             if EXCHANGE_ENABLED.get("okx", True):
-                execute_okx_trade_pipeline(
-                    okx_swap_symbol, direction, current_close,
-                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                    p["exit_mode"], tf_id, position_scale=dh_boost,
-                    pyramid_eligible=_pyr_elig,
-                    exit_strategy=exit_strategy,
-                )
+                if _dir_skew_block(direction, "okx"):
+                    dc_log(f"⚖️ 方向平衡:OKX {direction} 已過度集中,跳過OKX這單(防一面倒)")
+                else:
+                    execute_okx_trade_pipeline(
+                        okx_swap_symbol, direction, current_close,
+                        signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
+                        p["exit_mode"], tf_id, position_scale=dh_boost,
+                        pyramid_eligible=_pyr_elig,
+                        exit_strategy=exit_strategy,
+                    )
             if EXCHANGE_ENABLED.get("bingx", True):
-                execute_bingx_trade_pipeline(
-                    symbol_item, direction, current_close,
-                    signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                    p["exit_mode"], tf_id, position_scale=dh_boost,
-                    exit_strategy=exit_strategy,
-                )
+                if _dir_skew_block(direction, "bingx"):
+                    dc_log(f"⚖️ 方向平衡:BingX {direction} 已過度集中,跳過BingX這單(防一面倒)")
+                else:
+                    execute_bingx_trade_pipeline(
+                        symbol_item, direction, current_close,
+                        signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
+                        p["exit_mode"], tf_id, position_scale=dh_boost,
+                        exit_strategy=exit_strategy,
+                    )
 
             # ── 高頻固定1R 平行層(各跑各的,觸發就都開):現役3格訊號成立→多開一筆hf_1r獨立倉 ──
             #   1H C3空(is_short) / 1H MACD空(is_macd_short) / 15m MACD多(is_macd_long)。
