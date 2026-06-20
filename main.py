@@ -185,6 +185,9 @@ DAILY_STOP_ENABLED = True  # 每日虧損熔斷:當日從日初錢包跌破X%→
 DAILY_LOSS_PCT = 0.30      # 每日最大虧損(錢包%):-30%=只有齊漲血洗的災難日才觸發,正常小虧連發(讓跑書呼吸)不打斷。Discord !dailystop 可調
 DIR_BALANCE_ENABLED = True # 方向平衡:防整本全做空/全做多→一個反彈全清。主導方向比另一方多 MAX_DIR_SKEW 倉時擋該方向新倉
 MAX_DIR_SKEW = 15          # 每所方向偏斜上限:主導方向比另一方多15個幣才擋(放鬆=只防荒謬集中,熊市正常空單不binding)。Discord !dirskew 可調(0=關)
+CONC_RISK_ENABLED = True   # 風險預算:同向倉堆太多時,新倉風險遞減(不擋單=不丟edge,但總曝險有界=squeeze那天虧得小)
+CONC_FREE = 6              # 每所同向「全倉」名額;超過後新倉 ×(CONC_FREE/倉數),總同向曝險≈CONC_FREE R
+CONC_FLOOR = 0.3           # 風險遞減下限(不會縮到太小)。Discord !concrisk N 可調(0=關)
 
 # 系統底層控制開關
 
@@ -792,6 +795,18 @@ def _dir_skew_block(new_dir: str, exch: str) -> bool:
     if new_dir == "long" and (longs - shorts) >= MAX_DIR_SKEW:
         return True
     return False
+
+
+def _concentration_mult(new_dir: str, exch: str) -> float:
+    """風險預算:某所同向倉已堆 n 個,新倉風險 ×(CONC_FREE/n)(n>CONC_FREE時遞減)。
+    不擋單(edge不丟),但讓總同向曝險≈CONC_FREE R,squeeze那天虧得小。回 1.0~CONC_FLOOR。"""
+    if not CONC_RISK_ENABLED or CONC_FREE <= 0:
+        return 1.0
+    n = sum(1 for t in active_real_trades.values()
+            if t.get("exchange") == exch and t.get("direction") == new_dir)
+    if n < CONC_FREE:
+        return 1.0
+    return max(CONC_FLOOR, CONC_FREE / float(n + 1))
 
 
 def _initialize_ccxt_client() -> ccxt.okx:
@@ -3440,11 +3455,13 @@ class SykesTradingBot:
                                 try:
                                     if EXCHANGE_ENABLED.get("okx", True) and not _dir_skew_block(_hfd, "okx"):
                                         execute_okx_trade_pipeline(okx_swap_symbol, _hfd, current_close,
-                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0,
+                                            _hsl, _htp, _htp, "fixed", tf_id,
+                                            position_scale=_concentration_mult(_hfd, "okx"),
                                             pyramid_eligible=False, exit_strategy=_hf_es)
                                     if EXCHANGE_ENABLED.get("bingx", True) and not _dir_skew_block(_hfd, "bingx"):
                                         execute_bingx_trade_pipeline(symbol_item, _hfd, current_close,
-                                            _hsl, _htp, _htp, "fixed", tf_id, position_scale=1.0, exit_strategy=_hf_es)
+                                            _hsl, _htp, _htp, "fixed", tf_id,
+                                            position_scale=_concentration_mult(_hfd, "bingx"), exit_strategy=_hf_es)
                                     dc_log(f"⚡ 高頻層({tf_id} MACD{_hfd}帶量·{_tag}):{symbol_item} 進場`{current_close}` SL`{round(_hsl,6)}`")
                                 except Exception as _he:
                                     print(f"[HF] {symbol_item} {tf_id} 平行倉失敗: {_he}")
@@ -4035,7 +4052,8 @@ class SykesTradingBot:
                     execute_okx_trade_pipeline(
                         okx_swap_symbol, direction, current_close,
                         signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                        p["exit_mode"], tf_id, position_scale=dh_boost,
+                        p["exit_mode"], tf_id,
+                        position_scale=dh_boost * _concentration_mult(direction, "okx"),
                         pyramid_eligible=_pyr_elig,
                         exit_strategy=exit_strategy,
                     )
@@ -4046,7 +4064,8 @@ class SykesTradingBot:
                     execute_bingx_trade_pipeline(
                         symbol_item, direction, current_close,
                         signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
-                        p["exit_mode"], tf_id, position_scale=dh_boost,
+                        p["exit_mode"], tf_id,
+                        position_scale=dh_boost * _concentration_mult(direction, "bingx"),
                         exit_strategy=exit_strategy,
                     )
 
@@ -4184,7 +4203,7 @@ _dc_last_msg_id = None
 
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
-    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE, DAILY_LOSS_PCT, DAILY_STOP_ENABLED, MAX_DIR_SKEW, DIR_BALANCE_ENABLED
+    global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE, DAILY_LOSS_PCT, DAILY_STOP_ENABLED, MAX_DIR_SKEW, DIR_BALANCE_ENABLED, CONC_FREE, CONC_RISK_ENABLED
     global CVD_ENABLED, ADX_ENABLED, AUTO_TRADE, MARGIN_MODE, EXCHANGE_ENABLED
     if not DISCORD_TOKEN or not DISCORD_CHANNEL_ID:
         print("[DC] DISCORD_TOKEN 或 DISCORD_CHANNEL_ID 未設定，指令輪詢停用。")
@@ -4332,6 +4351,19 @@ def poll_dc_commands():
                                     dc_log(f"⚙️ 方向平衡: 主導方向比另一方多 `{v}` 倉(兩所合計)就擋該方向新倉")
                             else:
                                 dc_log("⚠️ 用法: `!dirskew 12`(偏斜上限) / `!dirskew 0`(關閉)")
+
+                        # ── concrisk：風險預算(同向倉超N個後新倉風險遞減;0=關)──
+                        elif cmd == "concrisk":
+                            if len(parts) >= 2 and parts[1].replace(".", "").isdigit():
+                                v = int(float(parts[1]))
+                                if v <= 0:
+                                    CONC_RISK_ENABLED = False
+                                    dc_log("⚙️ 風險預算已**關閉**(同向倉不遞減風險)")
+                                else:
+                                    CONC_RISK_ENABLED = True; CONC_FREE = v
+                                    dc_log(f"⚙️ 風險預算: 每所同向超過 `{v}` 倉後,新倉風險×({v}/倉數)遞減(總同向曝險≈{v}R)")
+                            else:
+                                dc_log("⚠️ 用法: `!concrisk 6`(全倉名額) / `!concrisk 0`(關閉)")
 
                         # ── setladder：分段複利級距（每多賺 N U 才把單筆風險加一級）──
                         elif cmd == "setladder":
