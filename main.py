@@ -2303,6 +2303,28 @@ def check_trailing_stops_for_real():
                                     print(f"[OKX-BE] {name} 達1R保本→{be_price}", flush=True)
                     except Exception as _be:
                         print(f"[OKX-BE] {name} 保本判斷失敗: {_be}", flush=True)
+                # ── 讓跑多單轉折加碼(2026-06-21):順勢轉折處加碼,加後 place-before-cancel 重掛SL覆蓋全倉 ──
+                if PYRAMID_LETRUN_ENABLED and direction == "long" and trade.get("tf_id") != "adopted":
+                    try:
+                        _old_sl_id = trade.get("sl_algo_id")
+                        if _mai_add_on_swing(ex, trade):   # 加碼(含強平守門員),更新 remaining_amount
+                            _csl = float(trade.get("current_sl") or 0)
+                            if _csl > 0:
+                                try: _slpx = ex.price_to_precision(symbol, _csl)
+                                except Exception: _slpx = format(_csl, "f")
+                                # 先掛覆蓋全倉的新SL,確認成功才取消舊SL(不裸倉)
+                                _r = _place_okx_algo_sl(inst_id=inst_id, side="sell",
+                                                        amount=trade["remaining_amount"],
+                                                        sl_trigger_px=_slpx, pos_side=direction)
+                                _nid = (_r.get("data") or [{}])[0].get("algoId")
+                                if _nid:
+                                    trade["sl_algo_id"] = _nid
+                                    _cancel_okx_algo_order(inst_id, _old_sl_id)
+                                else:
+                                    print(f"[LetRunAdd] {name} 加碼後重掛SL失敗,保留舊SL(不裸倉)", flush=True)
+                            save_active_trades()
+                    except Exception as _lra:
+                        print(f"[LetRunAdd] {name} 讓跑加碼失敗: {_lra}", flush=True)
                 if _swing_trail_update_sl(ex, trade):
                     save_active_trades()
                 continue
@@ -2592,6 +2614,10 @@ def check_trailing_stops_for_real():
                                     print(f"[BingX-BE] {bingx_symbol} 達1R保本→{be_price}", flush=True)
                     except Exception as _be:
                         print(f"[BingX-BE] {trade_key} 保本判斷失敗: {_be}", flush=True)
+                # ── 讓跑多單轉折加碼(2026-06-21):_bingx_add_on_swing 自帶 place-before-cancel 重掛SL覆蓋全倉 ──
+                if PYRAMID_LETRUN_ENABLED and direction == "long" and trade.get("tf_id") != "adopted":
+                    try: _bingx_add_on_swing(trade)
+                    except Exception as _bla: print(f"[BingX LetRunAdd] {bingx_symbol} 加碼失敗: {_bla}", flush=True)
                 moved = _bingx_swing_trail(trade)
                 # 即使沒移SL(SL已在最優位,pivot不優於它),也清理多餘止損單。
                 # 解決:之前累積的殘留止損單,因現在不觸發移SL/保本→_bingx_replace_sl不被呼叫→舊單清不掉。
@@ -2843,6 +2869,11 @@ ALT_LOCK_R     = 2.5    # 山寨讓跑單達此R先落袋半倉+移BE(防COAI式
 #   3) 每筆只加一次  4) 預設關閉,review+觀察後再開
 PYRAMID_ENABLED = False   # 2026-06-13 關閉:橫盤=純風險放大;改用突破訊號position_scale×1.5集中下注
 PYRAMID_LIQ_BUF = 0.85    # 強平守門員緩衝(同下單管線)
+# ── 讓跑倉(swing_full)轉折加碼開關(2026-06-21,session驗證:轉折點加碼放大讓跑贏家,下檔仍束底倉) ──
+#   只對「做多」讓跑倉,在順勢轉折(更高腳)處用 _mai_add_on_swing 加碼(遞減半單/守3/強平守門員)。
+#   加後重掛SL覆蓋全倉(OKX place-before-cancel防裸倉;BingX _bingx_add_on_swing自帶安全重掛)。
+#   排除接管倉(tf_id=adopted)。市價版先上;觸發單(轉折線等回踩,不卡保證金)為下一步升級。
+PYRAMID_LETRUN_ENABLED = True
 # ── 讓跑類策略(swing_full接管倉 / box_trend)的「達1R保本兜底」開關 ───────────────
 # 2026-06-10 含費WF證實:1R保本兜底對讓跑策略是災難(DH +0.142→-0.118、1H C3空砍頭)。
 # 它當初只是接管倉的未驗證OK繃(commit 82def47,本就「正常swing_full不加」),卻因每次redeploy
