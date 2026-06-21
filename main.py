@@ -1749,21 +1749,22 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         n = len(df)
 
         # 移SL用「pivot 擺盪點」(前後2根局部極值)。回測:pivot 勝 N字型(N MDD暴增58~71%)→回退。
+        # ★bugfix 2026-06-21:先濾「市價合法側」再挑最緊pivot。舊版先挑全窗最極端pivot,噴後整理時
+        #   它落在市價錯側→整個更新被否決凍住(該噴後跟漲的整理段不跟,AXS案例根因)。
         PV = 2
+        cur_sl = float(trade.get("current_sl", 0) or 0)
+        cur_px = float(cl[-1])
         last_swing = None
         for j in range(PV, n - PV):
             if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min():
+                if lo[j] == lo[j-PV:j+PV+1].min() and lo[j] < cur_px:   # 只取市價下方(合法側)
                     if last_swing is None or lo[j] > last_swing: last_swing = lo[j]
             else:
-                if hi[j] == hi[j-PV:j+PV+1].max():
+                if hi[j] == hi[j-PV:j+PV+1].max() and hi[j] > cur_px:   # 只取市價上方(合法側)
                     if last_swing is None or hi[j] < last_swing: last_swing = hi[j]
         if last_swing is None:
-            print(f"[OKX-trail] {name} 找不到pivot,不移", flush=True)
+            print(f"[OKX-trail] {name} 合法側無pivot,不移(px={cur_px})", flush=True)
             return False
-
-        cur_sl = float(trade.get("current_sl", 0) or 0)
-        cur_px = float(cl[-1])
         print(f"[OKX-trail] {name} {direction} pivot={last_swing} cur_sl={cur_sl} px={cur_px} ets={trade.get('entry_ts')}", flush=True)
         # 只往有利方向移（多頭往上、空頭往下）
         if direction == "long"  and last_swing <= cur_sl:
@@ -2089,24 +2090,25 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
             except Exception: pass
         hi = df["high"].values; lo = df["low"].values; n = len(df)
         # pivot 擺盪點(前後2根局部極值)。回測勝 N字型(N MDD暴增)→回退。
+        # ★bugfix 2026-06-21:與OKX對齊——先濾市價合法側再挑最緊pivot(舊版先挑全窗最極端,
+        #   噴後整理時落在錯側→整段更新被否決凍住=BingX該跟不跟根因)。並補診斷log(BingX原本一個都沒有)。
+        cur_px = float(df["close"].iloc[-1])
+        cur_sl = float(trade.get("current_sl", 0) or 0)
         PV = 2
         last = None
         for j in range(PV, n - PV):
             if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min():
+                if lo[j] == lo[j-PV:j+PV+1].min() and lo[j] < cur_px:
                     if last is None or lo[j] > last: last = lo[j]
             else:
-                if hi[j] == hi[j-PV:j+PV+1].max():
+                if hi[j] == hi[j-PV:j+PV+1].max() and hi[j] > cur_px:
                     if last is None or hi[j] < last: last = hi[j]
-        if last is None: return False
-        cur_sl = float(trade.get("current_sl", 0) or 0)
-        if direction == "long"  and last <= cur_sl: return False
-        if direction == "short" and last >= cur_sl: return False
-        # 合法側保護:新SL須在市價的保護側(空頭>市價、多頭<市價),否則交易所拒單→白掛。
-        # 接管倉 entry_ts=None 用全120根,可能取到進場前pivot落在錯側,此處擋掉。
-        cur_px = float(df["close"].iloc[-1])
-        if direction == "short" and last <= cur_px: return False
-        if direction == "long"  and last >= cur_px: return False
+        if last is None:
+            print(f"[BingX-Trail] {name} 合法側無pivot,不移(px={cur_px} sl={cur_sl})", flush=True); return False
+        if direction == "long"  and last <= cur_sl:
+            print(f"[BingX-Trail] {name} pivot{last}≤sl{cur_sl} 不更優,不移", flush=True); return False
+        if direction == "short" and last >= cur_sl:
+            print(f"[BingX-Trail] {name} pivot{last}≥sl{cur_sl} 不更優,不移", flush=True); return False
         rem = float(trade.get("remaining_qty", 0) or 0)
         if rem <= 0: return False
         nid = _bingx_replace_sl(trade, last, rem)
