@@ -2014,6 +2014,7 @@ def _px_for_bingx(ex, trade):
 # WF山寨 +0.385→+0.445/勝67%/MDD↓(主流上害,故限非主流)。全程guard,任何失敗回False不影響原移SL/平倉。
 OI_EARLY_EXIT_ENABLED = True     # 山寨多單OI降早出啟用(用戶決定一次上;guard完整、限非主流、參數對齊回測)
 HF_1R_ENABLED = True             # 高頻固定1R平行層:現役3格(1H C3空/1H MACD空/15m MACD多)訊號成立時多開一筆固定1R/0.5R保本獨立倉,各跑各的
+HF_MAJORS_ONLY = True            # ★2026-06-21 瘦身止血:HF MACD層限主流(BTC/ETH/SOL)。我測15m MACD固定1R全層負勝50%,山寨裸MACD是訊號爆量+流血主因;限主流砍~80%量、止血、對齊「動能限主流」。設False回全市值
 
 def _oi_drop_exit_long(trade) -> bool:
     """山寨多單OI降早出:獲利中+OI降3根+價在跌→True(該平)。失敗一律False。"""
@@ -3508,7 +3509,8 @@ class SykesTradingBot:
     # 2b. ── 高頻固定1R 獨立偵測(各跑各的,不靠主訊號):15m/30m MACD空多帶量,全市值,純固定1R無保本 ──
         #   驗證(live停損_find_pivot,含費WF,拆T1/T2/T3全正):15m空+0.103/勝59% 30m空+0.097 15m多+0.070
         #   30m多+0.032,均勝55-59%(~6成)。SL=live同款pivot+ATR緩衝;TP=進場±1R掛交易所;0.5R保本已拿掉。
-        if HF_1R_ENABLED and tf_id in ("15m", "30m") and AUTO_TRADE.get(tf_id) and bar_ts != 0:
+        if HF_1R_ENABLED and tf_id in ("15m", "30m") and AUTO_TRADE.get(tf_id) and bar_ts != 0 \
+           and (not HF_MAJORS_ONLY or symbol_item in CONV_MAJORS):   # ★瘦身:HF限主流(砍山寨裸MACD爆量+流血)
             try:
                 _hf4h = fetch_market_candles(okx_swap_symbol, "4H")
                 if not _hf4h.empty and len(_hf4h) > 200:
