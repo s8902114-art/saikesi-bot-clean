@@ -3082,6 +3082,28 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
 
 CONV_BREAKOUT_ENABLED = True   # 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
 CONV_MAJORS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+SHORT_POC_GATE_ENABLED = True   # 籌碼支撐閘(2026-06-21 session WF:在POC下方才空,砍掉「支撐上方做空被彈」流血空單,訓-0.025→-0.010)
+def _vp_poc(df, W=120, nb=50):
+    """Volume Profile:近W根成交量分布,回 (POC, VAH, VAL) 價值區70%上下緣。資料不足回None。"""
+    try:
+        cl = df["close"].values; vol = df["vol"].values
+        if len(cl) < 30: return None
+        a = max(0, len(cl) - W); px = cl[a:]; vv = vol[a:]
+        lo_, hi_ = float(px.min()), float(px.max())
+        if hi_ <= lo_: return None
+        edges = np.linspace(lo_, hi_, nb + 1); idx = np.clip(np.digitize(px, edges) - 1, 0, nb - 1)
+        vh = np.zeros(nb)
+        for k, v in zip(idx, vv): vh[k] += v
+        centers = (edges[:-1] + edges[1:]) / 2; poc = float(centers[int(vh.argmax())])
+        order = np.argsort(vh)[::-1]; tot = float(vh.sum()); acc = 0.0; sel = []
+        for k in order:
+            sel.append(int(k)); acc += vh[k]
+            if acc >= 0.7 * tot: break
+        selc = centers[sorted(sel)]
+        return poc, float(selc.max()), float(selc.min())
+    except Exception:
+        return None
+
 def _check_conv_breakout(symbol_item, okx_bar_fmt, df, okx_swap_symbol):
     """收斂突破+OI升 1H做多(限主流):結構式收斂(高點降低+低點墊高)+收盤破近5高(不過度延展)+價在EMA50上(順勢)
     +OI升(建倉)。session WF:T1主流訓+0.19/驗+0.17,進得比OI_SQUEEZE便宜(延展0.74)。讓跑swing_full(吃轉折加碼)。
@@ -3887,6 +3909,18 @@ class SykesTradingBot:
                         if tf_id == "1H": is_short = False
             except Exception as _r4e:
                 print(f"[空regime閘] {symbol_item} 失敗(放行): {_r4e}")
+
+        # ── 籌碼支撐閘(2026-06-21):不在POC(籌碼支撐)上方做空,除非脫離(收盤<POC)。砍流血空單(空在支撐被彈) ──
+        if SHORT_POC_GATE_ENABLED and (is_short or is_double_top or is_reson_short or is_macd_short
+                                        or is_dh_short or is_box_short or is_vegas_short or is_oisq_short):
+            try:
+                _vp = _vp_poc(df)
+                if _vp and current_close >= _vp[0]:   # 收盤仍在POC上方=籌碼支撐沒破→擋空
+                    is_short = is_double_top = is_reson_short = is_macd_short = False
+                    is_dh_short = is_box_short = is_vegas_short = is_oisq_short = False
+                    print(f"[籌碼支撐閘] {symbol_item} 收盤在POC上方,擋空(防空在支撐被彈)")
+            except Exception as _pge:
+                print(f"[POC-Gate] {symbol_item} 失敗(放行): {_pge}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long
