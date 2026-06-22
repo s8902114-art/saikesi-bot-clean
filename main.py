@@ -169,7 +169,7 @@ EXCHANGE_ENABLED: Dict[str, bool] = {
 # ══════════════════════════════════════════════════════════════════════════════
 
 MAX_LEVERAGE = 100         # 系統最高安全槓桿限制
-RISK_PCT     = 0.03        # 單筆最大風險 = 基準10U × 3%(2026-06-21 5%→3%保護本金:portfolio sim 5%純複利爆/2-3%survive;ladder基準10U下實際~1.1%/筆)
+RISK_PCT     = 0.05        # 單筆最大風險 = 基準10U × 5%(ladder基準10U下27U帳戶實際~1.85%/筆=已保守;用戶確認改回5成長快)
 RISK_TOLERANCE_MULT = 2.0  # 停損容忍倍數：張數進位後停損 ≤ 風險預算 × 此值 才下單（超過則拒單）
 OKX_MIN_MMR       = 350.0  # OKX 開倉前維持保證金率門檻(%)：預估加新倉後 < 此值就跳過（!setmmr 可調）
 BINGX_MAX_RISK_RATE = 0.70 # BingX 開倉前帳戶風險率上限：預估加新倉後 > 此值就跳過（!setbingxrisk 可調）
@@ -3083,6 +3083,7 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
 CONV_BREAKOUT_ENABLED = True   # 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
 CONV_MAJORS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
 SHORT_POC_GATE_ENABLED = True   # 籌碼支撐閘(2026-06-21 session WF:在POC下方才空,砍掉「支撐上方做空被彈」流血空單,訓-0.025→-0.010)
+LONG_POC_GATE_ENABLED  = True   # 籌碼壓力閘(對稱):收盤要站上POC才做多,擋「追進壓力被打回」(POC主流做多+0.069→+0.095)
 def _vp_poc(df, W=120, nb=50):
     """Volume Profile:近W根成交量分布,回 (POC, VAH, VAL) 價值區70%上下緣。資料不足回None。"""
     try:
@@ -3921,6 +3922,16 @@ class SykesTradingBot:
                     print(f"[籌碼支撐閘] {symbol_item} 收盤在POC上方,擋空(防空在支撐被彈)")
             except Exception as _pge:
                 print(f"[POC-Gate] {symbol_item} 失敗(放行): {_pge}")
+
+        # ── 籌碼壓力閘(2026-06-21,對稱空單版):不在POC(籌碼壓力)下方追多,除非站上(收盤>POC)。擋追進壓力被打回 ──
+        if LONG_POC_GATE_ENABLED and (is_long or is_double_bottom or is_reson_long or is_macd_long or is_oisq_long or is_conv_long):
+            try:
+                _vpl = _vp_poc(df)
+                if _vpl and current_close <= _vpl[0]:   # 收盤仍在POC下方=籌碼壓力沒突破→擋多
+                    is_long = is_double_bottom = is_reson_long = is_macd_long = is_oisq_long = is_conv_long = False
+                    print(f"[籌碼壓力閘] {symbol_item} 收盤在POC下方,擋多(防追進壓力被打回)")
+            except Exception as _pgl:
+                print(f"[POC-Gate-L] {symbol_item} 失敗(放行): {_pgl}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long
