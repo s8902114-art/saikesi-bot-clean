@@ -3080,6 +3080,35 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
         print(f"[OI-Squeeze] {symbol_item} 失敗: {e}")
         return None
 
+CONV_BREAKOUT_ENABLED = True   # 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
+CONV_MAJORS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+def _check_conv_breakout(symbol_item, okx_bar_fmt, df, okx_swap_symbol):
+    """收斂突破+OI升 1H做多(限主流):結構式收斂(高點降低+低點墊高)+收盤破近5高(不過度延展)+價在EMA50上(順勢)
+    +OI升(建倉)。session WF:T1主流訓+0.19/驗+0.17,進得比OI_SQUEEZE便宜(延展0.74)。讓跑swing_full(吃轉折加碼)。
+    ★山寨無效(技術/數據皆驗證負)故限主流。回 'long'/None。"""
+    try:
+        if symbol_item not in CONV_MAJORS: return None
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+        if len(cl) < 60: return None
+        i = len(cl) - 1; W = 20; a = i - W; m = i - W // 2
+        ema50 = float(df["close"].ewm(span=50, adjust=False).mean().iloc[-1])
+        if cl[-1] <= ema50: return None                                              # 順勢:價在EMA50上
+        if not (hi[m:i+1].max() <= hi[a:m].max() and lo[m:i+1].min() >= lo[a:m].min()): return None  # 收斂
+        rng = (hi[a:i+1].max() - lo[a:i+1].min()) / cl[-1]
+        if not (0.01 < rng < 0.18): return None                                      # 範圍別太寬(非趨勢中段)
+        rh5 = float(hi[i-5:i].max())
+        if not (cl[-1] > rh5 and cl[-1] <= rh5 * 1.03): return None                  # 收盤破近高,不過度延展(治追)
+        cona = CONA_PERP.get(symbol_item)
+        if not cona: return None
+        _e = int(time.time() * 1000); _s = _e - (BAR_SECONDS["1H"] * 8 * 1000)
+        oi = fetch_open_interest_series(cona, okx_bar_fmt, _s, _e)
+        if len(oi) < 4 or oi.iloc[-4] <= 0: return None
+        if oi.iloc[-1] <= oi.iloc[-4]: return None                                   # OI升(建倉)
+        return "long"
+    except Exception as e:
+        print(f"[ConvBreak] {symbol_item} 失敗: {e}")
+        return None
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
@@ -3834,6 +3863,15 @@ class SykesTradingBot:
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
+        # ── 收斂突破+OI升 1H做多(限主流,2026-06-21):結構式收斂+收盤破近高+順勢+OI升,讓跑(吃轉折加碼) ──
+        is_conv_long = False
+        if CONV_BREAKOUT_ENABLED and tf_id == "1H":
+            try:
+                if _check_conv_breakout(symbol_item, okx_bar_fmt, df, okx_swap_symbol) == "long":
+                    is_conv_long = True; print(f"[收斂突破多] {symbol_item} 收斂+OI升(限主流,讓跑)")
+            except Exception as _cbe:
+                print(f"[ConvBreak] {symbol_item} 判斷失敗: {_cbe}")
+
         # ★2026-06-15 空單regime閘(實盤診斷:6/7-13空169筆-29;6/8空51筆0%勝-17.8;但6/10跌日空76%勝+11.7)。
         #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。用「價在4H EMA50之下」=靈敏(單日下殺即跌破,抓6/10;
         #   持續上漲時價在EMA50上,擋6/8)。比EMA200斜率快=不會太晚、又不擋掉單日下殺的好空。非DH積極空單適用。
@@ -3851,7 +3889,7 @@ class SykesTradingBot:
                 print(f"[空regime閘] {symbol_item} 失敗(放行): {_r4e}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long
         combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short
 
         if not combined_long and not combined_short:
@@ -3873,6 +3911,7 @@ class SykesTradingBot:
             if is_reson_long:    _signal_source.append("雙底+RSI共振")
             if is_macd_long:     _signal_source.append("MACD動能")
             if is_oisq_long:     _signal_source.append("主力建多")
+            if is_conv_long:     _signal_source.append("收斂突破多")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -3923,6 +3962,8 @@ class SykesTradingBot:
             exit_strategy = "box_trend"                                  # 箱突破空：1R保本+4R整倉大TP(讓趨勢跑)
         elif is_oisq_long or is_oisq_short:
             exit_strategy = "swing_full"                                 # OI壓縮突破：整倉轉折移SL讓跑(抓噴出尾,驗+0.309/賺賠3.1/MDD6%)
+        elif is_conv_long:
+            exit_strategy = "swing_full"                                 # 收斂突破多(限主流)：整倉轉折移SL讓跑(吃轉折加碼,session驗+0.17/加碼+0.8~1.0)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
