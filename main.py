@@ -678,26 +678,27 @@ def _execute_coinalyze_request(endpoint: str, query_params: dict) -> list:
 
 def calculate_cumulative_volume_delta(cona_symbol: str, cona_interval: str, start_timestamp: int, end_timestamp: int) -> pd.Series:
     """ 計算出精準的 CVD (累積成交量差額) 指標線 """
-    raw_data = _execute_coinalyze_request("history", {
+    # Coinalyze 改版:'history' 端點已404,改 'ohlcv-history'(回 v總量/bv買量),分組格式
+    raw_data = _execute_coinalyze_request("ohlcv-history", {
     "symbols": cona_symbol,
     "interval": cona_interval,
     "from": str(start_timestamp // 1000),
-    "to": str(end_timestamp // 1000),
-    "convert_to_usd": "false"
+    "to": str(end_timestamp // 1000)
     })
     if not raw_data:
         return pd.Series(dtype=float)
 
     records = []
-    for node in raw_data:
-        if not isinstance(node, dict):
+    for grp in raw_data:
+        if not isinstance(grp, dict):
             continue
-        t_sec = node.get("t", node.get("time", 0))
-        tot_v = float(node.get("v", 0.0) or 0.0)
-        buy_v = float(node.get("bv", tot_v / 2.0) or (tot_v / 2.0))
-        sell_v = tot_v - buy_v
-        delta = buy_v - sell_v
-        records.append((int(t_sec) * 1000, delta))
+        for node in grp.get("history", []):
+            t_sec = node.get("t", 0)
+            tot_v = float(node.get("v", 0.0) or 0.0)
+            buy_v = float(node.get("bv", tot_v / 2.0) or (tot_v / 2.0))
+            sell_v = tot_v - buy_v
+            delta = buy_v - sell_v
+            records.append((int(t_sec) * 1000, delta))
 
     if not records:
         return pd.Series(dtype=float)
@@ -719,10 +720,12 @@ def fetch_open_interest_series(cona_symbol: str, cona_interval: str, start_times
     if not raw_data:
         return pd.Series(dtype=float)
 
+    # Coinalyze 改版:回 [{symbol, history:[{t,o,h,l,c}]}] 分組格式,OI=history[].c(收盤OI)
     records = []
-    for node in raw_data:
-        if isinstance(node, dict):
-            records.append((int(node.get("t", 0)) * 1000, float(node.get("v", 0.0) or 0.0)))
+    for grp in raw_data:
+        if isinstance(grp, dict):
+            for h in grp.get("history", []):
+                records.append((int(h.get("t", 0)) * 1000, float(h.get("c", 0.0) or 0.0)))
     if not records:
         return pd.Series(dtype=float)
 
@@ -4327,6 +4330,54 @@ def synchronise_and_wait_next_candle() -> List[str]:
 
 _dc_last_msg_id = None
 
+_CONA_FUT_MAP: Dict[str, list] = {}
+def _cona_future_map() -> Dict[str, list]:
+    """Coinalyze 幣→各所USDT永續symbols(future-markets建一次,快取整session)。"""
+    global _CONA_FUT_MAP
+    if _CONA_FUT_MAP:
+        return _CONA_FUT_MAP
+    try:
+        mkts = _execute_coinalyze_request("future-markets", {})
+        m: Dict[str, list] = {}
+        for x in mkts:
+            if (x.get("quote_asset") == "USDT" and x.get("is_perpetual") and x.get("has_ohlcv_data")):
+                m.setdefault(x.get("base_asset"), []).append(x.get("symbol"))
+        if m:
+            _CONA_FUT_MAP = m
+    except Exception:
+        pass
+    return _CONA_FUT_MAP
+
+def _cona_agg(coin: str, cona_int: str):
+    """跨所聚合 OI+CVD 方向(Coinalyze,bot自己key,聚合~9所)。回 (oi_up, oi_pct, cvd_up, n_ex)。"""
+    syms = _cona_future_map().get(coin, [])[:12]
+    if not syms:
+        return None, 0.0, None, 0
+    sstr = ",".join(syms); end = int(time.time()); start = end - 3600 * 24
+    oi_up = None; oi_pct = 0.0; cvd_up = None
+    try:
+        oid = _execute_coinalyze_request("open-interest-history", {"symbols": sstr, "interval": cona_int, "from": start, "to": end})
+        agg = {}
+        for grp in oid:
+            for h in grp.get("history", []):
+                agg[h["t"]] = agg.get(h["t"], 0.0) + float(h["c"])   # 各所OI收盤加總
+        ts = sorted(agg)
+        if len(ts) >= 2:
+            k = min(6, len(ts) - 1); oi_now = agg[ts[-1]]; oi_then = agg[ts[-1 - k]]
+            if oi_then > 0: oi_up = oi_now > oi_then; oi_pct = (oi_now / oi_then - 1) * 100
+    except Exception: pass
+    try:
+        ohl = _execute_coinalyze_request("ohlcv-history", {"symbols": sstr, "interval": cona_int, "from": start, "to": end})
+        agg = {}
+        for grp in ohl:
+            for h in grp.get("history", []):
+                agg[h["t"]] = agg.get(h["t"], 0.0) + (2 * float(h.get("bv", 0)) - float(h.get("v", 0)))  # 各所(買-賣)加總
+        ts = sorted(agg)
+        if len(ts) >= 2:
+            k = min(6, len(ts)); cvd_up = sum(agg[t] for t in ts[-k:]) > 0   # 近k根聚合淨delta
+    except Exception: pass
+    return oi_up, oi_pct, cvd_up, len(syms)
+
 def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
     """裸打「幣」或「幣 多/空 [時框]」→ 仿數據獵手:市場結構象限(OI×CVD)+評分(±10)+方向轉折+適合多/空+建議SL/TP。
     用 bot 自己的 OI/CVD/funding/價格資料,即時、唯讀、不下單、零外部訊號源。
@@ -4360,46 +4411,42 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             r_now = float(cl.iloc[-1] - cl.iloc[-3]); r_prev = float(cl.iloc[-3] - cl.iloc[-5])
             if r_prev < 0 and r_now > 0:   flip = " 🔄剛轉多"
             elif r_prev > 0 and r_now < 0: flip = " 🔄剛轉空"
-        # CVD 方向:OKX taker + 幣安 taker 聚合(真taker跨所方向;免費公開,不碰datahunter)
-        cvd_up = None; cvd_src = "—"; _votes = []
+        # OI+CVD:① Coinalyze 跨所聚合(~9所,bot自己key) → ② OKX真OI/OKX+幣安taker → ③ 量代理
+        oi_up = None; oi_pct = 0.0; oi_src = "無源"; cvd_up = None; cvd_src = "—"
         try:
-            _tkr = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
-                                          {"ccy": coin, "instType": "CONTRACTS",
-                                           "period": ("5m" if tf == "5m" else "1H")})
-            if _tkr and len(_tkr) >= 3:
-                _k = min(6, len(_tkr))
-                _delta = sum(float(r[2]) - float(r[1]) for r in _tkr[:_k])   # OKX 近k根 買-賣
-                _votes.append(1 if _delta > 0 else -1)
+            _ai, _ap, _ac, _nex = _cona_agg(coin, BAR_TO_CONA.get(tf, "1hour"))
+            if _ai is not None: oi_up = _ai; oi_pct = _ap; oi_src = f"聚合{_nex}所"
+            if _ac is not None: cvd_up = _ac; cvd_src = f"聚合{_nex}所"
         except Exception: pass
-        try:
-            _bp = tf.lower() if tf.lower() in ("5m","15m","30m","1h","2h","4h") else "1h"
-            _ls, _tkb = _fetch_binance_ls_taker(symbol_item, _bp)
-            if _tkb is not None:
-                _votes.append(1 if _tkb > 1 else -1)
-        except Exception: pass
-        if _votes:
-            _vs = sum(_votes)
-            cvd_up = (_vs > 0) if _vs != 0 else None
-            cvd_src = "OKX+幣安" if len(_votes) == 2 else "單所taker"
-        if cvd_up is None:   # 退路:OHLCV 量能代理
+        if oi_up is None:   # OI 退路:OKX rubik
+            try:
+                _oid = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/open-interest-volume",
+                                              {"ccy": coin, "period": ("5m" if tf == "5m" else "1H")})
+                if _oid and len(_oid) >= 2:
+                    _k = min(6, len(_oid) - 1); _now = float(_oid[0][1]); _then = float(_oid[_k][1])
+                    if _then > 0: oi_up = bool(_now > _then); oi_pct = (_now / _then - 1) * 100; oi_src = "OKX"
+            except Exception: pass
+        if cvd_up is None:   # CVD 退路:OKX+幣安 taker
+            _votes = []
+            try:
+                _tkr = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
+                                              {"ccy": coin, "instType": "CONTRACTS", "period": ("5m" if tf == "5m" else "1H")})
+                if _tkr and len(_tkr) >= 3:
+                    _k = min(6, len(_tkr)); _votes.append(1 if sum(float(r[2]) - float(r[1]) for r in _tkr[:_k]) > 0 else -1)
+            except Exception: pass
+            try:
+                _bp = tf.lower() if tf.lower() in ("5m","15m","30m","1h","2h","4h") else "1h"
+                _ls, _tkb = _fetch_binance_ls_taker(symbol_item, _bp)
+                if _tkb is not None: _votes.append(1 if _tkb > 1 else -1)
+            except Exception: pass
+            if _votes and sum(_votes) != 0:
+                cvd_up = sum(_votes) > 0; cvd_src = "OKX+幣安"
+        if cvd_up is None:   # CVD 最終退路:OHLCV 量代理
             clv = cl.values; hiv = df["high"].values; lov = df["low"].values; volv = df["vol"].values
-            _den = np.where(hiv == lov, 1.0, hiv - lov)
-            bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
+            _den = np.where(hiv == lov, 1.0, hiv - lov); bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
             _cp = np.cumsum(bpos * volv); _kk = min(6, len(_cp) - 1)
             cvd_up = bool(_cp[-1] > _cp[-1 - _kk]) if len(_cp) > _kk else None
             cvd_src = "量代理"
-        # OI 方向:OKX rubik 真OI(任何幣;period 僅支援 5m/1H/1D,其餘用1H)
-        oi_up = None; oi_pct = 0.0; oi_src = "無源"
-        try:
-            _oiper = "5m" if tf == "5m" else "1H"
-            _oid = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/open-interest-volume",
-                                          {"ccy": coin, "period": _oiper})
-            if _oid and len(_oid) >= 2:
-                _k = min(6, len(_oid) - 1)
-                _now = float(_oid[0][1]); _then = float(_oid[_k][1])   # OKX 新到舊, [ts,oi,vol]
-                if _then > 0:
-                    oi_up = bool(_now > _then); oi_pct = (_now / _then - 1) * 100; oi_src = "OKX真OI"
-        except Exception: pass
         try: fr = fetch_current_funding_rate(inst_id) or 0.0
         except Exception: fr = 0.0
         # 市場結構象限:有真OI用OI×CVD;無真OI退「價格動能×CVD」近似(標OI估)
