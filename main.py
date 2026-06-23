@@ -4360,7 +4360,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             r_now = float(cl.iloc[-1] - cl.iloc[-3]); r_prev = float(cl.iloc[-3] - cl.iloc[-5])
             if r_prev < 0 and r_now > 0:   flip = " 🔄剛轉多"
             elif r_prev > 0 and r_now < 0: flip = " 🔄剛轉空"
-        # CVD 方向:優先 Coinalyze 真CVD,無則 OHLCV taker 代理(任何幣都有)
+        # CVD 方向:OHLCV taker 代理(任何幣都有;Coinalyze在此環境不可靠)
         clv = cl.values; hiv = df["high"].values; lov = df["low"].values; volv = df["vol"].values
         _den = np.where(hiv == lov, 1.0, hiv - lov)
         bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
@@ -4368,20 +4368,18 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
         _kk = min(6, len(cvd_proxy) - 1)
         cvd_up = bool(cvd_proxy[-1] > cvd_proxy[-1 - _kk]) if len(cvd_proxy) > _kk else None
         cvd_src = "量代理"
-        # OI 方向 + 真CVD via Coinalyze(僅 CONA_PERP 清單幣)
-        cona = CONA_PERP.get(symbol_item); cona_int = BAR_TO_CONA.get(tf)
+        # OI 方向:OKX rubik 真OI(任何幣;period 僅支援 5m/1H/1D,其餘用1H)
         oi_up = None; oi_pct = 0.0; oi_src = "無源"
-        if cona and cona_int:
-            end_ts = int(time.time() * 1000); start_ts = end_ts - BAR_SECONDS.get(tf, tf_min * 60) * 12 * 1000
-            try:
-                ois = fetch_open_interest_series(cona, cona_int, start_ts, end_ts)
-                if len(ois) >= 2:
-                    k = min(6, len(ois)); oi_up = bool(ois.iloc[-1] > ois.iloc[-k])
-                    oi_pct = float((ois.iloc[-1] / ois.iloc[-k] - 1) * 100); oi_src = "真OI"
-                cvds = calculate_cumulative_volume_delta(cona, cona_int, start_ts, end_ts)
-                if len(cvds) >= 2:
-                    k = min(6, len(cvds)); cvd_up = bool(cvds.iloc[-1] > cvds.iloc[-k]); cvd_src = "真CVD"
-            except Exception: pass
+        try:
+            _oiper = "5m" if tf == "5m" else "1H"
+            _oid = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/open-interest-volume",
+                                          {"ccy": coin, "period": _oiper})
+            if _oid and len(_oid) >= 2:
+                _k = min(6, len(_oid) - 1)
+                _now = float(_oid[0][1]); _then = float(_oid[_k][1])   # OKX 新到舊, [ts,oi,vol]
+                if _then > 0:
+                    oi_up = bool(_now > _then); oi_pct = (_now / _then - 1) * 100; oi_src = "OKX真OI"
+        except Exception: pass
         try: fr = fetch_current_funding_rate(inst_id) or 0.0
         except Exception: fr = 0.0
         # 市場結構象限:有真OI用OI×CVD;無真OI退「價格動能×CVD」近似(標OI估)
