@@ -4360,14 +4360,34 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             r_now = float(cl.iloc[-1] - cl.iloc[-3]); r_prev = float(cl.iloc[-3] - cl.iloc[-5])
             if r_prev < 0 and r_now > 0:   flip = " 🔄剛轉多"
             elif r_prev > 0 and r_now < 0: flip = " 🔄剛轉空"
-        # CVD 方向:OHLCV taker 代理(任何幣都有;Coinalyze在此環境不可靠)
-        clv = cl.values; hiv = df["high"].values; lov = df["low"].values; volv = df["vol"].values
-        _den = np.where(hiv == lov, 1.0, hiv - lov)
-        bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
-        cvd_proxy = np.cumsum(bpos * volv)
-        _kk = min(6, len(cvd_proxy) - 1)
-        cvd_up = bool(cvd_proxy[-1] > cvd_proxy[-1 - _kk]) if len(cvd_proxy) > _kk else None
-        cvd_src = "量代理"
+        # CVD 方向:OKX taker + 幣安 taker 聚合(真taker跨所方向;免費公開,不碰datahunter)
+        cvd_up = None; cvd_src = "—"; _votes = []
+        try:
+            _tkr = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
+                                          {"ccy": coin, "instType": "CONTRACTS",
+                                           "period": ("5m" if tf == "5m" else "1H")})
+            if _tkr and len(_tkr) >= 3:
+                _k = min(6, len(_tkr))
+                _delta = sum(float(r[2]) - float(r[1]) for r in _tkr[:_k])   # OKX 近k根 買-賣
+                _votes.append(1 if _delta > 0 else -1)
+        except Exception: pass
+        try:
+            _bp = tf.lower() if tf.lower() in ("5m","15m","30m","1h","2h","4h") else "1h"
+            _ls, _tkb = _fetch_binance_ls_taker(symbol_item, _bp)
+            if _tkb is not None:
+                _votes.append(1 if _tkb > 1 else -1)
+        except Exception: pass
+        if _votes:
+            _vs = sum(_votes)
+            cvd_up = (_vs > 0) if _vs != 0 else None
+            cvd_src = "OKX+幣安" if len(_votes) == 2 else "單所taker"
+        if cvd_up is None:   # 退路:OHLCV 量能代理
+            clv = cl.values; hiv = df["high"].values; lov = df["low"].values; volv = df["vol"].values
+            _den = np.where(hiv == lov, 1.0, hiv - lov)
+            bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
+            _cp = np.cumsum(bpos * volv); _kk = min(6, len(_cp) - 1)
+            cvd_up = bool(_cp[-1] > _cp[-1 - _kk]) if len(_cp) > _kk else None
+            cvd_src = "量代理"
         # OI 方向:OKX rubik 真OI(任何幣;period 僅支援 5m/1H/1D,其餘用1H)
         oi_up = None; oi_pct = 0.0; oi_src = "無源"
         try:
