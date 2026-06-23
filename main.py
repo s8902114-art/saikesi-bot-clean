@@ -4483,9 +4483,11 @@ def poll_dc_commands():
                                     _tl = _t.lower()
                                     if _tl in ("多","空","long","short","l","s","做多","做空"): _side = _t
                                     elif _tl in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
-                                _res = judge_coin(_w[0], _side, tf=_tf)
-                                if _res:
-                                    dc_log(_res)
+                                try:
+                                    _res = judge_coin(_w[0], _side, tf=_tf)
+                                    dc_log(_res if _res else f"⚠️ {_w[0].upper()} 無判斷結果(可能非SYMBOLS幣)")
+                                except Exception as _je:
+                                    dc_log(f"⚠️ 判斷錯誤: {type(_je).__name__}: {_je}")
                             continue
                         parts = content.lower().split()
                         cmd   = parts[0].lstrip("!/")   # 統一去掉 ! 或 / 前綴
@@ -4549,9 +4551,11 @@ def poll_dc_commands():
                             for _t in parts[1:]:
                                 if _t in ("多","空","long","short","l","s","做多","做空"): _side = _t
                                 elif _t in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
-                            _res = judge_coin(cmd, _side, tf=_tf)
-                            if _res:
-                                dc_log(_res)
+                            try:
+                                _res = judge_coin(cmd, _side, tf=_tf)
+                                dc_log(_res if _res else f"⚠️ {cmd.upper()} 無判斷結果")
+                            except Exception as _je:
+                                dc_log(f"⚠️ 判斷錯誤: {type(_je).__name__}: {_je}")
 
                         # ── setlive / setpaper ─────────────────────────
                         elif cmd == "setlive":
