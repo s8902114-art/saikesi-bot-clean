@@ -4360,31 +4360,39 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             r_now = float(cl.iloc[-1] - cl.iloc[-3]); r_prev = float(cl.iloc[-3] - cl.iloc[-5])
             if r_prev < 0 and r_now > 0:   flip = " 🔄剛轉多"
             elif r_prev > 0 and r_now < 0: flip = " 🔄剛轉空"
-        # OI / CVD via Coinalyze
+        # CVD 方向:優先 Coinalyze 真CVD,無則 OHLCV taker 代理(任何幣都有)
+        clv = cl.values; hiv = df["high"].values; lov = df["low"].values; volv = df["vol"].values
+        _den = np.where(hiv == lov, 1.0, hiv - lov)
+        bpos = np.where(hiv == lov, 0.0, (clv - lov) / _den * 2 - 1)
+        cvd_proxy = np.cumsum(bpos * volv)
+        _kk = min(6, len(cvd_proxy) - 1)
+        cvd_up = bool(cvd_proxy[-1] > cvd_proxy[-1 - _kk]) if len(cvd_proxy) > _kk else None
+        cvd_src = "量代理"
+        # OI 方向 + 真CVD via Coinalyze(僅 CONA_PERP 清單幣)
         cona = CONA_PERP.get(symbol_item); cona_int = BAR_TO_CONA.get(tf)
-        oi_up = cvd_up = None; oi_pct = 0.0
+        oi_up = None; oi_pct = 0.0; oi_src = "無源"
         if cona and cona_int:
-            end_ts = int(time.time() * 1000); start_ts = end_ts - tf_min * 60 * 1000 * 10
+            end_ts = int(time.time() * 1000); start_ts = end_ts - BAR_SECONDS.get(tf, tf_min * 60) * 12 * 1000
             try:
                 ois = fetch_open_interest_series(cona, cona_int, start_ts, end_ts)
                 if len(ois) >= 2:
-                    k = min(6, len(ois)); oi_up = ois.iloc[-1] > ois.iloc[-k]
-                    oi_pct = (ois.iloc[-1] / ois.iloc[-k] - 1) * 100
-            except Exception: pass
-            try:
+                    k = min(6, len(ois)); oi_up = bool(ois.iloc[-1] > ois.iloc[-k])
+                    oi_pct = float((ois.iloc[-1] / ois.iloc[-k] - 1) * 100); oi_src = "真OI"
                 cvds = calculate_cumulative_volume_delta(cona, cona_int, start_ts, end_ts)
                 if len(cvds) >= 2:
-                    k = min(6, len(cvds)); cvd_up = cvds.iloc[-1] > cvds.iloc[-k]
+                    k = min(6, len(cvds)); cvd_up = bool(cvds.iloc[-1] > cvds.iloc[-k]); cvd_src = "真CVD"
             except Exception: pass
         try: fr = fetch_current_funding_rate(inst_id) or 0.0
         except Exception: fr = 0.0
-        # 市場結構象限(OI×CVD)
-        struct_label = "（OI/CVD 無資料）"; struct_score = 0
-        if oi_up is not None and cvd_up is not None:
-            if   oi_up and cvd_up:           struct_label = "🟢多頭建倉(主動做多)"; struct_score =  24
-            elif oi_up and not cvd_up:       struct_label = "🔴空頭建倉(主動做空)"; struct_score = -24
-            elif (not oi_up) and cvd_up:     struct_label = "🟢空頭平倉(回補,弱多)"; struct_score =   8
+        # 市場結構象限:有真OI用OI×CVD;無真OI退「價格動能×CVD」近似(標OI估)
+        struct_label = "（資料不足）"; struct_score = 0
+        _oi_dir = oi_up if oi_up is not None else (chg1 > 0)
+        if cvd_up is not None:
+            if   _oi_dir and cvd_up:         struct_label = "🟢多頭建倉(主動做多)"; struct_score =  24
+            elif _oi_dir and not cvd_up:     struct_label = "🔴空頭建倉(主動做空)"; struct_score = -24
+            elif (not _oi_dir) and cvd_up:   struct_label = "🟢空頭平倉(回補,弱多)"; struct_score =   8
             else:                            struct_label = "🔴多頭平倉(出場,弱空)"; struct_score =  -8
+            if oi_up is None:                struct_label += "·OI估"
         # 評分(仿數據獵手,正規化~±10)
         s  = struct_score
         s += max(-8.0, min(8.0, chg1 / 1.2))
@@ -4424,7 +4432,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
                     f"(`{abs(price-sl)/price*100:.1f}%` / {r/atr:.1f}ATR)\n"
                     f"　TP1 `${tp1:,.6g}` (2ATR · RR{rr1:.1f})　TP2 `${tp2:,.6g}` (3ATR)")
         return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
-                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}% / CVD {cvd_txt})\n"
+                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}])\n"
                 f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
                 f"{plan}")
     except Exception as e:
