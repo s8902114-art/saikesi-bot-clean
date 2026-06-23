@@ -566,9 +566,13 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     }
 
     reason = _entry_reason(sig.get("source_tag", ""), sig["side"], tf, sig.get("dh_boost", 1.0))
+    try:
+        _judge_brief = judge_coin(coin_name, sig["side"], brief=True)
+    except Exception:
+        _judge_brief = None
     embed_payload = {
         "title": f"{side_emoji} {coin_name} · {tf} {dir_name}",
-        "description": f"**進場原因:** {reason}",
+        "description": f"**進場原因:** {reason}" + (f"\n**順籌碼:** {_judge_brief}" if _judge_brief else ""),
         "color": card_color,
         "fields": [
             {"name": "進場", "value": f"**{sig['entry']}**", "inline": True},
@@ -4323,6 +4327,110 @@ def synchronise_and_wait_next_candle() -> List[str]:
 
 _dc_last_msg_id = None
 
+def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
+    """裸打「幣」或「幣 多/空 [時框]」→ 仿數據獵手:市場結構象限(OI×CVD)+評分(±10)+方向轉折+適合多/空+建議SL/TP。
+    用 bot 自己的 OI/CVD/funding/價格資料,即時、唯讀、不下單、零外部訊號源。
+    支援時框 5m/15m/30m/1H/4H(預設1H)。brief=True 回精簡一行(訊號卡掛載用,不含SL/TP)。"""
+    try:
+        coin = coin_raw.strip().upper()
+        inst_id = f"{coin}-USDT-SWAP"
+        if inst_id not in SYMBOLS:
+            return None
+        symbol_item = SYMBOLS[inst_id]
+        tfmap = {"5":"5m","5m":"5m","15":"15m","15m":"15m","30":"30m","30m":"30m",
+                 "1h":"1H","60":"1H","1":"1H","2h":"2H","4h":"4H","4":"4H"}
+        tf = tfmap.get(str(tf).strip().lower(), "1H")
+        tf_min = {"5m":5,"15m":15,"30m":30,"1H":60,"2H":120,"4H":240}[tf]
+        bars24 = max(2, round(24*60 / tf_min))
+        df = fetch_market_candles(inst_id, tf, min(300, bars24 + 8))
+        if df is None or len(df) < min(bars24 + 2, 25):
+            return f"⚠️ {coin} {tf} 資料不足"
+        cl = df["close"]; price = float(cl.iloc[-1]); b24 = min(bars24, len(cl) - 1)
+        chg1  = (cl.iloc[-1] / cl.iloc[-2]     - 1) * 100
+        chg24 = (cl.iloc[-1] / cl.iloc[-1-b24] - 1) * 100
+        try:
+            btc = fetch_market_candles("BTC-USDT-SWAP", tf, min(300, bars24 + 8))["close"]
+            btc24 = (btc.iloc[-1] / btc.iloc[-1-min(b24, len(btc)-1)] - 1) * 100
+        except Exception:
+            btc24 = 0.0
+        rs = chg24 - btc24
+        # 方向轉折(近3根斜率 vs 前3根)
+        flip = ""
+        if len(cl) >= 5:
+            r_now = float(cl.iloc[-1] - cl.iloc[-3]); r_prev = float(cl.iloc[-3] - cl.iloc[-5])
+            if r_prev < 0 and r_now > 0:   flip = " 🔄剛轉多"
+            elif r_prev > 0 and r_now < 0: flip = " 🔄剛轉空"
+        # OI / CVD via Coinalyze
+        cona = CONA_PERP.get(symbol_item); cona_int = BAR_TO_CONA.get(tf)
+        oi_up = cvd_up = None; oi_pct = 0.0
+        if cona and cona_int:
+            end_ts = int(time.time() * 1000); start_ts = end_ts - tf_min * 60 * 1000 * 10
+            try:
+                ois = fetch_open_interest_series(cona, cona_int, start_ts, end_ts)
+                if len(ois) >= 2:
+                    k = min(6, len(ois)); oi_up = ois.iloc[-1] > ois.iloc[-k]
+                    oi_pct = (ois.iloc[-1] / ois.iloc[-k] - 1) * 100
+            except Exception: pass
+            try:
+                cvds = calculate_cumulative_volume_delta(cona, cona_int, start_ts, end_ts)
+                if len(cvds) >= 2:
+                    k = min(6, len(cvds)); cvd_up = cvds.iloc[-1] > cvds.iloc[-k]
+            except Exception: pass
+        try: fr = fetch_current_funding_rate(inst_id) or 0.0
+        except Exception: fr = 0.0
+        # 市場結構象限(OI×CVD)
+        struct_label = "（OI/CVD 無資料）"; struct_score = 0
+        if oi_up is not None and cvd_up is not None:
+            if   oi_up and cvd_up:           struct_label = "🟢多頭建倉(主動做多)"; struct_score =  24
+            elif oi_up and not cvd_up:       struct_label = "🔴空頭建倉(主動做空)"; struct_score = -24
+            elif (not oi_up) and cvd_up:     struct_label = "🟢空頭平倉(回補,弱多)"; struct_score =   8
+            else:                            struct_label = "🔴多頭平倉(出場,弱空)"; struct_score =  -8
+        # 評分(仿數據獵手,正規化~±10)
+        s  = struct_score
+        s += max(-8.0, min(8.0, chg1 / 1.2))
+        s += max(-5.0, min(5.0, chg24 / 6.0))
+        s += max(-8.0, min(8.0, rs / 3.5))
+        s += max(-4.0, min(4.0, -fr * 1000))
+        norm = int(max(-10, min(10, round(s / 7))))
+        verdict = "🟢 適合做多" if norm >= 5 else "🔴 適合做空" if norm <= -5 else "🟡 中性觀望"
+        align = ""
+        if side_hint:
+            w = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
+            if w == "long":  align = " ✅順" if norm >= 5 else " ⚠️逆籌碼,別追" if norm <= -3 else " ➖訊號弱"
+            if w == "short": align = " ✅順" if norm <= -5 else " ⚠️逆籌碼,別追" if norm >=  3 else " ➖訊號弱"
+        if brief:
+            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}".strip()
+        cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
+        # ATR(14,1H) + 近20根擺動高低 → 建議停損停利(SL=結構或至少1ATR;TP=2~3ATR)
+        hi = df["high"].values; lo = df["low"].values; clv = cl.values
+        _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - clv[:-1]), np.abs(lo[1:] - clv[:-1])))
+        atr = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) else 0.0
+        sw_lo = float(lo[-20:].min()); sw_hi = float(hi[-20:].max())
+        d = None
+        if side_hint:
+            d = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
+        if d is None:
+            d = "long" if norm >= 5 else "short" if norm <= -5 else None
+        plan = ""
+        if d and atr > 0:
+            if d == "long":
+                sl = min(sw_lo - 0.3*atr, price - atr); r = price - sl
+                tp1 = price + 2*atr; tp2 = price + 3*atr
+            else:
+                sl = max(sw_hi + 0.3*atr, price + atr); r = sl - price
+                tp1 = price - 2*atr; tp2 = price - 3*atr
+            rr1 = (abs(tp1 - price) / r) if r > 0 else 0
+            plan = (f"\n📐 建議({'多' if d=='long' else '空'}): 進場 `${price:,.6g}`  停損 `${sl:,.6g}` "
+                    f"(`{abs(price-sl)/price*100:.1f}%` / {r/atr:.1f}ATR)\n"
+                    f"　TP1 `${tp1:,.6g}` (2ATR · RR{rr1:.1f})　TP2 `${tp2:,.6g}` (3ATR)")
+        return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
+                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}% / CVD {cvd_txt})\n"
+                f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
+                f"{plan}")
+    except Exception as e:
+        return f"⚠️ 判斷失敗: {e}"
+
+
 def poll_dc_commands():
     """ 輪詢 Discord 頻道訊息，處理 ! / / 指令 """
     global _PAUSED, _LIVE_MODE, _dc_last_msg_id, POSITION_SLOTS, RISK_PCT, LADDER_STEP_USDT, LADDER_BASE_USDT, OKX_MIN_MMR, BINGX_MAX_RISK_RATE, DAILY_LOSS_PCT, DAILY_STOP_ENABLED, MAX_DIR_SKEW, DIR_BALANCE_ENABLED, CONC_FREE, CONC_RISK_ENABLED
@@ -4355,7 +4463,21 @@ def poll_dc_commands():
                         is_bot  = author.get("bot", False)
                         if msg_id and (not _dc_last_msg_id or int(msg_id) > int(_dc_last_msg_id)):
                             _dc_last_msg_id = msg_id
-                        if is_bot or not (content.startswith("!") or content.startswith("/")):
+                        if is_bot:
+                            continue
+                        if not (content.startswith("!") or content.startswith("/")):
+                            # 裸打「幣」或「幣 多/空 [時框]」→ 順籌碼即時判斷,只認已知幣防誤觸
+                            _w = content.split()
+                            if 1 <= len(_w) <= 3 and _w[0].isascii() and _w[0].isalpha() \
+                               and f"{_w[0].upper()}-USDT-SWAP" in SYMBOLS:
+                                _side = None; _tf = "1H"
+                                for _t in _w[1:]:
+                                    _tl = _t.lower()
+                                    if _tl in ("多","空","long","short","l","s","做多","做空"): _side = _t
+                                    elif _tl in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
+                                _res = judge_coin(_w[0], _side, tf=_tf)
+                                if _res:
+                                    dc_log(_res)
                             continue
                         parts = content.lower().split()
                         cmd   = parts[0].lstrip("!/")   # 統一去掉 ! 或 / 前綴
@@ -4401,6 +4523,7 @@ def poll_dc_commands():
                         elif cmd == "help":
                             dc_log(
                                 "📋 **指令列表**（`!` 或 `/` 前綴皆可）\n"
+                                "**`幣` 或 `幣 空/多 [時框]`** - 順籌碼即時判斷(仿數據獵手:象限+評分±10+方向轉折+SL/TP)，如 `ADA`、`ADA 空`、`ADA 空 15m`(時框預設1H,可5m/15m/30m/1H/4H)\n"
                                 "`!status` - 系統狀態（CVD/ADX/時框開關）\n"
                                 "`!setlive` / `!setpaper` - 切換實盤/模擬模式\n"
                                 "`!pause` / `!resume` - 暫停/恢復掃描\n"
@@ -4411,6 +4534,16 @@ def poll_dc_commands():
                                 "`/margin isolated|cross` - 切換逐倉/全倉模式\n"
                                 "`/exchange okx|bingx on|off` - 開關交易所\n"
                             )
+
+                        # ── 幣順籌碼判斷（!幣 / /幣 也可，如 !ADA 空 15m）────
+                        elif f"{cmd.upper()}-USDT-SWAP" in SYMBOLS:
+                            _side = None; _tf = "1H"
+                            for _t in parts[1:]:
+                                if _t in ("多","空","long","short","l","s","做多","做空"): _side = _t
+                                elif _t in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
+                            _res = judge_coin(cmd, _side, tf=_tf)
+                            if _res:
+                                dc_log(_res)
 
                         # ── setlive / setpaper ─────────────────────────
                         elif cmd == "setlive":
