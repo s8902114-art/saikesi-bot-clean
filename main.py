@@ -4423,6 +4423,29 @@ def _cona_agg(coin: str, cona_int: str):
     except Exception: pass
     return oi_up, oi_pct, cvd_up, len(syms)
 
+def _quick_rank_score(inst_id, tf="1H", btc_chg=0.0):
+    """輕量評分(只抓K線,不打OI/CVD API,供 !top 快速排名)。回 (norm, 象限標籤, price) 或 None。
+    評分=動能(chg1/chg24/相對BTC)+量價CVD代理象限;近似 judge_coin 但不含真OI(快)。"""
+    try:
+        df = fetch_market_candles(inst_id, tf, 60)
+        if df is None or len(df) < 30: return None
+        cl = df["close"].values; price = float(cl[-1])
+        chg1 = (cl[-1]/cl[-2]-1)*100 if len(cl) >= 2 else 0.0
+        n24 = min(24, len(cl)-1); chg24 = (cl[-1]/cl[-1-n24]-1)*100
+        rs = chg24 - btc_chg
+        hi = df["high"].values; lo = df["low"].values; vol = df["vol"].values
+        den = np.where(hi == lo, 1.0, hi-lo); bpos = np.where(hi == lo, 0.0, (cl-lo)/den*2-1)
+        cp = np.cumsum(bpos*vol); kk = min(6, len(cp)-1); cvd_up = bool(cp[-1] > cp[-1-kk])
+        s = max(-8.0, min(8.0, chg1/1.2)) + max(-5.0, min(5.0, chg24/6.0)) + max(-8.0, min(8.0, rs/3.5))
+        if   cvd_up and chg1 > 0:   s += 12; lab = "多頭建倉"
+        elif (not cvd_up) and chg1 < 0: s -= 12; lab = "空頭建倉"
+        elif cvd_up and chg1 <= 0:  s += 4;  lab = "回補弱多"
+        else:                       s -= 4;  lab = "出場弱空"
+        norm = int(max(-10, min(10, round(s/7))))
+        return (norm, lab, price)
+    except Exception:
+        return None
+
 def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
     """裸打「幣」或「幣 多/空 [時框]」→ 仿數據獵手:市場結構象限(OI×CVD)+評分(±10)+方向轉折+適合多/空+建議SL/TP。
     用 bot 自己的 OI/CVD/funding/價格資料,即時、唯讀、不下單、零外部訊號源。
@@ -4643,17 +4666,50 @@ def poll_dc_commands():
                         elif cmd == "help":
                             dc_log(
                                 "📋 **指令列表**（`!` 或 `/` 前綴皆可）\n"
-                                "**`幣` 或 `幣 空/多 [時框]`** - 順籌碼即時判斷(仿數據獵手:象限+評分±10+方向轉折+SL/TP)，如 `ADA`、`ADA 空`、`ADA 空 15m`(時框預設1H,可5m/15m/30m/1H/4H)\n"
-                                "`!status` - 系統狀態（CVD/ADX/時框開關）\n"
-                                "`!setlive` / `!setpaper` - 切換實盤/模擬模式\n"
-                                "`!pause` / `!resume` - 暫停/恢復掃描\n"
-                                "`!risk [%]` - 設定每倉風險百分比（如 !risk 10）\n"
-                                "`/cvd on|off` - 開關 CVD 過濾\n"
-                                "`/adx on|off` - 開關 ADX 過濾\n"
-                                "`/trade [15m|30m|1h|4h|all] on|off` - 開關自動下單\n"
-                                "`/margin isolated|cross` - 切換逐倉/全倉模式\n"
-                                "`/exchange okx|bingx on|off` - 開關交易所\n"
+                                "__即時判斷__\n"
+                                "**`幣` / `幣 空/多 [時框]`** - 順籌碼即時判斷(象限+評分±10+方向轉折+SL/TP)，如 `ADA`、`ADA 空 15m`(時框5m/15m/30m/1H/4H，預設1H)\n"
+                                "**`!top` / `!top 15m`** - 掃全幣，列當前最適合做多/做空各前3名(評分排序)\n"
+                                "__模式 / 掃描__\n"
+                                "`!status` 系統狀態 · `!setlive`/`!setpaper` 實盤/模擬 · `!pause`/`!resume` 暫停/恢復掃描\n"
+                                "__風控__\n"
+                                "`!risk [%]` 每倉風險%（如 `!risk 5`）\n"
+                                "`!dailystop [%]` 當日虧此%停開新倉至隔日UTC（`!dailystop 0`=關閉立即恢復；既有倉照管）\n"
+                                "`!dirskew [n]` 方向平衡：主導方向多 n 倉就擋該向新倉（0=關）\n"
+                                "`!concrisk [n]` 風險預算：同向超 n 倉後新倉風險遞減（0=關）\n"
+                                "`!setladder [U]` 分段複利：每多賺 U 升一級風險\n"
+                                "`!setmmr [%]` OKX 維持保證金率門檻，低於不開新倉\n"
+                                "`!setbingxrisk [%]` BingX 帳戶風險率上限，超過不開新倉\n"
+                                "__過濾 / 開關__\n"
+                                "`/cvd on|off` · `/adx on|off` · `/trade [15m|30m|1h|4h|all] on|off` · `/margin isolated|cross` · `/exchange okx|bingx on|off`\n"
                             )
+
+                        # ── top：掃全幣評分，列做多/做空各前3名 ──────────────
+                        elif cmd == "top":
+                            _ttf = "1H"
+                            for _t in parts[1:]:
+                                if _t in ("5m","15m","30m","1h","4h","2h"): _ttf = _t
+                            dc_log(f"⏳ 掃描評分中({_ttf})…約20-40秒")
+                            try:
+                                _bdf = fetch_market_candles("BTC-USDT-SWAP", _ttf, 60)
+                                _bc = ((_bdf["close"].values[-1]/_bdf["close"].values[-min(24,len(_bdf)-1)]-1)*100) if (_bdf is not None and len(_bdf) > 24) else 0.0
+                                _rows = []
+                                for _sk in list(SYMBOLS.keys())[:60]:
+                                    _qr = _quick_rank_score(_sk, _ttf, _bc)
+                                    if _qr: _rows.append((_sk.replace("-USDT-SWAP",""), _qr[0], _qr[1], _qr[2]))
+                                    time.sleep(0.04)
+                                if not _rows:
+                                    dc_log("⚠️ top:無資料")
+                                else:
+                                    _lg = sorted(_rows, key=lambda x: -x[1])[:3]
+                                    _sh = sorted(_rows, key=lambda x:  x[1])[:3]
+                                    _msg = f"🏆 **當前評分排名** ({_ttf}，掃 {len(_rows)} 幣)\n🟢 **適合做多 前3**\n"
+                                    for c,n,l,p in _lg: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
+                                    _msg += "🔴 **適合做空 前3**\n"
+                                    for c,n,l,p in _sh: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
+                                    _msg += "_(輕量動能評分排名；個別幣詳細順籌碼+SL/TP 請打 `幣`，如 `ADA`)_"
+                                    dc_log(_msg)
+                            except Exception as _te:
+                                dc_log(f"⚠️ top 掃描錯誤: {type(_te).__name__}: {_te}")
 
                         # ── 幣順籌碼判斷（!幣 / /幣 也可，如 !ADA 空 15m）────
                         elif f"{cmd.upper()}-USDT-SWAP" in SYMBOLS:
