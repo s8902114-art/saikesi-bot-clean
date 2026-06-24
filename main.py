@@ -2982,22 +2982,30 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 DH_SHORT_ENABLED = True          # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
 DH_SHORT_MAJOR   = 96            # 大級別2B回看(96根/1天)
 _LS_TAKER_CACHE: Dict[str, Any] = {}   # bsym -> (ts, ls, taker)
+_LS_FAIL = {"streak": 0, "skip_until": 0.0}   # 幣安fapi熔斷:雲端IP常被幣安地理封鎖,連續失敗就停打一段,避免log洪水+timeout拖慢掃描
 def _fetch_binance_ls_taker(symbol_item: str, period: str = "15m"):
-    """Binance 多空人數比 ls + 主動買賣比 taker。快取5分鐘。回傳(ls,taker)或(None,None)。"""
+    """Binance 多空人數比 ls + 主動買賣比 taker。快取5分鐘。回傳(ls,taker)或(None,None)。
+    熔斷:連續5次失敗(多為雲端IP被幣安封鎖)→停打30分鐘,不再洪水log也不卡timeout。"""
     bsym = symbol_item.replace("/", "").upper()   # BTC/USDT -> BTCUSDT
     now = time.time()
     c = _LS_TAKER_CACHE.get(bsym)
     if c and now - c[0] < 300:
         return c[1], c[2]
+    if now < _LS_FAIL["skip_until"]:    # 熔斷中:直接放棄,不打HTTP不log(掃描不卡)
+        return None, None
     try:
         h = {"User-Agent": "Mozilla/5.0"}
-        ls_d = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=10).json()
-        tk_d = requests.get(f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=10).json()
+        ls_d = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=4).json()
+        tk_d = requests.get(f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=4).json()
         ls = float(ls_d[-1]["longShortRatio"]); taker = float(tk_d[-1]["buySellRatio"])
         _LS_TAKER_CACHE[bsym] = (now, ls, taker)
+        _LS_FAIL["streak"] = 0
         return ls, taker
     except Exception as e:
-        print(f"[LS/Taker] {bsym} 取得失敗: {e}")
+        _LS_FAIL["streak"] += 1
+        if _LS_FAIL["streak"] >= 5:
+            _LS_FAIL["skip_until"] = now + 1800
+            print(f"[LS/Taker] 連續失敗→熔斷30分(幣安fapi疑封鎖伺服器IP);DH空/維加斯/逆勢多本段噤聲: {str(e)[:50]}")
         return None, None
 
 
