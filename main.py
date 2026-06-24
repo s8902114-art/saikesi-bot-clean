@@ -4581,7 +4581,8 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             _pts.append(("順勢regime", (price > _e50[-1]) if d == "long" else (price < _e50[-1])))
             _npass = sum(1 for _, ok in _pts if ok)
             _vd = "✅ 可考慮進場" if _npass >= 4 else ("⚠️ 再等訊號" if _npass == 3 else "❌ 別碰")
-            chk = f"\n🎯 **進場檢查 {_npass}/5 → {_vd}**\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
+            _dlab = "🟢做多" if d == "long" else "🔴做空"
+            chk = f"\n🎯 **{_dlab}進場檢查 {_npass}/5 → {_vd}**  _(查另一方向打 `{coin} 多` 或 `{coin} 空`)_\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
             if d == "long":
                 chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
         return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
