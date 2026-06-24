@@ -4564,10 +4564,30 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             plan = (f"\n📐 建議({'多' if d=='long' else '空'}): 進場 `${price:,.6g}`  停損 `${sl:,.6g}` "
                     f"(`{abs(price-sl)/price*100:.1f}%` / {r/atr:.1f}ATR)\n"
                     f"　TP1 `${tp1:,.6g}` (2ATR · RR{rr1:.1f})　TP2 `${tp2:,.6g}` (3ATR)")
+        # ── 進場5點檢查:把分數變成可執行的進場判斷(位置/觸發/停損/賺賠/regime)──
+        chk = ""
+        if d and atr > 0:
+            _cl = cl.values; _op = df["open"].values
+            _e50 = pd.Series(_cl).ewm(span=50, adjust=False).mean().values
+            _pts = []
+            if d == "long":
+                _pts.append(("位置近支撐", (price - sw_lo) <= 2.0*atr))
+                _pts.append(("觸發(收紅創高)", _cl[-1] > _op[-1] and _cl[-1] > _cl[-2]))
+            else:
+                _pts.append(("位置近壓力", (sw_hi - price) <= 2.0*atr))
+                _pts.append(("觸發(收黑破低)", _cl[-1] < _op[-1] and _cl[-1] < _cl[-2]))
+            _pts.append(("停損合理(0.6-12%)", 0.006 <= abs(price-sl)/price <= 0.12))
+            _pts.append(("賺賠比≥1.8", rr1 >= 1.8))
+            _pts.append(("順勢regime", (price > _e50[-1]) if d == "long" else (price < _e50[-1])))
+            _npass = sum(1 for _, ok in _pts if ok)
+            _vd = "✅ 可考慮進場" if _npass >= 4 else ("⚠️ 再等訊號" if _npass == 3 else "❌ 別碰")
+            chk = f"\n🎯 **進場檢查 {_npass}/5 → {_vd}**\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
+            if d == "long":
+                chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
         return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
                 f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}])\n"
                 f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
-                f"{plan}")
+                f"{plan}{chk}")
     except Exception as e:
         return f"⚠️ 判斷失敗: {e}"
 
