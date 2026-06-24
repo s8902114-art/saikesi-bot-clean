@@ -4551,7 +4551,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
         if side_hint:
             d = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
         if d is None:
-            d = "long" if norm >= 5 else "short" if norm <= -5 else None
+            d = "long" if norm >= 5 else "short" if norm <= -5 else ("long" if (norm > 0 or chg1 > 0) else "short")
         plan = ""
         if d and atr > 0:
             if d == "long":
