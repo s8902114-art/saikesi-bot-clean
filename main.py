@@ -3053,6 +3053,27 @@ def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tu
         return False, ""
 
 
+ENGULF_SHORT_ENABLED = True   # 山寨看跌吞噬空(1H,2026-06-24 WF):放量吞噬+價<EMA100下跌regime。3時期樣本外複製(2024Q4牛+43%/2025H1跌-49%/2025H2混,超額vs隨機+0.15一致,牛市靠EMA100閘自動噤聲不流血)。限非主流山寨,純價量不碰OI/CVD,固定2R,SL近高。
+def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
+    """山寨看跌吞噬空(1H):①陰線吞噬前陽線實體 ②量>1.3×近24均量 ③收盤<EMA100(下跌regime) ④在近12根高附近(空頂部)。
+    純價量,3個獨立時期樣本外複製超額vs隨機+0.15。注意:df已去掉未收盤當根,[-1]=最新已收盤。"""
+    try:
+        op = df["open"].values; hi = df["high"].values; cl = df["close"].values
+        vol = df["vol"].values if "vol" in df.columns else None
+        if vol is None or len(cl) < 130: return False, ""
+        ema100 = pd.Series(cl).ewm(span=100, adjust=False).mean().values
+        if not (cl[-1] < ema100[-1]): return False, ""                              # 下跌regime
+        if not (hi[-1] >= hi[-13:-1].max() * 0.997): return False, ""               # 在近12根高附近(頂)
+        if not ((cl[-1] < op[-1]) and (cl[-2] > op[-2]) and (op[-1] >= cl[-2]) and (cl[-1] <= op[-2])):
+            return False, ""                                                         # 看跌吞噬(陰吞前陽實體)
+        va = float(np.mean(vol[-25:-1]))
+        if not (va > 0 and vol[-1] > 1.3 * va): return False, ""                     # 放量
+        return True, "看跌吞噬+放量+價<EMA100"
+    except Exception as e:
+        print(f"[Engulf-Short] {symbol_item} 失敗: {e}")
+        return False, ""
+
+
 OI_SQUEEZE_ENABLED = True   # 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑
 def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_swap_symbol: str):
     """主力建倉壓縮突破(1H):12h窄幅壓縮<3% + 帶量突破range(噴出) + 12h OI升>5%(建倉) + 4H regime順向。
@@ -3696,6 +3717,15 @@ class SykesTradingBot:
             except Exception as _vse:
                 print(f"[Vegas-Short] {symbol_item} 判斷失敗: {_vse}")
 
+        # ── 山寨看跌吞噬空(1H,2026-06-24)：放量吞噬+價<EMA100下跌regime。限非主流山寨,純價量。
+        #   3時期樣本外複製(超額vs隨機+0.15一致),牛市靠EMA100閘自動噤聲不流血。固定2R,SL近高。
+        is_engulf_short = False
+        if ENGULF_SHORT_ENABLED and tf_id == "1H" and symbol_item not in MAJOR_COINS:
+            try:
+                is_engulf_short, _ = _check_engulf_short(symbol_item, df)
+            except Exception as _ese:
+                print(f"[Engulf-Short] {symbol_item} 判斷失敗: {_ese}")
+
         # ── 1H 空單階梯壓力過濾（WF 驗證：靠壓力位才做空, EV +0.182→+0.313）──────
         # 只作用於 1H 空單（15m 多單回測顯示階梯過濾有害，不套用）。
         # C3 空訊號成立後，要求進場價在某條階梯 Fibo 線 ±0.5×ATR 內才放行。
@@ -3907,7 +3937,7 @@ class SykesTradingBot:
         # ★2026-06-15 空單regime閘(實盤診斷:6/7-13空169筆-29;6/8空51筆0%勝-17.8;但6/10跌日空76%勝+11.7)。
         #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。用「價在4H EMA50之下」=靈敏(單日下殺即跌破,抓6/10;
         #   持續上漲時價在EMA50上,擋6/8)。比EMA200斜率快=不會太晚、又不擋掉單日下殺的好空。非DH積極空單適用。
-        if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or (is_short and tf_id == "1H")):
+        if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or is_engulf_short or (is_short and tf_id == "1H")):
             try:
                 _d4s = fetch_market_candles(okx_swap_symbol, "4H")
                 if not _d4s.empty and len(_d4s) > 60:
@@ -3915,7 +3945,7 @@ class SykesTradingBot:
                     _4h_dn = float(_d4s["close"].iloc[-1]) < float(_e50s.iloc[-1])   # 價在4H EMA50之下=下行
                     if not _4h_dn:
                         print(f"[空regime閘] {symbol_item} 4H在EMA50之上(非下行)→擋積極空單")
-                        is_box_short = is_vegas_short = is_macd_short = is_oisq_short = False
+                        is_box_short = is_vegas_short = is_macd_short = is_oisq_short = is_engulf_short = False
                         if tf_id == "1H": is_short = False
             except Exception as _r4e:
                 print(f"[空regime閘] {symbol_item} 失敗(放行): {_r4e}")
@@ -3944,7 +3974,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short
 
         if not combined_long and not combined_short:
             return
@@ -3976,6 +4006,7 @@ class SykesTradingBot:
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
             if is_oisq_short:    _signal_source.append("主力建空")
+            if is_engulf_short:  _signal_source.append("吞噬空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
@@ -4048,6 +4079,9 @@ class SykesTradingBot:
         # box_trend:單一全倉TP at 4R + 達1R保本(check_trailing處理);切線在crypto箱突破被反彈洗,不用。
         if direction == "short" and is_box_short:
             p = {**p, "tp1_mult": 4.0, "tp2_intraday_mult": 4.0, "tp2_swing_mult": 4.0}
+        # 吞噬空：固定 2R 單一目標(回測 2R > 1.5R 早收;高點被拒的空要讓它跑到2R)
+        if direction == "short" and is_engulf_short and not is_box_short:
+            p = {**p, "tp1_mult": 2.0, "tp2_intraday_mult": 2.0, "tp2_swing_mult": 2.0}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
@@ -4067,7 +4101,10 @@ class SykesTradingBot:
             tp1_target = current_close + risk_dist * p["tp1_mult"]
             tp2_target = current_close + risk_dist * tp2_mult
         else:
-            calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
+            if is_engulf_short:
+                calculated_sl = round(float(df["high"].values[-4:].max()) + 0.15 * current_atr, 8)   # 吞噬空:近4根高+0.15ATR(對齊回測)
+            else:
+                calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             risk_pct = abs(calculated_sl - current_close) / current_close
             # 結構高點在現價之下(無效) 或 止損過近(<MIN_SL) → 跳過
             if calculated_sl <= current_close or risk_pct < MIN_SL_PCT:
