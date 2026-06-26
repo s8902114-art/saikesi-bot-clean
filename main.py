@@ -3970,6 +3970,23 @@ class SykesTradingBot:
             except Exception as _pge:
                 print(f"[POC-Gate] {symbol_item} 失敗(放行): {_pge}")
 
+        # ── 擺動低支撐防呆閘(2026-06-27 實盤教訓:ASTER空在0.58上方7.8%/FIL空在0.67上方9.6%被軋)──
+        #   價在近期大支撐(200根擺動低)上方「反彈危險區(1.5~12%,沒跌破=支撐還守)」→擋空。
+        #   POC閘用成交量重心,抓不到swing low這種大支撐;這個補上。跌破支撐(<1.5%)=breakdown放行。
+        if (is_short or is_double_top or is_reson_short or is_macd_short or is_dh_short
+                or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short):
+            try:
+                _lows = df["low"].values; _lb = min(200, len(_lows))
+                _sup = float(_lows[-_lb:].min())
+                if _sup > 0:
+                    _g = (current_close - _sup) / current_close
+                    if 0.015 < _g < 0.12:   # 大支撐上方1.5~12%=反彈危險區→擋空
+                        print(f"[支撐防呆] {symbol_item} 收盤 {current_close:.6g} 在大支撐 {_sup:.6g} 上方 {_g*100:.1f}%(危險區),擋空(防空在支撐被彈)")
+                        is_short = is_double_top = is_reson_short = is_macd_short = False
+                        is_dh_short = is_box_short = is_vegas_short = is_oisq_short = is_engulf_short = False
+            except Exception as _sge:
+                print(f"[支撐防呆] {symbol_item} 失敗(放行): {_sge}")
+
         # ── 籌碼壓力閘(2026-06-21,對稱空單版):不在POC(籌碼壓力)下方追多,除非站上(收盤>POC)。擋追進壓力被打回 ──
         if LONG_POC_GATE_ENABLED and (is_long or is_double_bottom or is_reson_long or is_macd_long or is_oisq_long or is_conv_long):
             try:
