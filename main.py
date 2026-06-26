@@ -3980,8 +3980,10 @@ class SykesTradingBot:
                 _sup = float(_lows[-_lb:].min())
                 if _sup > 0:
                     _g = (current_close - _sup) / current_close
-                    if 0.015 < _g < 0.12:   # 大支撐上方1.5~12%=反彈危險區→擋空
-                        print(f"[支撐防呆] {symbol_item} 收盤 {current_close:.6g} 在大支撐 {_sup:.6g} 上方 {_g*100:.1f}%(危險區),擋空(防空在支撐被彈)")
+                    _o = float(df["open"].values[-1]); _pc = float(df["close"].values[-2])
+                    _rej = (current_close < _o and current_close < _pc)   # 當根明確向下拒絕(吞噬/長黑)=豁免不擋(回測驗證:吞噬空100%保留、EV不變)
+                    if 0.015 < _g < 0.12 and not _rej:   # 貼大支撐1.5~12% 且 非向下拒絕 → 擋空(防平/漲著空在支撐被彈)
+                        print(f"[支撐防呆] {symbol_item} 收盤 {current_close:.6g} 在大支撐 {_sup:.6g} 上方 {_g*100:.1f}%(危險區+非拒絕),擋空")
                         is_short = is_double_top = is_reson_short = is_macd_short = False
                         is_dh_short = is_box_short = is_vegas_short = is_oisq_short = is_engulf_short = False
             except Exception as _sge:
