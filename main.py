@@ -2979,6 +2979,7 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 
 
 # ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
+C3_15M_LONG_ENABLED = False      # 2026-07-01暫關:忠實複刻重測EV-0.078(n=566)且逐期惡化,原宣稱+0.133是裸訊號跟CVD/ls加碼子集混在一起,先關
 DH_SHORT_ENABLED = False         # 2026-07-01暫關:今日重測只驗證吞噬空+MACD空(忠實複刻),DH空未今日驗證,先關到驗完
 # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
 DH_SHORT_MAJOR   = 96            # 大級別2B回看(96根/1天)
@@ -3934,6 +3935,11 @@ class SykesTradingBot:
         # 1H 的多單改由雙底(W底, +0.265) 觸發；C3 做多僅保留 15m（+0.133）。
         # 1H 的 C3 做空（+0.073）與 15m C3 多空不受影響。
         if tf_id == "1H":
+            is_long = False
+        # ── C3 15m/多 暫關(2026-07-01):忠實複刻今日重測(真Binance Vision資料24山寨幣/6期間/含費)
+        #   結果EV-0.078(n=566),且逐期惡化(23Q4+0.345→24Q3-0.403→25H2-0.342)。
+        #   舊文件宣稱+0.133~+0.207是CVD/ls加碼子集的數字,裸C3本身今日測出是負的→先關到查清楚。
+        if tf_id == "15m" and not C3_15M_LONG_ENABLED:
             is_long = False
         # ★2026-06-16 30m C3多 限主流:17幣實測,30m C3多 山寨訓-0.03/驗+0.005=無edge(主流驗+0.173)。
         #   C3順勢型態在山寨無效(同W底),只在 BTC/ETH/SOL 做。MACD/1H C3空 在山寨成立故不限。
