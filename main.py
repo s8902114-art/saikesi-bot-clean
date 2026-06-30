@@ -933,8 +933,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
 
         balance_data = ex.fetch_balance()
         available_usdt = float(balance_data.get("USDT", {}).get("free", 0.0))
-        if available_usdt <= 2.0:   # 最低交易門檻(2026-06-27 由5降到2,小帳戶要能開;配槓桿margin夠,主要是防真零餘額)
-            dc_log(f"⚠️ **實盤交易中斷**: 餘額低於交易門檻 ({available_usdt:.2f} USDT < 2U)")
+        if available_usdt <= 0:   # 2026-06-27 移除人為餘額門檻(用戶要求):只要風險值內+真margin夠就開,實際保證金把關在後面(可用USDT<需要margin才擋)。只防真0餘額
+            dc_log(f"⚠️ **實盤交易中斷**: 帳戶可用餘額為 0")
             return
 
         # ── RISK 公式（基準＝錢包餘額，不含浮動盈虧）────────────────────────
