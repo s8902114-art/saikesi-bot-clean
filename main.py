@@ -2979,7 +2979,8 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 
 
 # ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
-DH_SHORT_ENABLED = True          # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
+DH_SHORT_ENABLED = False         # 2026-07-01暫關:今日重測只驗證吞噬空+MACD空(忠實複刻),DH空未今日驗證,先關到驗完
+# 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
 DH_SHORT_MAJOR   = 96            # 大級別2B回看(96根/1天)
 _LS_TAKER_CACHE: Dict[str, Any] = {}   # "coin|period" -> (ts, ls, taker)
 _LS_FAIL = {"streak": 0, "skip_until": 0.0}   # OKX rubik 熔斷:連續失敗就停打一段,避免log洪水+timeout拖慢掃描
@@ -3058,8 +3059,9 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
 
 
 # ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF +0.193,出場1.5R/3R)──────────────
-VEGAS_SHORT_ENABLED = True   # 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
-BOX_SHORT_ENABLED = True
+VEGAS_SHORT_ENABLED = False  # 2026-07-01暫關:今日未驗證(同上原因)
+BOX_SHORT_ENABLED = False    # 2026-07-01暫關:今日未驗證(同上原因)
+# 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
 def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """箱突破做空：96根窄箱(range<8%)收盤跌破箱底 + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
     try:
@@ -3106,7 +3108,8 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
         return False, ""
 
 
-OI_SQUEEZE_ENABLED = True   # 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑
+OI_SQUEEZE_ENABLED = False  # 2026-07-01暫關:今日忠實複刻重測樣本太小(n=14,3段期間1/3/10筆),EV+0.407不可信,先關到樣本夠大再開
+# 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑
 def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_swap_symbol: str):
     """主力建倉壓縮突破(1H):12h窄幅壓縮<3% + 帶量突破range(噴出) + 12h OI升>5%(建倉) + 4H regime順向。
     coiled spring:壓得越緊彈越大。回 'long'/'short'/None。WF驗+0.309/賺賠3.1/MDD6%/各年正(讓跑出場)。"""
@@ -3141,7 +3144,8 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
         print(f"[OI-Squeeze] {symbol_item} 失敗: {e}")
         return None
 
-CONV_BREAKOUT_ENABLED = True   # 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
+CONV_BREAKOUT_ENABLED = False  # 2026-07-01暫關:今日未驗證(同上原因)
+# 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
 CONV_MAJORS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
 SHORT_POC_GATE_ENABLED = True   # 籌碼支撐閘(2026-06-21 session WF:在POC下方才空,砍掉「支撐上方做空被彈」流血空單,訓-0.025→-0.010)
 LONG_POC_GATE_ENABLED  = True   # 籌碼壓力閘(對稱):收盤要站上POC才做多,擋「追進壓力被打回」(POC主流做多+0.069→+0.095)
