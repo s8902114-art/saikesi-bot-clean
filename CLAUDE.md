@@ -35,9 +35,12 @@
 9. **每日報告部署**:00:00 UTC(台08:00)發Discord復盤(daily_report.py)。
 - ★方法論鐵則:測出負EV要對照基準率(隨機做空-0.38,crypto上漂)→負≠無料,可能是「有edge但蓋不過趨勢」(當確認層)。逆勢空要堆夠MTF+結構+數據才過線。OI建倉=確認層非觸發器,但「緊壓縮+帶量突破+CVD」例外(主力建倉策略)。腳本見上層 `trading-backtest/_vegas_c3_aux.py`/`_comp_improve.py`/`_squeeze_fake.py`/`_breakout_all.py`。
 
-**ls_ratio/taker_ratio 資料源**：Binance `globalLongShortAccountRatio`+`takerlongshortRatio`
-(免費,快取5分,`_fetch_binance_ls_taker`)。DH_SHORT_ENABLED toggle。
-2B檢查在前擋,通過才打API不洗量。
+**ls_ratio/taker_ratio 資料源**：OKX rubik `contracts/long-short-account-ratio`+`taker-volume`
+(免費,快取5分,`_fetch_ls_taker`,舊名 `_fetch_binance_ls_taker` 仍是別名)。
+★2026-06-30 改源:原幣安 fapi 被 Railway 雲端IP地理封鎖→熔斷噤聲 DH空/維加斯/逆勢多,
+改 OKX(bot 既有拉K線的同源,不被封)。OKX rubik period 僅 5m/1H/1D,15m/30m 映到 5m;
+ls=最新一根多空帳戶比,taker=最近3根 buyVol/sellVol。值域與幣安相近(ls~2-3.5),沿用原門檻。
+DH_SHORT_ENABLED toggle。2B檢查在前擋,通過才打API不洗量。
 
 **2026-06-02 新增 數據獵手 CVD（DH_CVD_ENABLED，C方案=加碼非過濾）**：
 - **15m 多 CVD吸收加碼**：不過濾(保留全頻率)，CVD吸收(`合約CVD[-1]<CVD[-4]`)確認時

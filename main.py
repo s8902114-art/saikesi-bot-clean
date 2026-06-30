@@ -2978,35 +2978,59 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
         return (ok, "合約CVD頂背離確認" if ok else "合約CVD無頂背離(非DH空)")
 
 
-# ── 數據獵手做空 + ls_ratio/taker_ratio（Binance 免費端點，快取5分）────────────────
+# ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
 DH_SHORT_ENABLED = True          # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
 DH_SHORT_MAJOR   = 96            # 大級別2B回看(96根/1天)
-_LS_TAKER_CACHE: Dict[str, Any] = {}   # bsym -> (ts, ls, taker)
-_LS_FAIL = {"streak": 0, "skip_until": 0.0}   # 幣安fapi熔斷:雲端IP常被幣安地理封鎖,連續失敗就停打一段,避免log洪水+timeout拖慢掃描
-def _fetch_binance_ls_taker(symbol_item: str, period: str = "15m"):
-    """Binance 多空人數比 ls + 主動買賣比 taker。快取5分鐘。回傳(ls,taker)或(None,None)。
-    熔斷:連續5次失敗(多為雲端IP被幣安封鎖)→停打30分鐘,不再洪水log也不卡timeout。"""
-    bsym = symbol_item.replace("/", "").upper()   # BTC/USDT -> BTCUSDT
+_LS_TAKER_CACHE: Dict[str, Any] = {}   # "coin|period" -> (ts, ls, taker)
+_LS_FAIL = {"streak": 0, "skip_until": 0.0}   # OKX rubik 熔斷:連續失敗就停打一段,避免log洪水+timeout拖慢掃描
+
+def _okx_rubik_period(period: str) -> str:
+    """把策略時框映到 OKX rubik 支援的 period(僅 5m / 1H / 1D)。"""
+    p = period.lower()
+    if p in ("5m", "15m", "30m"): return "5m"
+    if p in ("1d", "1day"):       return "1D"
+    return "1H"
+
+def _fetch_ls_taker(symbol_item: str, period: str = "15m"):
+    """OKX 多空人數比 ls + 主動買賣比 taker。快取5分鐘。回傳(ls,taker)或(None,None)。
+    來源改用 OKX rubik(long-short-account-ratio + taker-volume)取代被雲端IP地理封鎖的幣安 fapi。
+    ls=最新一根多空帳戶比;taker=最近3根 buyVol/sellVol(近似幣安單期 buySellRatio)。
+    熔斷:連續8次失敗→停打30分鐘,不再洪水log也不卡timeout。"""
+    coin = symbol_item.split("/")[0].upper()   # BTC/USDT -> BTC
+    pk = _okx_rubik_period(period)
+    key = f"{coin}|{pk}"
     now = time.time()
-    c = _LS_TAKER_CACHE.get(bsym)
+    c = _LS_TAKER_CACHE.get(key)
     if c and now - c[0] < 300:
         return c[1], c[2]
     if now < _LS_FAIL["skip_until"]:    # 熔斷中:直接放棄,不打HTTP不log(掃描不卡)
         return None, None
     try:
-        h = {"User-Agent": "Mozilla/5.0"}
-        ls_d = requests.get(f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=4).json()
-        tk_d = requests.get(f"https://fapi.binance.com/futures/data/takerlongshortRatio?symbol={bsym}&period={period}&limit=1", headers=h, timeout=4).json()
-        ls = float(ls_d[-1]["longShortRatio"]); taker = float(tk_d[-1]["buySellRatio"])
-        _LS_TAKER_CACHE[bsym] = (now, ls, taker)
+        ls_d = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/long-short-account-ratio",
+                                      {"ccy": coin, "period": pk})            # [[ts, ratio], ...] 新→舊
+        tk_d = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
+                                      {"ccy": coin, "instType": "CONTRACTS", "period": pk})  # [[ts, sellVol, buyVol], ...]
+        if not ls_d or not tk_d:
+            raise ValueError("OKX rubik 空資料")
+        ls = float(ls_d[0][1])                       # data[0]=最新
+        k = min(3, len(tk_d))                        # 聚合最近3根穩定 taker(5m×3≈15m)
+        buy  = sum(float(r[2]) for r in tk_d[:k])
+        sell = sum(float(r[1]) for r in tk_d[:k])
+        if sell <= 0:
+            raise ValueError("sellVol=0")
+        taker = buy / sell
+        _LS_TAKER_CACHE[key] = (now, ls, taker)
         _LS_FAIL["streak"] = 0
         return ls, taker
     except Exception as e:
         _LS_FAIL["streak"] += 1
-        if _LS_FAIL["streak"] >= 5:
+        if _LS_FAIL["streak"] >= 8:
             _LS_FAIL["skip_until"] = now + 1800
-            print(f"[LS/Taker] 連續失敗→熔斷30分(幣安fapi疑封鎖伺服器IP);DH空/維加斯/逆勢多本段噤聲: {str(e)[:50]}")
+            print(f"[LS/Taker] OKX rubik 連續失敗→熔斷30分;DH空/維加斯/逆勢多本段噤聲: {str(e)[:50]}")
         return None, None
+
+# 舊名相容別名(歷史呼叫點仍用 _fetch_binance_ls_taker;來源已改 OKX)
+_fetch_binance_ls_taker = _fetch_ls_taker
 
 
 def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
