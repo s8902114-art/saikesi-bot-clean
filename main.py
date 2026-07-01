@@ -2980,6 +2980,7 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 
 # ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
 C3_15M_LONG_ENABLED = False      # 2026-07-01暫關:忠實複刻重測EV-0.078(n=566)且逐期惡化,原宣稱+0.133是裸訊號跟CVD/ls加碼子集混在一起,先關
+C3_30M_LONG_ENABLED = False      # 2026-07-01暫關:補完Binance Vision主流資料後首測 n=82 EV-0.128(負),與舊「主流驗+0.173」矛盾,先關到查清楚
 RESON_ENABLED = False            # 2026-07-01暫關:忠實複刻重測 雙底多EV-0.082(n=288)/雙頂空EV+0.010幾乎打平(n=279),原宣稱+0.062/+0.187樣本太小(n=8/15)不可信,先關
 DH_SHORT_ENABLED = False         # 2026-07-01暫關:今日重測只驗證吞噬空+MACD空(忠實複刻),DH空未今日驗證,先關到驗完
 # 15m 數據獵手做空(2B+CVD頂背離+OI升+ls>=2.5+taker>1.0)
@@ -3089,7 +3090,7 @@ def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tu
         return False, ""
 
 
-ENGULF_SHORT_ENABLED = True   # 山寨看跌吞噬空(1H,2026-06-24 WF):放量吞噬+價<EMA100下跌regime。3時期樣本外複製(2024Q4牛+43%/2025H1跌-49%/2025H2混,超額vs隨機+0.15一致,牛市靠EMA100閘自動噤聲不流血)。限非主流山寨,純價量不碰OI/CVD,固定2R,SL近高。
+ENGULF_SHORT_ENABLED = True   # 山寨看跌吞噬空(1H,2026-06-24 WF):放量吞噬+價<EMA100下跌regime。★2026-07-01忠實複刻重測(真main.py邏輯/7個不重疊期間23Q4~25H2/n=550):EV+0.176,7/7期全正,PF1.29,轉正式(拿掉觀察標籤)。限非主流山寨,純價量不碰OI/CVD,固定2R,SL近高。
 def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """山寨看跌吞噬空(1H):①陰線吞噬前陽線實體 ②量>1.3×近24均量 ③收盤<EMA100(下跌regime) ④在近12根高附近(空頂部)。
     純價量,3個獨立時期樣本外複製超額vs隨機+0.15。注意:df已去掉未收盤當根,[-1]=最新已收盤。"""
@@ -3945,6 +3946,10 @@ class SykesTradingBot:
         # ★2026-06-16 30m C3多 限主流:17幣實測,30m C3多 山寨訓-0.03/驗+0.005=無edge(主流驗+0.173)。
         #   C3順勢型態在山寨無效(同W底),只在 BTC/ETH/SOL 做。MACD/1H C3空 在山寨成立故不限。
         if tf_id == "30m" and is_long and symbol_item not in ("BTC/USDT", "ETH/USDT", "SOL/USDT"):
+            is_long = False
+        # ★30m C3多(限主流) 暫關(2026-07-01):過去缺BTC/ETH/SOL資料測不了,今晚補完Binance Vision
+        #   資料後首次測出 n=82 EV=-0.128(負),跟舊「主流驗+0.173」矛盾,先關到查清楚哪個對。
+        if tf_id == "30m" and is_long and not C3_30M_LONG_ENABLED:
             is_long = False
 
         # ── 30m/short 停用：分區回測顯示只在 2022 慢熊有效(+0.195)，
