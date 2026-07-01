@@ -4612,7 +4612,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             cvd_src = "量代理"
         try: fr = fetch_current_funding_rate(inst_id) or 0.0
         except Exception: fr = 0.0
-        # 市場結構象限:有真OI用OI×CVD;無真OI退「價格動能×CVD」近似(標OI估)
+        # 市場結構象限:有真OI用OI×CVD(主力建倉,2026-06-23逆推,C3空L2確認已驗證用這套);無真OI退「價格動能×CVD」近似(標OI估)
         struct_label = "（資料不足）"; struct_score = 0
         _oi_dir = oi_up if oi_up is not None else (chg1 > 0)
         if cvd_up is not None:
@@ -4621,6 +4621,17 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             elif (not _oi_dir) and cvd_up:   struct_label = "🟢空頭平倉(回補,弱多)"; struct_score =   8
             else:                            struct_label = "🔴多頭平倉(出場,弱空)"; struct_score =  -8
             if oi_up is None:                struct_label += "·OI估"
+        # ── v2 OI結構(OI×價格,2026-07-01anomaly卡逆推,C3空L1確認已上線用這套)──
+        # 跟上面OI×CVD是「不同象限系統」,不互相取代:上面是籌碼×資金流向,這裡是籌碼×價格。並列顯示不混用。
+        oiv2_label = None; oiv2_score = 0
+        if oi_up is not None and abs(oi_pct) > 0:
+            _strong = abs(oi_pct) >= 3.0
+            _ramp = max(0.0, min(1.0, (abs(oi_pct) - 3.0) / 10.0))
+            _price_up = chg1 > 0
+            if oi_up and _price_up:        oiv2_label = "OI↑價↑(主動做多)"; oiv2_score = (24+_ramp*16) if _strong else 12
+            elif oi_up and not _price_up:  oiv2_label = "OI↑價↓(主動做空)"; oiv2_score = -((24+_ramp*16) if _strong else 12)
+            elif (not oi_up) and _price_up:oiv2_label = "OI↓價↑(空頭出場)"; oiv2_score = (8+_ramp*8) if _strong else 4
+            else:                          oiv2_label = "OI↓價↓(多頭出場)"; oiv2_score = -((8+_ramp*8) if _strong else 4)
         # 評分(仿數據獵手,正規化~±10)
         s  = struct_score
         s += max(-8.0, min(8.0, chg1 / 1.2))
@@ -4634,8 +4645,9 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             w = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
             if w == "long":  align = " ✅順" if norm >= 5 else " ⚠️逆籌碼,別追" if norm <= -3 else " ➖訊號弱"
             if w == "short": align = " ✅順" if norm <= -5 else " ⚠️逆籌碼,別追" if norm >=  3 else " ➖訊號弱"
+        _oiv2_txt = f" · v2:{oiv2_label}({oiv2_score:+.0f})" if oiv2_label else ""
         if brief:
-            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}".strip()
+            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{_oiv2_txt}".strip()
         cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
         # ATR(14,1H) + 近20根擺動高低 → 建議停損停利(SL=結構或至少1ATR;TP=2~3ATR)
         hi = df["high"].values; lo = df["low"].values; clv = cl.values
@@ -4680,8 +4692,9 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             chk = f"\n🎯 **{_dlab}進場檢查 {_npass}/5 → {_vd}**  _(查另一方向打 `{coin} 多` 或 `{coin} 空`)_\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
             if d == "long":
                 chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
+        _oiv2_line = f"\nv2結構(OI×價格): {oiv2_label} `{oiv2_score:+.0f}`" if oiv2_label else ""
         return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
-                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}])\n"
+                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}]){_oiv2_line}\n"
                 f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
                 f"{plan}{chk}")
     except Exception as e:
