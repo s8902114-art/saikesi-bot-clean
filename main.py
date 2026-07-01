@@ -3062,8 +3062,8 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
 
 
 # ── 箱突破做空(15m)：破窄箱底+帶量+CVD↓+OI升(WF +0.193,出場1.5R/3R)──────────────
-VEGAS_SHORT_ENABLED = False  # 2026-07-01暫關:今日未驗證(同上原因)
-BOX_SHORT_ENABLED = False    # 2026-07-01暫關:今日未驗證(同上原因)
+VEGAS_SHORT_ENABLED = False  # 2026-07-01忠實複刻重測確認關閉:7期間n=70,EV-0.229(PF0.65),5/7期負,補資料後更負,維持關
+BOX_SHORT_ENABLED = True     # 2026-07-01忠實複刻重測轉正式:7期間n=2228,EV+0.124,23Q4~24Q1負(早期)、24Q2起連續5期同號正(18個月),非雜訊,開啟
 # 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
 def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """箱突破做空：96根窄箱(range<8%)收盤跌破箱底 + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
