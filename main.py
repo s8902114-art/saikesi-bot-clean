@@ -3147,9 +3147,39 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
         print(f"[OI-Squeeze] {symbol_item} 失敗: {e}")
         return None
 
-CONV_BREAKOUT_ENABLED = False  # 2026-07-01暫關:今日未驗證(同上原因)
+CONV_BREAKOUT_ENABLED = False  # 2026-07-01暫關:今日忠實複刻7期WF(5期有OI資料)EV+0.077/勝38%/PF1.21/4/5期正,
+# 但24Q4牛市+25H1本地資料缺OI欄位完全沒測到(最該驗證牛市表現的兩期是黑箱)→用力回答顧問團一致:先不上,
+# 待牛市段資料補齊再重評。見council-report-20260701c.html。
 # 主流收斂突破+OI升 1H做多(2026-06-21 session WF:T1主流訓+0.19/驗+0.17;限BTC/ETH/SOL)
 CONV_MAJORS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
+
+C3_1H_SHORT_OIV2_ENABLED = True  # 2026-07-01上線:1H C3空+v2 OI評分確認層(anomaly卡逆推公式,結構分級±4~40非固定±24)
+# 7期忠實複刻WF(3期24Q4牛/25H1/25H2,C3空需576/676根慢速EMA故只用連續夠長期間避開單季warmup汙染regime):
+# 裸基底EV+0.027/勝52%/PF1.10(3/3正)→疊確認EV+0.125/勝54%/PF1.46(訊號砍半,25H2 n=9太薄轉負但基底健康)。
+# 用力回答顧問團一致建議:風險等於原策略子集(濾網非新增風險源),上線觀察規則=連續20張成交單對照+0.125/54%,不達標即關。
+def _check_c3short_oiv2_confirm(symbol_item, okx_bar_fmt, df, current_close):
+    """v2 OI評分確認(結構分級±4~40,OI×價格象限,3%為weak/strong門檻):score<=-8才放行做空。
+    見project_dh_anomaly_score.md,忠實對齊_bt_c3short_oiv2_faithful.py的oi_score_v2()。"""
+    try:
+        cona = CONA_PERP.get(symbol_item)
+        if not cona: return True  # 查無OI映射(如非主流幣)→放行,避免OI缺失擋掉全部訊號
+        _e = int(time.time() * 1000); _s = _e - (BAR_SECONDS["1H"] * 4 * 1000)
+        oi = fetch_open_interest_series(cona, okx_bar_fmt, _s, _e)
+        if len(oi) < 2 or oi.iloc[-2] <= 0: return True  # 資料不足→放行(同上,避免誤擋)
+        oi_chg1 = (float(oi.iloc[-1]) / float(oi.iloc[-2]) - 1.0) * 100.0
+        prev_close = float(df["close"].iloc[-2])
+        chg1 = (current_close / prev_close - 1.0) * 100.0 if prev_close > 0 else 0.0
+        strong = abs(oi_chg1) >= 3.0
+        ramp = max(0.0, min(1.0, (abs(oi_chg1) - 3.0) / 10.0))
+        oi_up = oi_chg1 > 0; price_up = chg1 > 0
+        if oi_up and not price_up:      s = -((24 + ramp*16) if strong else 12)   # 主動做空
+        elif (not oi_up) and not price_up: s = -((8 + ramp*8) if strong else 4)   # 多頭出場(弱空)
+        elif oi_up and price_up:        s = (24 + ramp*16) if strong else 12      # 主動做多(逆向,擋)
+        else:                           s = (8 + ramp*8) if strong else 4         # 空頭出場(逆向,擋)
+        return s <= -8
+    except Exception as e:
+        print(f"[C3空OIv2] {symbol_item} 判斷失敗(放行): {e}")
+        return True
 SHORT_POC_GATE_ENABLED = True   # 籌碼支撐閘(2026-06-21 session WF:在POC下方才空,砍掉「支撐上方做空被彈」流血空單,訓-0.025→-0.010)
 LONG_POC_GATE_ENABLED  = True   # 籌碼壓力閘(對稱):收盤要站上POC才做多,擋「追進壓力被打回」(POC主流做多+0.069→+0.095)
 def _vp_poc(df, W=120, nb=50):
@@ -3777,6 +3807,12 @@ class SykesTradingBot:
                 print(f"[Ladder] {symbol_item} 階梯過濾失敗: {_lad_err}")
             # 註：曾試「1H空再加CVD頂背離」，但全期指標顯示 EV 不變(+0.141)、累積R反降
             # (17.6→14.7R)，WF的+0.287是n=40小樣本假象 → 不加，階梯壓力本身才是edge。
+
+            # ── v2 OI評分確認層(2026-07-01):階梯壓力過關後,再要求OI結構同向做空(score<=-8)。
+            if is_short and C3_1H_SHORT_OIV2_ENABLED:
+                if not _check_c3short_oiv2_confirm(symbol_item, okx_bar_fmt, df, current_close):
+                    is_short = False
+                    print(f"[C3空OIv2] {symbol_item} OI結構不同向做空,擋(v2確認未過)")
 
         # ── DOGE/15m 詳細 debug log ─────────────────────────────
         if _dbg:
