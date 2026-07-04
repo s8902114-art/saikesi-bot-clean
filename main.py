@@ -2225,6 +2225,20 @@ def check_trailing_stops_for_real():
             if trade.get("_pos_miss"):
                 trade["_pos_miss"] = 0   # 查到倉=重置誤判計數
 
+            # ── CME缺口單 300h超時平倉(回測同款:逾300根1H未觸SL/TP→收盤價出) ──
+            if (trade.get("exit_strategy") == "cme_gap"
+                    and time.time() - int(trade.get("entry_ts", 0)) > CME_GAP_TIMEOUT_H * 3600):
+                try:
+                    ex.create_market_order(symbol=symbol,
+                        side=("sell" if direction == "long" else "buy"),
+                        amount=float(trade.get("remaining_amount", 0) or 0),
+                        params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                    _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+                    dc_log(f"⏰ {name} CME缺口單300h超時,市價平倉")
+                except Exception as _cte:
+                    print(f"[CME-Gap] {name} 超時平倉失敗: {_cte}")
+                active_real_trades.pop(trade_key, None); save_active_trades(); continue
+
             # ── 山寨多單 OI降早出(OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
                 try:
@@ -2552,6 +2566,25 @@ def check_trailing_stops_for_real():
             pos_side     = trade["pos_side"]
             remaining    = trade["remaining_qty"]
             sl_order_id  = trade["sl_order_id"]
+
+            # ── CME缺口單 300h超時平倉(與OKX段對齊) ──
+            if (trade.get("exit_strategy") == "cme_gap"
+                    and time.time() - int(trade.get("entry_ts", 0)) > CME_GAP_TIMEOUT_H * 3600):
+                try:
+                    _rem = float(trade.get("remaining_qty", 0) or 0)
+                    if _rem > 0:
+                        _r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                            "type": "MARKET", "quantity": str(_rem)}, headers).json()
+                        if _r.get("code", 0) == 0:
+                            try:
+                                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                                               {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
+                            except Exception: pass
+                            dc_log(f"⏰ BingX {bingx_symbol} CME缺口單300h超時,市價平倉")
+                            active_real_trades.pop(trade_key, None); save_active_trades(); continue
+                except Exception as _cte:
+                    print(f"[BingX CME-Gap] {trade_key} 超時平倉失敗: {_cte}")
 
             # ── 山寨多單 OI降早出(預設關,與OKX對齊):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
@@ -5338,6 +5371,159 @@ def adopt_untracked_bingx_positions():
     if adopted: save_active_trades()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ★CME週末缺口策略(2026-07-04,麥門缺口框架移植):主流三幣專屬
+#   合成CME缺口 = 週五21:00 UTC收盤價 vs 週日23:00 UTC開盤價,|缺口|>1.5%才武裝
+#   補滿(1H收盤K觸及缺口遠端)→下一根順「補的方向」市價進場
+#   SL=補滿前12根1H極值±0.05%, TP=2R整倉, 300h超時市價平倉
+#   回測(_maimen_results.txt):BTC+0.306/ETH+0.155/SOL+0.340,7期WF 7/7正,EV+0.268,PF1.49,
+#   12組參數擾動全正;山寨14幣EV-0.007=無效(CME錨定效應,主流限定)
+#   風險=每週總預算 CME_GAP_WEEKLY_RISK 攤給當週武裝幣數(三幣同週末82%同向=同一注)
+CME_GAP_ENABLED     = True
+CME_GAP_COINS       = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+CME_GAP_MIN_PCT     = 0.015      # 缺口門檻1.5%(回測:>1.5%桶才有edge)
+CME_GAP_WEEKLY_RISK = 0.02       # 每週總風險預算2%(用戶2026-07-04拍板),攤給觸發幣
+CME_GAP_TP_R        = 2.0
+CME_GAP_SL_WIN      = 12         # SL=補滿前12根1H極值
+CME_GAP_FILL_WIN_H  = 336        # 缺口有效期2週
+CME_GAP_TIMEOUT_H   = 300        # 進場後300h未觸SL/TP→市價平倉(回測同款)
+CME_GAP_STATE_FILE  = "cme_gap_state.json"
+_cme_state: Dict[str, Any] = {}
+
+def _cme_load_state():
+    global _cme_state
+    try:
+        with open(CME_GAP_STATE_FILE, "r") as f:
+            _cme_state = json.load(f)
+    except Exception:
+        _cme_state = {}
+
+def _cme_save_state():
+    try:
+        with open(CME_GAP_STATE_FILE, "w") as f:
+            json.dump(_cme_state, f)
+    except Exception as e:
+        print(f"[CME-Gap] 存檔失敗: {e}")
+
+def _cme_week_anchor(now: datetime) -> datetime:
+    """最近一個已過去的週五21:00 UTC"""
+    d = now
+    while d.weekday() != 4:   # 4=Friday
+        d -= timedelta(days=1)
+    anchor = d.replace(hour=21, minute=0, second=0, microsecond=0)
+    if anchor > now:
+        anchor -= timedelta(days=7)
+    return anchor
+
+def _cme_gap_poll():
+    """主迴圈每輪呼叫:武裝週末缺口→偵測補滿→進場。全部只看已收1H K(fetch_market_candles已去未收K)。"""
+    global _cme_state
+    if not CME_GAP_ENABLED:
+        return
+    now = datetime.now(timezone.utc)
+    anchor = _cme_week_anchor(now)
+    reopen = anchor + timedelta(hours=50)   # 週日23:00 UTC
+    wk_key = anchor.strftime("%Y-%m-%d")
+
+    # ── 1) 武裝本週缺口(週日23:00後,一次性) ─────────────────────────
+    if now >= reopen + timedelta(hours=1) and _cme_state.get("week") != wk_key:
+        gaps = {}
+        for coin in CME_GAP_COINS:
+            inst = OKX_SWAP.get(coin)
+            if not inst:
+                continue
+            try:
+                df = fetch_market_candles(inst, "1H")
+                if df.empty:
+                    continue
+                fri_bar = df[df.index == (anchor - timedelta(hours=1))]   # 20:00開盤那根的收盤=21:00收盤價
+                sun_bar = df[df.index == reopen]
+                if fri_bar.empty or sun_bar.empty:
+                    continue
+                c = float(fri_bar["close"].iloc[0]); o = float(sun_bar["open"].iloc[0])
+                pct = abs(o - c) / c
+                if pct >= CME_GAP_MIN_PCT:
+                    gaps[coin] = {"lo": min(o, c), "hi": max(o, c),
+                                  "dir": 1 if o > c else -1, "pct": round(pct * 100, 2),
+                                  "filled": False, "traded": False}
+            except Exception as e:
+                print(f"[CME-Gap] {coin} 武裝失敗: {e}")
+        _cme_state = {"week": wk_key, "reopen": reopen.isoformat(), "gaps": gaps, "n_armed": len(gaps)}
+        _cme_save_state()
+        if gaps:
+            msg = " / ".join(f"{k.split('/')[0]} {v['pct']}%{'↑' if v['dir']==1 else '↓'}" for k, v in gaps.items())
+            dc_log(f"🕳️ **CME週末缺口武裝** ({wk_key}週): {msg} · 每幣風險{CME_GAP_WEEKLY_RISK/max(len(gaps),1)*100:.1f}% · 等補滿順向進場")
+
+    # ── 2) 偵測補滿→進場 ────────────────────────────────────────────
+    if _cme_state.get("week") != wk_key or not _cme_state.get("gaps"):
+        return
+    try:
+        reopen_dt = datetime.fromisoformat(_cme_state["reopen"])
+    except Exception:
+        return
+    if now > reopen_dt + timedelta(hours=CME_GAP_FILL_WIN_H):
+        return   # 過期缺口不再追
+    n_armed = int(_cme_state.get("n_armed", 1)) or 1
+    for coin, g in _cme_state["gaps"].items():
+        if g.get("filled") or g.get("traded"):
+            continue
+        inst = OKX_SWAP.get(coin)
+        if not inst:
+            continue
+        try:
+            df = fetch_market_candles(inst, "1H")
+            if df.empty:
+                continue
+            recent = df[df.index >= reopen_dt]
+            if recent.empty:
+                continue
+            fill_i = None
+            his = recent["high"].values; los = recent["low"].values
+            for i in range(len(recent)):
+                if (g["dir"] == 1 and los[i] <= g["lo"]) or (g["dir"] == -1 and his[i] >= g["hi"]):
+                    fill_i = i
+                    break
+            if fill_i is None:
+                continue
+            g["filled"] = True
+            # 只在「補滿K是最近2根已收K」時進場(bot當機錯過就放棄,不追陳舊訊號)
+            if fill_i < len(recent) - 2:
+                g["traded"] = False
+                _cme_save_state()
+                print(f"[CME-Gap] {coin} 補滿但訊號陳舊(第{fill_i}/{len(recent)}根),放棄")
+                continue
+            side = "short" if g["dir"] == 1 else "long"   # 順補的方向
+            fill_pos = df.index.get_indexer([recent.index[fill_i]])[0]
+            w0 = max(0, fill_pos - CME_GAP_SL_WIN + 1)
+            if side == "long":
+                sl = float(df["low"].iloc[w0:fill_pos + 1].min()) * 0.9995
+            else:
+                sl = float(df["high"].iloc[w0:fill_pos + 1].max()) * 1.0005
+            entry = float(df["close"].iloc[-1])
+            risk = (entry - sl) if side == "long" else (sl - entry)
+            if risk <= 0 or risk / entry > 0.12 or risk / entry < 0.002:
+                g["traded"] = True; _cme_save_state()
+                print(f"[CME-Gap] {coin} 風險距離不合格({risk/entry:.3%}),跳過")
+                continue
+            tp = entry + risk * CME_GAP_TP_R * (1 if side == "long" else -1)
+            scale = (CME_GAP_WEEKLY_RISK / n_armed) / max(RISK_PCT, 1e-9)
+            g["traded"] = True
+            _cme_save_state()
+            try:
+                if EXCHANGE_ENABLED.get("okx", True) and not _dir_skew_block(side, "okx"):
+                    execute_okx_trade_pipeline(inst, side, entry, sl, tp, tp, "fixed", "1H",
+                                               position_scale=scale, pyramid_eligible=False,
+                                               exit_strategy="cme_gap")
+                if EXCHANGE_ENABLED.get("bingx", True) and not _dir_skew_block(side, "bingx"):
+                    execute_bingx_trade_pipeline(coin, side, entry, sl, tp, tp, "fixed", "1H",
+                                                 position_scale=scale, exit_strategy="cme_gap")
+                dc_log(f"🕳️ **CME缺口補滿→順向進場** {coin.split('/')[0]} {'做多' if side=='long' else '做空'}"
+                       f" 進場`{entry}` SL`{round(sl,6)}` TP2R`{round(tp,6)}` 風險{CME_GAP_WEEKLY_RISK/n_armed*100:.1f}%·300h超時")
+            except Exception as te:
+                print(f"[CME-Gap] {coin} 下單失敗: {te}")
+        except Exception as e:
+            print(f"[CME-Gap] {coin} 補滿偵測失敗: {e}")
+
 def main_polling_loop():
     """ 交易中樞核心守護進程主迴圈 """
     global _PAUSED, _bot_ref, _INITIAL_BALANCE
@@ -5345,6 +5531,7 @@ def main_polling_loop():
     build_dynamic_symbols()
     # 還原重啟前的倉位追蹤（保本/移動止損續行，解決 redeploy 後追蹤丟失）
     load_active_trades()
+    _cme_load_state()   # CME週末缺口狀態(redeploy不丟武裝中的缺口)
     # 接管現有未追蹤的 OKX 倉位（手動開的/重啟前丟失的）→ 讀既有止損納入自動保本
     adopt_untracked_okx_positions()
     # 接管現有未追蹤的 BingX 倉位（與 OKX adopt 對齊，解決 redeploy 後 BingX 追蹤全失）
@@ -5375,6 +5562,12 @@ def main_polling_loop():
                 continue
 
             check_trailing_stops_for_real()
+
+            # CME週末缺口:武裝/補滿偵測/進場(便宜,只打3幣K線API)
+            try:
+                _cme_gap_poll()
+            except Exception as _ce:
+                print(f"[CME-Gap] 輪詢例外: {_ce}", flush=True)
 
             # 每日 00:00(UTC) 復盤發 Discord(daily_tick 內部每日去重,僅 00:xx 時段建 client)
             try:
