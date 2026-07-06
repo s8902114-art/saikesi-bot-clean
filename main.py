@@ -3041,6 +3041,17 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 
 # ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
 C3_15M_LONG_ENABLED = False      # 2026-07-01暫關:忠實複刻重測EV-0.078(n=566)且逐期惡化,原宣稱+0.133是裸訊號跟CVD/ls加碼子集混在一起,先關
+MACD_LONG_1H_ENABLED = True      # 2026-07-07重測(真4H重採樣,含現役延伸濾<=4ATR):n=54,EV+0.315,PF2.42,5/7期正
+                                 # (23Q4/24Q1/24Q3/24Q4牛/25H2正,只24Q2/25H1負)——樣本不算大但一致性夠,維持開。
+                                 # ★訂正:先前一度誤植成"3/7期正"與15m那版混記,已用同腳本重算確認是5/7,更正。
+MACD_LONG_15M_ENABLED = True     # ★2026-07-07迭代到可用版本(不是關掉了事):原版n=932只3/7期正(24Q2/24Q4牛明顯負)。
+                                 # 逐一排查原因——①主流vs山寨分段測:兩邊問題一樣重,不是山寨拖累(假說推翻)
+                                 # ②延伸濾<=2.5ATR:轉6/7期正但樣本崩到n=75、多數期2-15筆,跟RESON同風險,不敢用
+                                 # ③延伸濾+ADX疊加:兩濾網互相打架,樣本剩個位數且全負,更差,已排除
+                                 # ④★單獨拉高ADX門檻(現有共用突破閘只要求>=20太鬆,盤整也能過)到>=30:
+                                 #   n=462(每期30-101筆,樣本足夠),EV+0.098,一致性3/7→5/7,唯24Q2/24Q4牛仍負
+                                 #   但沒有更差。這是目前最好、樣本又夠大的版本,採用。
+MACD_LONG_15M_ADX_MIN = 30       # 15m MACD多專屬ADX門檻(比共用_adx_trend的20嚴,只套這支不影響W底/MACD空/1H多)
 C3_30M_LONG_ENABLED = False      # 2026-07-01暫關:補完Binance Vision主流資料後首測 n=82 EV-0.128(負),與舊「主流驗+0.173」矛盾,先關到查清楚
 RESON_ENABLED = False            # 2026-07-01暫關:忠實複刻重測 雙底多EV-0.082(n=288)/雙頂空EV+0.010幾乎打平(n=279),原宣稱+0.062/+0.187樣本太小(n=8/15)不可信,先關
 DH_SHORT_ENABLED = False         # 2026-07-01暫關:今日重測只驗證吞噬空+MACD空(忠實複刻),DH空未今日驗證,先關到驗完
@@ -3982,7 +3993,8 @@ class SykesTradingBot:
                     dead = dif.iloc[-2] >= dea.iloc[-2] and dif.iloc[-1] < dea.iloc[-1]
                     # 15m 多 升級:加帶量(2026-06-12)。裸進場太鬆=驗-0.022/MDD92%(線上舊狀);
                     #   +帶量→驗+0.168/勝58%/MDD33%,砍73%雜訊單。tFlow對15m多無增益故不加(便宜上)。
-                    if tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long") and _brk_up:
+                    if MACD_LONG_15M_ENABLED and tf_id == "15m" and trend_up_4h and gold and macd_difslope_ok(dif, "long") and _brk_up \
+                       and current_adx >= MACD_LONG_15M_ADX_MIN:
                         _vol15 = df["vol"].values
                         _va15 = float(np.mean(_vol15[-21:-1])) if len(_vol15) >= 21 else 0.0
                         if _va15 > 0 and _vol15[-1] > 1.5 * _va15:
@@ -4016,7 +4028,7 @@ class SykesTradingBot:
                             if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量+突破
                                 is_macd_short = True; dh_boost = BOOST_MULT
                                 print(f"[MACD空] {symbol_item} 帶量+突破✓ {_tfr}")
-                        if _vol_ok and _brk_up and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
+                        if MACD_LONG_1H_ENABLED and _vol_ok and _brk_up and trend_up_4h and gold and macd_difslope_ok(dif, "long"):
                             # ★延伸濾≤4ATR(2026-06-18):進場離e144>4ATR=噴過頭不追,治COAI/WLD/NEAR追頂。
                             #   WF:1H MACD多 +0.681→+0.905、山寨+0.385→+0.822/MDD3%。只套1H MACD多,不套W底/反轉/15m。
                             _e144 = float(df["close"].ewm(span=144, adjust=False).mean().iloc[-1])
