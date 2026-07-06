@@ -917,7 +917,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
                               tf_id: str = "15m", position_scale: float = 1.0,
                               pyramid_eligible: bool = False,
-                              exit_strategy: str = "") -> None:
+                              exit_strategy: str = "", allow_stack: bool = False) -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1055,12 +1055,20 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # ── 防同幣同向重複加倉（避免訊號反覆觸發把單倉越疊越大）──────────────
         # 原本只檢查總倉數，沒擋「同幣同向已有倉」→ 同一幣每隔冷卻期就再加一筆，
         # 名義/保證金累積成大倉，且止損仍按單筆算 → 實際觸損遠超預算。
-        for _p in positions_raw:
-            if (_p.get("symbol") == symbol_id
-                    and _p.get("side") == trade_side
-                    and abs(float(_p.get("contracts") or 0)) > 0):
-                dc_log(f"⚠️ OKX 跳過 [{symbol_id}]：已有 {trade_side} 倉，不重複加倉")
-                return
+        # ★bugfix 2026-07-06:舊比對 _p["symbol"]==symbol_id 是死代碼——ccxt回統一格式"SOL/USDT:USDT",
+        #   symbol_id是instId"SOL-USDT-SWAP",永遠不相等→6/1上線以來一次沒擋過(7/1-7/4 SOL被同訊號連加3筆
+        #   把均價從75.4墊到79.5,MFE5.7R只實現+0.77)。改成兩邊都正規化成"SOL/USDT"比對。
+        #   趨勢延續的加碼交給_mai_add_on_swing(轉折加碼:守3上限/遞減0.5x/SL跟轉折線,已驗證),不靠盲目再進場。
+        #   allow_stack=True(同訊號平行hf_1r倉,刻意雙倉)豁免,與BingX行為對齊。
+        _base_sym = SYMBOLS.get(symbol_id, symbol_id).split(":")[0]   # → "SOL/USDT"
+        if not allow_stack:
+            for _p in positions_raw:
+                _psym = (_p.get("symbol") or "").split(":")[0]
+                if (_psym == _base_sym
+                        and _p.get("side") == trade_side
+                        and abs(float(_p.get("contracts") or 0)) > 0):
+                    dc_log(f"⚠️ OKX 跳過 [{_base_sym}]：已有 {trade_side} 倉，不重複加倉(趨勢延續由轉折加碼接手)")
+                    return
 
         # 設槓桿：OKX 需帶 mgnMode；全倉(cross)不可帶 posSide，逐倉(isolated)才需要。
         # 若沒設成功，OKX 會用預設低槓桿算保證金 → position_value 大時爆 51008。
@@ -1325,7 +1333,8 @@ def _bingx_request(method: str, path: str, params: dict, headers: dict, timeout:
 def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: float,
                                   stop_loss: float, tp1: float, tp2: float,
                                   exit_mode: str = "fixed", tf_id: str = "15m",
-                                  position_scale: float = 1.0, exit_strategy: str = "") -> None:
+                                  position_scale: float = 1.0, exit_strategy: str = "",
+                                  allow_stack: bool = False) -> None:
     """
     BingX 永續合約下單
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1370,15 +1379,18 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             dc_log("⚠️ BingX 止損距離過小，跳過下單")
             return
 
-        # ── 防同幣同向重複加倉（與 OKX 一致）─────────────────────────────────
+        # ── 防同幣同向重複加倉（與 OKX 一致;allow_stack=同訊號平行hf_1r倉豁免)──────
         _ps = "LONG" if trade_side == "long" else "SHORT"
+        if allow_stack:
+            _ps = None   # 跳過下方查倉去重
         try:
-            pos_q = _bingx_request("GET", "/openApi/swap/v2/user/positions",
-                                   {"symbol": bingx_symbol}, headers).json()
-            for _pp in (pos_q.get("data") or []):
-                if _pp.get("positionSide") == _ps and abs(float(_pp.get("positionAmt") or 0)) > 0:
-                    dc_log(f"⚠️ BingX 跳過 [{bingx_symbol}]：已有 {trade_side} 倉，不重複加倉")
-                    return
+            if _ps is not None:
+                pos_q = _bingx_request("GET", "/openApi/swap/v2/user/positions",
+                                       {"symbol": bingx_symbol}, headers).json()
+                for _pp in (pos_q.get("data") or []):
+                    if _pp.get("positionSide") == _ps and abs(float(_pp.get("positionAmt") or 0)) > 0:
+                        dc_log(f"⚠️ BingX 跳過 [{bingx_symbol}]：已有 {trade_side} 倉，不重複加倉")
+                        return
         except Exception as _pos_err:
             print(f"[BingX] 查持倉失敗（不阻擋下單）: {_pos_err}")
 
@@ -1785,21 +1797,34 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         if direction == "long"  and last_swing >= cur_px:
             print(f"[OKX-trail] {name} pivot≥市價 錯側,不移", flush=True); return False
 
-        _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+        # ★2026-07-06 改 place-before-cancel(與BingX _bingx_replace_sl對齊):舊版先取消舊SL再掛新,
+        #   掛失敗→裸倉且不回復。改為先掛新SL,51088(已有algo)才取消舊再掛一次;最終失敗保留舊SL不裸倉。
         exit_side = "sell" if direction == "long" else "buy"
         try: sl_px = ex.price_to_precision(symbol, last_swing)
         except Exception: sl_px = format(last_swing, "f")
-        res = _place_okx_algo_sl(
-            inst_id=inst_id, side=exit_side,
-            amount=trade["remaining_amount"], sl_trigger_px=sl_px, pos_side=direction)
+        _old_id = trade.get("sl_algo_id")
+        def _place_trail():
+            return _place_okx_algo_sl(
+                inst_id=inst_id, side=exit_side,
+                amount=trade["remaining_amount"], sl_trigger_px=sl_px, pos_side=direction)
+        res = _place_trail()
         nid = (res.get("data") or [{}])[0].get("algoId")
+        if not nid:
+            _sc = str((res.get("data") or [{}])[0].get("sCode") or "")
+            if _sc == "51088":                      # 同倉位已有TP/SL → 先撤舊再掛(此時短暫無SL,立即補掛)
+                _cancel_okx_algo_order(inst_id, _old_id); _old_id = None
+                time.sleep(0.3)
+                res = _place_trail()
+                nid = (res.get("data") or [{}])[0].get("algoId")
         if nid:
+            if _old_id: _cancel_okx_algo_order(inst_id, _old_id)
             trade["sl_algo_id"] = nid
             trade["current_sl"] = last_swing
             msg = f"📐 {name} 轉折移動停損 → {last_swing}"
             dc_log(msg)
             print(f"[SwingTrail] {name} SL→{last_swing}")
             return True
+        print(f"[SwingTrail] {name} 掛新SL失敗(保留舊SL,不裸倉) resp={res}", flush=True)
         return False
     except Exception as e:
         print(f"[SwingTrail] {trade.get('symbol')} 移SL失敗: {e}")
@@ -2021,6 +2046,9 @@ def _px_for_bingx(ex, trade):
 # WF山寨 +0.385→+0.445/勝67%/MDD↓(主流上害,故限非主流)。全程guard,任何失敗回False不影響原移SL/平倉。
 OI_EARLY_EXIT_ENABLED = True     # 山寨多單OI降早出啟用(用戶決定一次上;guard完整、限非主流、參數對齊回測)
 HF_1R_ENABLED = True             # 高頻固定1R平行層:現役3格(1H C3空/1H MACD空/15m MACD多)訊號成立時多開一筆固定1R/0.5R保本獨立倉,各跑各的
+HF_SHORT_ENABLED = False         # ★2026-07-06 關閉高頻層15m/30m MACD空:_bt_hf15_regime.py重測主流3幣23Q4~24Q3四期,
+                                 #   live閘(4H e200斜率)EV-0.020/換4H e50閘-0.004/雙閘+0.002=全在零附近,無edge;
+                                 #   當初+0.103/勝59%是2024Q2單期(該期我重測+0.097吻合,其他期全負)。7/3、7/5 BTC空實盤雙停損即此層。多單(swing_full讓跑)不受影響
 HF_MAJORS_ONLY = True            # ★2026-06-21 瘦身止血:HF MACD層限主流(BTC/ETH/SOL)。我測15m MACD固定1R全層負勝50%,山寨裸MACD是訊號爆量+流血主因;限主流砍~80%量、止血、對齊「動能限主流」。設False回全市值
 
 def _oi_drop_exit_long(trade) -> bool:
@@ -3654,7 +3682,7 @@ class SykesTradingBot:
                     _vok = _vavg > 0 and _vv[-1] > 1.5 * _vavg
                     _hfd = None
                     if _vok and _up4 and _gold and macd_difslope_ok(_hd, "long"): _hfd = "long"
-                    elif _vok and (not _up4) and _dead and macd_difslope_ok(_hd, "short"): _hfd = "short"
+                    elif HF_SHORT_ENABLED and _vok and (not _up4) and _dead and macd_difslope_ok(_hd, "short"): _hfd = "short"
                     if _hfd:
                         _hk = f"{symbol_item}_{tf_id}_{_hfd}_hf"
                         if self.hf_last_bar.get(_hk) != bar_ts:   # 每根K只下一次,防輪詢重複洗單
@@ -4089,12 +4117,14 @@ class SykesTradingBot:
                 _sup = float(_lows[-_lb:].min())
                 if _sup > 0:
                     _g = (current_close - _sup) / current_close
-                    _o = float(df["open"].values[-1]); _pc = float(df["close"].values[-2])
-                    _rej = (current_close < _o and current_close < _pc)   # 當根明確向下拒絕(吞噬/長黑)=豁免不擋(回測驗證:吞噬空100%保留、EV不變)
-                    if 0.015 < _g < 0.12 and not _rej:   # 貼大支撐1.5~12% 且 非向下拒絕 → 擋空(防平/漲著空在支撐被彈)
-                        print(f"[支撐防呆] {symbol_item} 收盤 {current_close:.6g} 在大支撐 {_sup:.6g} 上方 {_g*100:.1f}%(危險區+非拒絕),擋空")
+                    # ★2026-07-06 拿掉「黑K拒絕」豁免:C3空觸發根必為黑K→豁免形同虛設,7/1-7/6實盤被停損空單
+                    #   6/8筆進場在危險區、停損後24h平均反噴3R+(WLFI×2/BICO/GRAM/CC)。
+                    #   回測(_bt_c3short_supguard.py):C3空危險區子集EV-0.05/PF0.80,擋掉後EV+0.125→+0.403/PF1.46→2.24。
+                    #   吞噬空例外保留(_bt_engulf_supguard.py:危險區恰是吞噬edge所在,+0.212 vs 圈外+0.063),不在封鎖名單。
+                    if 0.015 < _g < 0.12:   # 貼大支撐1.5~12% → 擋空(吞噬空豁免)
+                        print(f"[支撐防呆] {symbol_item} 收盤 {current_close:.6g} 在大支撐 {_sup:.6g} 上方 {_g*100:.1f}%(危險區),擋空(吞噬空豁免)")
                         is_short = is_double_top = is_reson_short = is_macd_short = False
-                        is_dh_short = is_box_short = is_vegas_short = is_oisq_short = is_engulf_short = False
+                        is_dh_short = is_box_short = is_vegas_short = is_oisq_short = False
             except Exception as _sge:
                 print(f"[支撐防呆] {symbol_item} 失敗(放行): {_sge}")
 
@@ -4387,12 +4417,14 @@ class SykesTradingBot:
                             execute_okx_trade_pipeline(
                                 okx_swap_symbol, direction, current_close,
                                 _hf_sl, _hf_tp, _hf_tp, p["exit_mode"], tf_id,
-                                position_scale=1.0, pyramid_eligible=False, exit_strategy="hf_1r")
+                                position_scale=1.0, pyramid_eligible=False, exit_strategy="hf_1r",
+                                allow_stack=True)   # 同訊號平行倉=刻意雙倉,豁免同向去重
                         if EXCHANGE_ENABLED.get("bingx", True):
                             execute_bingx_trade_pipeline(
                                 symbol_item, direction, current_close,
                                 _hf_sl, _hf_tp, _hf_tp, p["exit_mode"], tf_id,
-                                position_scale=1.0, exit_strategy="hf_1r")
+                                position_scale=1.0, exit_strategy="hf_1r",
+                                allow_stack=True)
                         dc_log(f"⚡ 高頻固定1R平行倉:{symbol_item} {tf_id} {direction} TP@1R=`{_hf_tp}`")
                     except Exception as _hfe:
                         print(f"[HF-1R] {symbol_item} 平行倉失敗: {_hfe}")
