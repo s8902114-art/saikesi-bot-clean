@@ -5182,6 +5182,64 @@ def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOV
         print(f"[SYMBOLS] OKX 漲跌幅榜抓取失敗: {e}", flush=True)
         return []
 
+# ★2026-07-07:OI異常增長榜(用戶指出:主力安靜建倉時價格不大動,不會進漲跌幅榜,
+#   OI壓縮突破策略要抓的正是這種「還沒噴」的幣→漲跌幅榜結構性抓不到,需要獨立用OI變化篩選)
+OI_MOVERS_N = 20                # OI增幅前N名加入掃描
+OI_MOVERS_WINDOW_H = 12         # 對齊_check_oi_squeeze的12h壓縮窗
+_oi_history: Dict[str, list] = {}   # instId -> [(ts, oiUsd), ...] 只留約OI_MOVERS_WINDOW_H+1小時,記憶體內即可(不需存檔)
+
+def _fetch_okx_oi_movers(top_n: int = OI_MOVERS_N, window_h: int = OI_MOVERS_WINDOW_H) -> list:
+    """OKX全市場USDT永續OI批量查詢(一次API涵蓋~400個合約,跟漲跌幅榜同等級便宜),
+    用內建歷史(_oi_history)算過去window_h小時OI%增幅,回傳增幅最大的top_n個inst_id。
+    第一次呼叫(歷史不足window_h)回傳[](還沒有基準點可比,下一輪才有資料)。"""
+    global _oi_history
+    try:
+        r = requests.get("https://www.okx.com/api/v5/public/open-interest",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code != 200:
+            print(f"[SYMBOLS] OKX OI榜 HTTP {r.status_code}", flush=True); return []
+        now = time.time()
+        cutoff = now - window_h * 3600
+        seen = set()
+        for row in r.json().get("data", []):
+            inst = row.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
+                continue
+            try:
+                oi_usd = float(row.get("oiUsd", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+            if oi_usd <= 0:
+                continue
+            seen.add(inst)
+            hist = _oi_history.setdefault(inst, [])
+            hist.append((now, oi_usd))
+            _oi_history[inst] = [(t, v) for (t, v) in hist if t >= cutoff - 3600] or [(now, oi_usd)]
+        # 清掉本輪沒回傳的舊inst(下架/資料異常),避免_oi_history無限增長
+        for inst in list(_oi_history.keys()):
+            if inst not in seen:
+                del _oi_history[inst]
+        gains = []
+        for inst, hist in _oi_history.items():
+            if len(hist) < 2:
+                continue
+            oldest_t, oldest_v = hist[0]
+            _, latest_v = hist[-1]
+            if oldest_t > cutoff + 3600 or oldest_v <= 0:   # 歷史還不夠window_h小時,基準點太新不可信
+                continue
+            pct = (latest_v - oldest_v) / oldest_v
+            gains.append((inst, pct))
+        if not gains:
+            print(f"[SYMBOLS] OI榜:歷史累積中(需{window_h}h),本輪暫無結果", flush=True)
+            return []
+        gains.sort(key=lambda x: x[1], reverse=True)
+        top = [g[0] for g in gains[:top_n]]
+        print(f"[SYMBOLS] OKX OI增長榜:前{len(top)}名(window={window_h}h,追蹤{len(_oi_history)}幣)", flush=True)
+        return top
+    except Exception as e:
+        print(f"[SYMBOLS] OKX OI榜抓取失敗: {e}", flush=True)
+        return []
+
 def build_dynamic_symbols() -> bool:
     """
     重建 SYMBOLS + OKX_SWAP：
@@ -5261,11 +5319,13 @@ def build_dynamic_symbols() -> bool:
     return True
 
 def refresh_top_movers_only() -> bool:
-    """★2026-07-07:漲跌幅榜輕量獨立刷新(只打OKX ticker,不碰CoinGecko/OKX合約列表)。
-    每次都是「市值前100底池(_top100_base_symbols) + 本輪最新漲跌幅榜」整批重組,
+    """★2026-07-07:漲跌幅榜+OI增長榜 輕量獨立刷新(只打OKX輕量API,不碰CoinGecko/OKX合約列表)。
+    每次都是「市值前100底池(_top100_base_symbols) + 本輪漲跌幅榜 + 本輪OI增長榜」整批重組,
     不是只增不減——否則清單會逐小時膨脹,scan負擔跟著漲(用戶要求railway用量別爆炸)。
-    目的:漲跌幅是24h滾動即時排名,原本綁在24h全量更新週期太慢——幣中途暴衝完就落幕,
-    整段時間都不在掃描清單裡=不是訊號沒抓到,是幣種根本沒進掃描池。"""
+    目的:
+    ①漲跌幅是24h滾動即時排名,原本綁在24h全量更新週期太慢——幣中途暴衝完就落幕,整段時間都不在掃描清單裡。
+    ②★用戶指出:主力安靜建倉時價格不大動,結構性不會進漲跌幅榜——OI壓縮突破要抓的正是這種「還沒噴」的幣,
+      漲跌幅榜這個篩選機制天生抓不到,需要獨立用OI增幅篩(_fetch_okx_oi_movers)補上這塊掃描盲區。"""
     global SYMBOLS, OKX_SWAP, _movers_last_updated
     if not _top100_base_symbols:
         return False   # 還沒跑過一次全量更新,沒有底池可組,交給下次全量更新處理
@@ -5276,18 +5336,24 @@ def refresh_top_movers_only() -> bool:
         STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDD", "USDP"}
         merged: Dict[str, str] = dict(_top100_base_symbols)   # 底池固定不變
         n_base = len(merged)
+        n_price_added = 0; n_oi_added = 0
         for inst_id in _fetch_okx_top_movers():
             if inst_id in okx_swaps and inst_id not in merged:
                 coin = inst_id.split("-")[0]
                 if coin not in STABLECOINS:
-                    merged[inst_id] = f"{coin}/USDT"
+                    merged[inst_id] = f"{coin}/USDT"; n_price_added += 1
+        for inst_id in _fetch_okx_oi_movers():
+            if inst_id in okx_swaps and inst_id not in merged:
+                coin = inst_id.split("-")[0]
+                if coin not in STABLECOINS:
+                    merged[inst_id] = f"{coin}/USDT"; n_oi_added += 1
         SYMBOLS = merged
         OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
         _movers_last_updated = time.time()
-        print(f"[SYMBOLS] 漲跌幅榜輕量刷新:底池{n_base}+漲跌幅榜疊加,共{len(SYMBOLS)}個(整批重組,非累加)", flush=True)
+        print(f"[SYMBOLS] 輕量刷新:底池{n_base}+漲跌幅{n_price_added}+OI增長{n_oi_added},共{len(SYMBOLS)}個(整批重組,非累加)", flush=True)
         return True
     except Exception as e:
-        print(f"[SYMBOLS] 漲跌幅榜輕量刷新失敗(沿用舊列表): {e}", flush=True)
+        print(f"[SYMBOLS] 輕量刷新失敗(沿用舊列表): {e}", flush=True)
         return False
 
 def _okx_fetch_algo_sl(inst_id: str):
