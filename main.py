@@ -269,7 +269,14 @@ OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 # 動態幣種列表狀態
 _SYMBOLS_FALLBACK: Dict[str, str] = dict(SYMBOLS)   # 硬編碼備援
 _SYMBOLS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbols_cache.json")
-_symbols_last_updated: float = 0.0   # UNIX timestamp，0 = 從未更新
+_symbols_last_updated: float = 0.0   # UNIX timestamp，0 = 從未更新(CoinGecko市值前100,慢變動,維持24h週期)
+_top100_base_symbols: Dict[str, str] = {}  # ★2026-07-07:市值前100的純淨底池(不含漲跌幅榜疊加),
+                                            # 讓輕量刷新能「整批換掉」漲跌幅榜疊加部分而非只增不減(防清單無限膨脹)
+_movers_last_updated: float = 0.0    # ★2026-07-07:漲跌幅榜獨立計時,原本綁在24h全量更新裡太慢
+                                      # (幣中途暴衝完全落幕才輪到刷新=整段行情看不到,不是訊號漏抓是幣種根本沒進掃描清單)
+                                      # 漲跌幅榜只打1支OKX輕量API(跟現役K線/OI查詢同等級),獨立用MOVERS_REFRESH_SEC刷新
+                                      # 不必re-hit CoinGecko(該API有速率限制,市值排名本就慢變動不需要常刷)
+MOVERS_REFRESH_SEC = 3600             # 漲跌幅榜每1小時刷新(對齊1H K棒週期,新增負擔=每小時多1支OKX ticker呼叫,可忽略)
 
 CONA_SPOT: Dict[str, str] = {
 "BTC/USDT": "BTCUSDT.A", "ETH/USDT": "ETHUSDT.A", "SOL/USDT": "SOLUSDT.A",
@@ -5218,6 +5225,9 @@ def build_dynamic_symbols() -> bool:
         if inst_id in okx_swaps:
             new_symbols[inst_id] = f"{coin}/USDT"
 
+    global _top100_base_symbols
+    _top100_base_symbols = dict(new_symbols)   # 存純淨底池,供輕量刷新用(見refresh_top_movers_only)
+
     # 加每日漲跌幅榜(配流動性門檻)→ 擴廣度,波動在哪訊號在哪(2026-06-13)
     _n_before = len(new_symbols)
     for inst_id in _fetch_okx_top_movers():
@@ -5246,7 +5256,39 @@ def build_dynamic_symbols() -> bool:
     msg = f"🔄 幣種列表已動態更新：市值前100 × OKX 永續，共 **{len(SYMBOLS)}** 個"
     print(f"[SYMBOLS] ✅ {msg}", flush=True)
     dc_log(msg)
+    global _movers_last_updated
+    _movers_last_updated = time.time()   # 全量更新已含最新漲跌幅榜,重置獨立計時避免立刻又觸發輕量刷新
     return True
+
+def refresh_top_movers_only() -> bool:
+    """★2026-07-07:漲跌幅榜輕量獨立刷新(只打OKX ticker,不碰CoinGecko/OKX合約列表)。
+    每次都是「市值前100底池(_top100_base_symbols) + 本輪最新漲跌幅榜」整批重組,
+    不是只增不減——否則清單會逐小時膨脹,scan負擔跟著漲(用戶要求railway用量別爆炸)。
+    目的:漲跌幅是24h滾動即時排名,原本綁在24h全量更新週期太慢——幣中途暴衝完就落幕,
+    整段時間都不在掃描清單裡=不是訊號沒抓到,是幣種根本沒進掃描池。"""
+    global SYMBOLS, OKX_SWAP, _movers_last_updated
+    if not _top100_base_symbols:
+        return False   # 還沒跑過一次全量更新,沒有底池可組,交給下次全量更新處理
+    try:
+        okx_swaps = _fetch_okx_swap_set()
+        if not okx_swaps:
+            return False   # 保守:抓不到合約列表就沿用舊列表,不動SYMBOLS
+        STABLECOINS = {"USDT", "USDC", "BUSD", "DAI", "TUSD", "FDUSD", "USDD", "USDP"}
+        merged: Dict[str, str] = dict(_top100_base_symbols)   # 底池固定不變
+        n_base = len(merged)
+        for inst_id in _fetch_okx_top_movers():
+            if inst_id in okx_swaps and inst_id not in merged:
+                coin = inst_id.split("-")[0]
+                if coin not in STABLECOINS:
+                    merged[inst_id] = f"{coin}/USDT"
+        SYMBOLS = merged
+        OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
+        _movers_last_updated = time.time()
+        print(f"[SYMBOLS] 漲跌幅榜輕量刷新:底池{n_base}+漲跌幅榜疊加,共{len(SYMBOLS)}個(整批重組,非累加)", flush=True)
+        return True
+    except Exception as e:
+        print(f"[SYMBOLS] 漲跌幅榜輕量刷新失敗(沿用舊列表): {e}", flush=True)
+        return False
 
 def _okx_fetch_algo_sl(inst_id: str):
     """讀該 instId 第一個 conditional 止損 algo 單，回傳 (algoId, slTriggerPx)；無則 (None,None)。"""
@@ -5640,10 +5682,14 @@ def main_polling_loop():
             except Exception as _re:
                 print(f"[DailyReport] 失敗: {_re}", flush=True)
 
-            # 每日自動更新幣種列表（1天 = 86400秒)：market cap 變動小,但漲跌幅榜需日更才有意義
+            # 每日自動更新幣種列表（1天 = 86400秒)：CoinGecko市值前100慢變動,含合約列表全量重建
             if time.time() - _symbols_last_updated > 86400:
-                print("[SYMBOLS] 距上次更新超過1天，自動重新抓取(含漲跌幅榜)...", flush=True)
+                print("[SYMBOLS] 距上次全量更新超過1天，自動重新抓取(市值前100+漲跌幅榜)...", flush=True)
                 build_dynamic_symbols()
+            # ★2026-07-07:漲跌幅榜獨立輕量刷新(MOVERS_REFRESH_SEC=1H),不等24h全量週期
+            #   只打1支OKX ticker API,不碰CoinGecko,負擔可忽略;治「幣中途暴衝完落幕整段沒進掃描池」
+            elif time.time() - _movers_last_updated > MOVERS_REFRESH_SEC:
+                refresh_top_movers_only()
 
             for tf in active_tfs_to_run:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
