@@ -3183,23 +3183,27 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
         return False, ""
 
 
-OI_SQUEEZE_ENABLED = True   # ★2026-07-07迭代重開(僅空單,見下方OI_SQUEEZE_SHORT_ONLY/_check_oi_squeeze開頭註解):
-                            # 原全市值多空合測n=14太小不可信;拆開4象限(多空×主流山寨)找到空單鬆門檻版本
-                            # n=125/EV+0.222/PF1.80/5-7期正,12組鄰近參數掃描穩定。比照C3空OIv2上線慣例:
-                            # 觀察前20-30張真實成交,對照+0.18~0.22預期不達標即關。
+OI_SQUEEZE_ENABLED = True   # ★2026-07-07迭代重開(多空雙向,見_check_oi_squeeze開頭+上方門檻常數註解):
+                            # 原全市值多空合測n=14太小不可信;拆開4象限(多空×主流山寨)找到各自鬆門檻版本
+                            # 空:OI2%/vol2.0x n=125/EV+0.222/PF1.80/5-7期正;多:OI1.5%/vol2.25x n=377/EV+0.103/PF1.41/6-7期正
+                            # 兩邊都掃過12組鄰近參數確認穩定。比照C3空OIv2上線慣例:
+                            # 觀察前20-30張真實成交,對照預期EV不達標即關。
 # 主力建倉壓縮突破(1H,2026-06-13):12h壓縮<3%+帶量突破+OI升+4H regime,讓跑
-OI_SQUEEZE_SHORT_ONLY = True     # ★2026-07-07迭代結論:多單4次嘗試都救不起來(EV~0~+0.08,一致性≤4/7)先關;
-                                  # 空單原版(OI升5%/帶量1.5x)訊號被OI門檻砍掉96%只剩n=4-37小樣本;鬆OI到2%恢復樣本後
-                                  # 空單反而在放寬中段(vol改2.0x)最穩:n=125,EV+0.222,PF1.80,5/7期正,12組鄰近參數
-                                  # 掃描全部落在EV+0.18~0.28/5-7期正(非單一運氣格)。多單任何鬆法都沒到這個標準,關閉。
-OI_SQUEEZE_OI_RISE_MIN = 0.02     # 原0.05鬆到0.02(空單用,多單已停用不受影響)
-OI_SQUEEZE_VOL_MULT = 2.0        # 原1.5x收緊到2.0x(要更明確的噴出才進,空單用)
+# ★2026-07-07訂正:先前只給空單做12組(OI×vol)鄰近參數網格、多單只草草試4次就判死刑不公平。
+# 補測多單同一套網格後發現多單其實也有能用版本,兩邊都開,各自獨立門檻:
+#   空單: OI>=2% + 帶量>=2.0x → n=125/EV+0.222/PF1.80/5-7期正
+#   多單: OI>=1.5% + 帶量>=2.25x → n=377/EV+0.103/PF1.41/6-7期正(比空單一致性還好),每期n=32-121不算薄
+#   兩邊都掃過鄰近12組參數確認非單一運氣格。
+OI_SQUEEZE_OI_RISE_MIN_SHORT = 0.02
+OI_SQUEEZE_VOL_MULT_SHORT = 2.0
+OI_SQUEEZE_OI_RISE_MIN_LONG = 0.015
+OI_SQUEEZE_VOL_MULT_LONG = 2.25
 
 def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_swap_symbol: str):
     """主力建倉壓縮突破(1H):12h窄幅壓縮<3% + 帶量突破range(噴出) + 12h OI升(建倉) + 4H regime順向。
     coiled spring:壓得越緊彈越大。回 'long'/'short'/None。
-    ★2026-07-07:多單4次迭代測試(全市值/主流/山寨/濾網組合)找不到可信版本,已限只做空(OI_SQUEEZE_SHORT_ONLY)。
-    空單門檻改鬆OI 5%→2%、收緊帶量1.5x→2.0x:n=125/EV+0.222/PF1.80/5-7期正,12組鄰近參數掃描穩定(非單一運氣格)。"""
+    ★2026-07-07:多空各自迭代出獨立門檻(見上方常數),空單OI2%/vol2.0x、多單OI1.5%/vol2.25x,
+    都用12組鄰近參數網格驗證過穩定非單一運氣格,詳見_bt_oisq_iterate*.py。"""
     try:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values; vol = df["vol"].values
         if len(cl) < 25: return None
@@ -3207,16 +3211,15 @@ def _check_oi_squeeze(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_
         if rl <= 0 or (rh - rl) / rl > 0.03: return None              # 12h壓縮<3%(coiled spring)
         side = "long" if cl[-1] > rh else ("short" if cl[-1] < rl else None)
         if side is None: return None
-        if OI_SQUEEZE_SHORT_ONLY and side != "short": return None
         va = float(np.mean(vol[-21:-1]))
-        _vol_mult = OI_SQUEEZE_VOL_MULT if side == "short" else 1.5
+        _vol_mult = OI_SQUEEZE_VOL_MULT_SHORT if side == "short" else OI_SQUEEZE_VOL_MULT_LONG
         if not (va > 0 and vol[-1] > _vol_mult * va): return None     # 帶量突破=噴出
         cona = CONA_PERP.get(symbol_item)
         if not cona: return None
         _e = int(time.time() * 1000); _s = _e - (BAR_SECONDS["1H"] * 16 * 1000)
         oi = fetch_open_interest_series(cona, okx_bar_fmt, _s, _e)
         if len(oi) < 13 or oi.iloc[-13] <= 0: return None
-        _oi_min = OI_SQUEEZE_OI_RISE_MIN if side == "short" else 0.05
+        _oi_min = OI_SQUEEZE_OI_RISE_MIN_SHORT if side == "short" else OI_SQUEEZE_OI_RISE_MIN_LONG
         if (oi.iloc[-1] - oi.iloc[-13]) / oi.iloc[-13] < _oi_min: return None   # 12h OI升(建倉)
         # CVD確認方向(防假突破:真突破帶主動流,假突破沒)。多需CVD↑、空需CVD↓。WF:勝率43%→50%、+0.309→+0.395。
         _ce = int(time.time() * 1000); _cs = _ce - (BAR_SECONDS["1H"] * 6 * 1000)
