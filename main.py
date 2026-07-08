@@ -4959,8 +4959,21 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
                 chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
             else:
                 chk += "\n　_(crypto空單歷史結構性偏弱,務必嚴設停損,5點少一個就放掉)_"
+        # ★2026-07-08(用戶反映"完全看不懂"):白話總結放最前面,下面術語留給想細看的人。
+        #   下面的「進場」建議是給全新開倉用的,已經有倉位的人不用照這個動作,只是給個方向感。
+        _dword = "多" if d == "long" else "空" if d == "short" else None
+        if d and atr > 0:
+            if _npass >= 4:
+                tldr = f"💡白話:目前偏{_dword}且條件到位。新倉可以考慮；如果你已經有{_dword}單,這代表結構還撐得住,可以續抱。"
+            elif _npass == 3:
+                tldr = f"💡白話:偏{_dword}但訊號不夠齊。新倉先別急;如果你已經有{_dword}單,結構還沒轉壞,但盯緊一點。"
+            else:
+                tldr = f"💡白話:目前條件不支持做{_dword}。新倉別追;如果你已經有{_dword}單,現在的數據看起來偏弱/中性,是否減倉或收緊停損自己評估,這不是叫你現在平倉。"
+        else:
+            tldr = "💡白話:目前訊號中性,方向不明確,新倉觀望即可。"
         _oiv2_line = f"\nv2結構(OI×價格): {oiv2_label} `{oiv2_score:+.0f}`" if oiv2_label else ""
-        return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
+        return (f"{tldr}\n"
+                f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
                 f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}]){_oiv2_line}\n"
                 f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
                 f"{plan}{chk}{crash_warn}")
