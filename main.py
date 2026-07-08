@@ -4906,9 +4906,10 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             w = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
             if w == "long":  align = " ✅順" if norm >= 5 else " ⚠️逆籌碼,別追" if norm <= -3 else " ➖訊號弱"
             if w == "short": align = " ✅順" if norm <= -5 else " ⚠️逆籌碼,別追" if norm >=  3 else " ➖訊號弱"
-        _oiv2_txt = f" · v2:{oiv2_label}({oiv2_score:+.0f})" if oiv2_label else ""
+        # ★2026-07-08(用戶反映跟v2結構疊在一起「結論不同、很亂」):brief/完整輸出都只顯示主結構這一套,
+        #   v2結構(oiv2_label/oiv2_score)只保留內部變數不再顯示,避免同畫面出現兩套可能互相矛盾的結構判讀。
         if brief:
-            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{_oiv2_txt}{crash_warn}".strip()
+            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{crash_warn}".strip()
         cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
         # ATR(14,1H) + 近20根擺動高低 → 建議停損停利(SL=結構或至少1ATR;TP=2~3ATR)
         hi = df["high"].values; lo = df["low"].values; clv = cl.values
@@ -4933,7 +4934,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
                 sl = max(sw_hi + 0.3*atr, price + atr); r = sl - price
                 tp1 = price - 2*atr; tp2 = price - 3*atr
             rr1 = (abs(tp1 - price) / r) if r > 0 else 0
-            plan = (f"\n📐 建議({'多' if d=='long' else '空'}): 進場 `${price:,.6g}`  停損 `${sl:,.6g}` "
+            plan = (f"📐 {'多' if d=='long' else '空'} 進場 `${price:,.6g}`  停損 `${sl:,.6g}` "
                     f"(`{abs(price-sl)/price*100:.1f}%` / {r/atr:.1f}ATR)\n"
                     f"　TP1 `${tp1:,.6g}` (2ATR · RR{rr1:.1f})　TP2 `${tp2:,.6g}` (3ATR)")
         # ── 進場5點檢查:把分數變成可執行的進場判斷(位置/觸發/停損/賺賠/regime)──
@@ -4954,29 +4955,28 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             _npass = sum(1 for _, ok in _pts if ok)
             _vd = "✅ 可考慮進場" if _npass >= 4 else ("⚠️ 再等訊號" if _npass == 3 else "❌ 別碰")
             _dlab = "🟢做多" if d == "long" else "🔴做空"
-            chk = f"\n🎯 **{_dlab}進場檢查 {_npass}/5 → {_vd}**  _(查另一方向打 `{coin} 多` 或 `{coin} 空`)_\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
-            if d == "long":
-                chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
-            else:
-                chk += "\n　_(crypto空單歷史結構性偏弱,務必嚴設停損,5點少一個就放掉)_"
-        # ★2026-07-08(用戶反映"完全看不懂"):白話總結放最前面,下面術語留給想細看的人。
-        #   下面的「進場」建議是給全新開倉用的,已經有倉位的人不用照這個動作,只是給個方向感。
+            chk = f"🎯 **{_dlab}進場檢查 {_npass}/5 → {_vd}**\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
+
+        # ★2026-07-08(用戶反映跟main.py舊版「重疊很多東西又結論不同」很亂):
+        #   改成單一結論卡片格式(仿數據獵手字卡但只有一套結構、不重複顯示矛盾的第二套),
+        #   分隔線隔開「結構/動能」「進場檢查」「結論」三塊,結論永遠放最後一行。
         _dword = "多" if d == "long" else "空" if d == "short" else None
         if d and atr > 0:
             if _npass >= 4:
-                tldr = f"💡白話:目前偏{_dword}且條件到位。新倉可以考慮；如果你已經有{_dword}單,這代表結構還撐得住,可以續抱。"
+                concl = f"💡結論:偏{_dword}且條件到位。新倉可考慮；已有{_dword}單→結構還撐得住,可續抱。"
             elif _npass == 3:
-                tldr = f"💡白話:偏{_dword}但訊號不夠齊。新倉先別急;如果你已經有{_dword}單,結構還沒轉壞,但盯緊一點。"
+                concl = f"💡結論:偏{_dword}但訊號不夠齊。新倉先別急；已有{_dword}單→結構沒轉壞但盯緊點。"
             else:
-                tldr = f"💡白話:目前條件不支持做{_dword}。新倉別追;如果你已經有{_dword}單,現在的數據看起來偏弱/中性,是否減倉或收緊停損自己評估,這不是叫你現在平倉。"
+                concl = f"💡結論:條件不支持做{_dword}。新倉別追；已有{_dword}單→數據偏弱/中性,是否減倉自行評估(非平倉指令)。"
+            concl += "\n　_(crypto空單歷史結構偏弱,嚴設停損)_" if d == "short" else "\n　_(山寨多edge薄,務必小注+嚴守停損)_"
         else:
-            tldr = "💡白話:目前訊號中性,方向不明確,新倉觀望即可。"
-        _oiv2_line = f"\nv2結構(OI×價格): {oiv2_label} `{oiv2_score:+.0f}`" if oiv2_label else ""
-        return (f"{tldr}\n"
-                f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
-                f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}]){_oiv2_line}\n"
-                f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
-                f"{plan}{chk}{crash_warn}")
+            concl = "💡結論:訊號中性、方向不明確,新倉觀望即可。"
+        _sep = "\n──────────\n"
+        _plan_line = f"（新倉參考）{plan.strip()}\n" if plan else ""
+        return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_{_sep}"
+                f"籌碼結構: {struct_label}  (OI {oi_pct:+.1f}% · CVD{cvd_txt})\n"
+                f"動能: {tf}`{chg1:+.1f}%` 24H`{chg24:+.1f}%` vsBTC`{rs:+.1f}%` 資費`{fr*100:+.3f}%`"
+                f"{_sep}{_plan_line}{chk}{_sep}{concl}{crash_warn}")
     except Exception as e:
         return f"⚠️ 判斷失敗: {e}"
 
