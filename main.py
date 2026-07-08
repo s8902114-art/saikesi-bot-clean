@@ -5004,19 +5004,21 @@ def poll_dc_commands():
                             continue
                         if not (content.startswith("!") or content.startswith("/")):
                             # 裸打「幣」或「幣 多/空 [時框]」→ 順籌碼即時判斷,只認已知幣防誤觸
-                            _w = content.split()
-                            if 1 <= len(_w) <= 3 and _w[0].isascii() and _w[0].isalpha() \
-                               and _is_known_okx_coin(_w[0]):
-                                _side = None; _tf = "1H"
-                                for _t in _w[1:]:
-                                    _tl = _t.lower()
-                                    if _tl in ("多","空","long","short","l","s","做多","做空"): _side = _t
-                                    elif _tl in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
-                                try:
-                                    _res = judge_coin(_w[0], _side, tf=_tf)
-                                    dc_log(_res if _res else f"⚠️ {_w[0].upper()} 無判斷結果(可能非SYMBOLS幣)")
-                                except Exception as _je:
-                                    dc_log(f"⚠️ 判斷錯誤: {type(_je).__name__}: {_je}")
+                            # ★2026-07-08:支援一則訊息多行多幣(一行一支),逐行各自判斷(原本整則>3詞就整包丟棄靜默無回應)
+                            for _line in content.splitlines():
+                                _w = _line.split()
+                                if 1 <= len(_w) <= 3 and _w[0].isascii() and _w[0].isalpha() \
+                                   and _is_known_okx_coin(_w[0]):
+                                    _side = None; _tf = "1H"
+                                    for _t in _w[1:]:
+                                        _tl = _t.lower()
+                                        if _tl in ("多","空","long","short","l","s","做多","做空"): _side = _t
+                                        elif _tl in ("5m","15m","30m","1h","4h","2h","5","15","30","60","4"): _tf = _t
+                                    try:
+                                        _res = judge_coin(_w[0], _side, tf=_tf)
+                                        dc_log(_res if _res else f"⚠️ {_w[0].upper()} 無判斷結果(可能非SYMBOLS幣)")
+                                    except Exception as _je:
+                                        dc_log(f"⚠️ 判斷錯誤: {type(_je).__name__}: {_je}")
                             continue
                         parts = content.lower().split()
                         cmd   = parts[0].lstrip("!/")   # 統一去掉 ! 或 / 前綴
