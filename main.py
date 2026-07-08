@@ -3328,6 +3328,125 @@ def _check_conv_breakout(symbol_item, okx_bar_fmt, df, okx_swap_symbol):
         return None
 
 
+# ── BPR(Balanced Price Range,失衡區重合) 1H續勢(2026-07-08,Bisancos SMC課程挖掘) ──────────
+# 上漲FVG(3根K缺口)與下跌FVG重疊區,價格回測中軸,順「較晚形成那個FVG」的方向進場,SL=zone遠端。
+# 忠實對齊 _bt_fvg_all.py find_fvgs/find_bpr_zones/simulate_trade_C,疊限主流幣+4H EMA200 regime對齊
+# (_bt_freq_reduce_fvg_bpr.py驗證:不加regime只有頻率17.5筆/天,加了regime連EV都變好非只是砍量)。
+# WF驗證(major+regime,train23q4-24q3/verify bull-oos-alt同號):merged EV+0.200/勝60.7%/PF1.44/
+# n=1811/7期正,頻率2.4筆/天(15幣)。跟現役OI_SQUEEZE訊號重疊率僅0.9%,非重複下注同一批單。
+# 出場固定1.5R(非trail,trail版本在SNR平行測試證實有尾端假象風險,BPR保守用回測驗證過的固定R版本)。
+# ★live風險:regime(4H EMA200斜率)在盤整期可能live/backtest有落差,尚未有live樣本驗證。
+#   上線先給觀察倉位+熔斷:前20-30筆勝率<45%或連續虧損>8筆(回測最長記錄)即應關閉重查。
+BPR_ENABLED = True
+BPR_MIN_GAP_PCT = 0.0005     # zone最小寬度(相對價格),濾雜訊微缺口,同回測MIN_GAP_PCT
+BPR_MAX_ZONE_AGE = 200       # FVG/BPR zone存活多少根K線內等待回測,同回測MAX_ZONE_AGE
+BPR_MAX_DIST = 30            # 上下FVG視為「重疊」的最大K線距離,同回測BPR_MAX_DIST
+BPR_OBSERVATION_SCALE = 0.5  # ★觀察倉期倉位縮放(全新策略無live驗證,先半倉;達標後改回1.0,見上方進場區塊註解)
+
+
+def _bpr_find_fvgs(hi, lo, cl, n):
+    """忠實對齊 _bt_fvg_all.py find_fvgs():回傳list of dict(i2,top,bot,mid,direction,violated,viol_bar)。"""
+    fvgs = []
+    for i2 in range(2, n):
+        i1 = i2 - 2
+        if hi[i1] < lo[i2]:
+            top, bot = lo[i2], hi[i1]
+            gap_pct = (top - bot) / cl[i1] if cl[i1] > 0 else 0
+            if gap_pct >= BPR_MIN_GAP_PCT:
+                fvgs.append(dict(i2=i2, top=top, bot=bot, mid=(top+bot)/2,
+                                  direction='up', violated=False, viol_bar=None))
+        if lo[i1] > hi[i2]:
+            top, bot = lo[i1], hi[i2]
+            gap_pct = (top - bot) / cl[i1] if cl[i1] > 0 else 0
+            if gap_pct >= BPR_MIN_GAP_PCT:
+                fvgs.append(dict(i2=i2, top=top, bot=bot, mid=(top+bot)/2,
+                                  direction='down', violated=False, viol_bar=None))
+    fvgs.sort(key=lambda z: z['i2'])
+    return fvgs
+
+
+def _bpr_mark_violations(fvgs, hi, lo, cl, n):
+    """同回測mark_violations():zone收盤穿越遠端即標記失效,避免對已作廢的zone觸發進場。"""
+    for z in fvgs:
+        start = z['i2'] + 1
+        end = min(start + BPR_MAX_ZONE_AGE, n)
+        for f in range(start, end):
+            if z['direction'] == 'up':
+                if cl[f] < z['bot']:
+                    z['violated'] = True; z['viol_bar'] = f; break
+            else:
+                if cl[f] > z['top']:
+                    z['violated'] = True; z['viol_bar'] = f; break
+
+
+def _bpr_find_zones(fvgs):
+    """同回測find_bpr_zones():上FVG與下FVG重疊區,方向取「較晚形成」那個FVG的方向。"""
+    bprs = []
+    ups = [z for z in fvgs if z['direction'] == 'up']
+    downs = [z for z in fvgs if z['direction'] == 'down']
+    for u in ups:
+        for d in downs:
+            if abs(u['i2'] - d['i2']) > BPR_MAX_DIST:
+                continue
+            lo_ov = max(u['bot'], d['bot']); hi_ov = min(u['top'], d['top'])
+            if hi_ov <= lo_ov:
+                continue
+            later = u if u['i2'] > d['i2'] else d
+            mid = (lo_ov + hi_ov) / 2
+            start_bar = max(u['i2'], d['i2']) + 1
+            bprs.append(dict(top=hi_ov, bot=lo_ov, mid=mid, direction=later['direction'],
+                              start_bar=start_bar, violated=False, viol_bar=None))
+    return bprs
+
+
+def _check_bpr(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame, okx_swap_symbol: str):
+    """BPR續勢(1H,限主流+4H EMA200 regime對齊)。回傳 (direction, zone_bot, zone_top) 或 None。
+    ★live簡化:回測用intrabar觸及zone中點的精確價成交,live用「該根K線收盤價」近似成交
+    (跟回測理論進場價可能有微小落差,屬已知的live/backtest fidelity gap,靠live訊號log+週回放比對追蹤)。"""
+    try:
+        if symbol_item not in MAJOR_COINS: return None
+        hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
+        n = len(cl)
+        if n < 60: return None
+        a = max(0, n - 260)
+        hi_w = hi[a:]; lo_w = lo[a:]; cl_w = cl[a:]; nw = len(cl_w)
+        fvgs = _bpr_find_fvgs(hi_w, lo_w, cl_w, nw)
+        if not fvgs: return None
+        _bpr_mark_violations(fvgs, hi_w, lo_w, cl_w, nw)
+        bprs = _bpr_find_zones(fvgs)
+        if not bprs: return None
+        cur = nw - 1
+        hit = None
+        for z in bprs:
+            if z['start_bar'] > cur: continue
+            if cur - z['start_bar'] > BPR_MAX_ZONE_AGE: continue
+            if z['violated'] and z['viol_bar'] is not None and z['viol_bar'] <= cur: continue
+            if z['direction'] == 'up':
+                if lo_w[cur] <= z['mid'] and cl_w[cur] > z['bot']:
+                    if cur > z['start_bar'] and lo_w[cur-1] <= z['mid']:
+                        continue  # 非首次觸及,避免同zone重複進場
+                    hit = ('long', z['bot'], z['top']); break
+            else:
+                if hi_w[cur] >= z['mid'] and cl_w[cur] < z['top']:
+                    if cur > z['start_bar'] and hi_w[cur-1] >= z['mid']:
+                        continue
+                    hit = ('short', z['bot'], z['top']); break
+        if hit is None: return None
+        direction = hit[0]
+        d4 = fetch_market_candles(okx_swap_symbol, "4H")
+        if d4.empty or len(d4) < 200: return None
+        e200 = d4["close"].ewm(span=200, adjust=False).mean()
+        trend_up_4h_bpr = e200.iloc[-1] > e200.iloc[-2]
+        if (direction == "long" and not trend_up_4h_bpr) or (direction == "short" and trend_up_4h_bpr):
+            return None                                                          # regime不順向,不進
+        print(f"[BPR] {symbol_item} 失衡區重合回測中軸({direction}) regime_up4h={trend_up_4h_bpr} "
+              f"zone=[{hit[1]:.5g},{hit[2]:.5g}]")
+        return hit
+    except Exception as e:
+        print(f"[BPR] {symbol_item} 判斷失敗: {e}")
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 模組一：訊號評分引擎 filter_signals()
 # 輸入：各指標布林值與數值
@@ -4107,6 +4226,21 @@ class SykesTradingBot:
             except Exception as _sqe:
                 print(f"[OI-Squeeze] {symbol_item} 判斷失敗: {_sqe}")
 
+        # ── BPR失衡區重合續勢(1H,限主流+regime,2026-07-08):見_check_bpr註解。固定1.5R出場 ──
+        is_bpr_long = False; is_bpr_short = False; _bpr_zone = None
+        if BPR_ENABLED and tf_id == "1H":
+            try:
+                _bpr_hit = _check_bpr(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
+                if _bpr_hit:
+                    _bpr_zone = _bpr_hit
+                    if _bpr_hit[0] == "long":  is_bpr_long = True;  print(f"[BPR多] {symbol_item} 失衡區重合回測(固定1.5R)")
+                    else:                      is_bpr_short = True; print(f"[BPR空] {symbol_item} 失衡區重合回測(固定1.5R)")
+                    # ★觀察倉期(2026-07-08上線):全新策略無live樣本,先半倉觀察。
+                    #   累計30筆live成交後人工核對是否符合回測(勝率55-65%/EV+0.03~+0.34),達標再拿掉0.5x。
+                    dh_boost = BPR_OBSERVATION_SCALE
+            except Exception as _bpre:
+                print(f"[BPR] {symbol_item} 判斷失敗: {_bpre}")
+
         # ── 收斂突破+OI升 1H做多(限主流,2026-06-21):結構式收斂+收盤破近高+順勢+OI升,讓跑(吃轉折加碼) ──
         is_conv_long = False
         if CONV_BREAKOUT_ENABLED and tf_id == "1H":
@@ -4176,8 +4310,8 @@ class SykesTradingBot:
                 print(f"[POC-Gate-L] {symbol_item} 失敗(放行): {_pgl}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short
 
         if not combined_long and not combined_short:
             return
@@ -4199,6 +4333,7 @@ class SykesTradingBot:
             if is_macd_long:     _signal_source.append("MACD動能")
             if is_oisq_long:     _signal_source.append("主力建多")
             if is_conv_long:     _signal_source.append("收斂突破多")
+            if is_bpr_long:      _signal_source.append("BPR失衡區重合")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -4210,6 +4345,7 @@ class SykesTradingBot:
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
             if is_oisq_short:    _signal_source.append("主力建空")
             if is_engulf_short:  _signal_source.append("吞噬空")
+            if is_bpr_short:     _signal_source.append("BPR失衡區重合")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
@@ -4252,6 +4388,8 @@ class SykesTradingBot:
             exit_strategy = "swing_full"                                 # OI壓縮突破：整倉轉折移SL讓跑(抓噴出尾,驗+0.309/賺賠3.1/MDD6%)
         elif is_conv_long:
             exit_strategy = "swing_full"                                 # 收斂突破多(限主流)：整倉轉折移SL讓跑(吃轉折加碼,session驗+0.17/加碼+0.8~1.0)
+        elif is_bpr_long or is_bpr_short:
+            exit_strategy = ""                                           # BPR:固定1.5R(對齊回測,見下方SL區塊p override)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
@@ -4285,6 +4423,9 @@ class SykesTradingBot:
         # 吞噬空：固定 2R 單一目標(回測 2R > 1.5R 早收;高點被拒的空要讓它跑到2R)
         if direction == "short" and is_engulf_short and not is_box_short:
             p = {**p, "tp1_mult": 2.0, "tp2_intraday_mult": 2.0, "tp2_swing_mult": 2.0}
+        # BPR：固定 1.5R 單一目標(對齊回測simulate_trade_C的exit_fixed_r(...,1.5,1.5,999),非trail)
+        if is_bpr_long or is_bpr_short:
+            p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 1.5, "tp2_swing_mult": 1.5}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
@@ -4360,6 +4501,25 @@ class SykesTradingBot:
             risk_dist  = abs(current_close - calculated_sl)
             tp1_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 1.5  # 讓跑不掛固定TP,此值僅供顯示
             tp2_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 3.0
+
+        # BPR:止損放zone遠端(bot多/top空),距離不足0.6%則外推(對齊回測apply_sl_floor,非直接跳過)。固定1.5R單一目標。
+        if is_bpr_long or is_bpr_short:
+            _b_bot, _b_top = _bpr_zone[1], _bpr_zone[2]
+            if is_bpr_long:
+                calculated_sl = _b_bot
+                _floor_sl = current_close * (1.0 - MIN_SL_PCT)
+                if calculated_sl > _floor_sl: calculated_sl = _floor_sl
+            else:
+                calculated_sl = _b_top
+                _floor_sl = current_close * (1.0 + MIN_SL_PCT)
+                if calculated_sl < _floor_sl: calculated_sl = _floor_sl
+            risk_pct = abs(current_close - calculated_sl) / current_close
+            if calculated_sl == current_close or risk_pct > MAX_SL:
+                if _dbg: print(f"[BPR-SL] {symbol_item} 止損無效/超範圍({risk_pct:.3%})→跳過", flush=True)
+                return
+            risk_dist  = abs(current_close - calculated_sl)
+            tp1_target = current_close + (risk_dist if is_bpr_long else -risk_dist) * 1.5
+            tp2_target = tp1_target                          # 固定單一目標(比照吞噬空/箱突破模式,非TP1/TP2分批)
 
         # ★山寨讓跑改半倉2.5R落袋(2026-06-15,COAI教訓:山寨噴到頂用swing_full一路抱會吐回)。
         #   市值幣維持讓跑(不會這樣噴崩);山寨(非MAJOR)讓跑類→swing_tp 半倉2.5R落袋+BE+剩半trail。多空通用。
