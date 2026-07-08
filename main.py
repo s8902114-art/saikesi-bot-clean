@@ -4909,13 +4909,17 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             if w == "short": align = " ✅順" if norm <= -5 else " ⚠️逆籌碼,別追" if norm >=  3 else " ➖訊號弱"
         _oiv2_txt = f" · v2:{oiv2_label}({oiv2_score:+.0f})" if oiv2_label else ""
         if brief:
-            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{_oiv2_txt}".strip()
+            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{_oiv2_txt}{crash_warn}".strip()
         cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
         # ATR(14,1H) + 近20根擺動高低 → 建議停損停利(SL=結構或至少1ATR;TP=2~3ATR)
         hi = df["high"].values; lo = df["low"].values; clv = cl.values
         _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - clv[:-1]), np.abs(lo[1:] - clv[:-1])))
         atr = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) else 0.0
         sw_lo = float(lo[-20:].min()); sw_hi = float(hi[-20:].max())
+        # ★接刀警示(2026-07-08,數據獵手LAB案例逼出):近期若已重挫,OI/CVD再怎麼看多都可能是假反彈,慎防追多
+        _look_hi = float(hi[-min(len(hi), bars24*3):].max())
+        _drawdown = (_look_hi - price) / _look_hi if _look_hi > 0 else 0.0
+        crash_warn = f"\n⚠️ 近期已重挫 `{_drawdown:.0%}`(距高點),OI/CVD偏多也可能是接刀假象,慎防追多" if _drawdown >= 0.40 else ""
         d = None
         if side_hint:
             d = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
@@ -4954,11 +4958,13 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             chk = f"\n🎯 **{_dlab}進場檢查 {_npass}/5 → {_vd}**  _(查另一方向打 `{coin} 多` 或 `{coin} 空`)_\n　" + "　".join(f"{'✅' if ok else '❌'}{nm}" for nm, ok in _pts)
             if d == "long":
                 chk += "\n　_(山寨多 edge 薄:務必小注+嚴守停損,5點少一個就放掉)_"
+            else:
+                chk += "\n　_(crypto空單歷史結構性偏弱,務必嚴設停損,5點少一個就放掉)_"
         _oiv2_line = f"\nv2結構(OI×價格): {oiv2_label} `{oiv2_score:+.0f}`" if oiv2_label else ""
         return (f"📊 **{coin}** ${price:,.6g}  {verdict}  **{norm:+d}/10**{align}{flip}  _({tf} 級別)_\n"
                 f"市場結構: {struct_label}  (OI {oi_pct:+.1f}%[{oi_src}] / CVD {cvd_txt}[{cvd_src}]){_oiv2_line}\n"
                 f"動能 {tf} `{chg1:+.1f}%`  24H `{chg24:+.1f}%`  相對強弱vsBTC `{rs:+.1f}%`  資費 `{fr*100:+.3f}%`"
-                f"{plan}{chk}")
+                f"{plan}{chk}{crash_warn}")
     except Exception as e:
         return f"⚠️ 判斷失敗: {e}"
 
