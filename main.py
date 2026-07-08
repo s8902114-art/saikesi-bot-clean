@@ -4960,15 +4960,22 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
         # ★2026-07-08(用戶反映跟main.py舊版「重疊很多東西又結論不同」很亂):
         #   改成單一結論卡片格式(仿數據獵手字卡但只有一套結構、不重複顯示矛盾的第二套),
         #   分隔線隔開「結構/動能」「進場檢查」「結論」三塊,結論永遠放最後一行。
+        # ★2026-07-09(用戶指出「做多regime不太行、做空又說不好,到底什麼才算好」):
+        #   之前不管檢查幾分,一律加一句該方向「歷史偏弱」警語,導致結論永遠像在唱衰,失去意義。
+        #   改成:只有在5點檢查本身也偏弱(≤3/5)時才補強調嚴設停損;檢查4-5/5過關就不再額外唱衰。
+        #   山寨多的警語也改成只在非主流幣才顯示(原始發現就是限定山寨,主流多不適用這句)。
         _dword = "多" if d == "long" else "空" if d == "short" else None
         if d and atr > 0:
             if _npass >= 4:
                 concl = f"💡結論:偏{_dword}且條件到位。新倉可考慮；已有{_dword}單→結構還撐得住,可續抱。"
             elif _npass == 3:
                 concl = f"💡結論:偏{_dword}但訊號不夠齊。新倉先別急；已有{_dword}單→結構沒轉壞但盯緊點。"
+                if d == "short": concl += "\n　_(crypto空單歷史結構偏弱,嚴設停損)_"
+                elif f"{coin}/USDT" not in MAJOR_COINS: concl += "\n　_(山寨多edge薄,務必小注+嚴守停損)_"
             else:
                 concl = f"💡結論:條件不支持做{_dword}。新倉別追；已有{_dword}單→數據偏弱/中性,是否減倉自行評估(非平倉指令)。"
-            concl += "\n　_(crypto空單歷史結構偏弱,嚴設停損)_" if d == "short" else "\n　_(山寨多edge薄,務必小注+嚴守停損)_"
+                if d == "short": concl += "\n　_(crypto空單歷史結構偏弱,嚴設停損)_"
+                elif f"{coin}/USDT" not in MAJOR_COINS: concl += "\n　_(山寨多edge薄,務必小注+嚴守停損)_"
         else:
             concl = "💡結論:訊號中性、方向不明確,新倉觀望即可。"
         _sep = "\n──────────\n"
