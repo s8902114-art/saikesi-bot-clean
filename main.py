@@ -4810,9 +4810,8 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
     try:
         coin = coin_raw.strip().upper()
         inst_id = f"{coin}-USDT-SWAP"
-        if inst_id not in SYMBOLS:
+        if not _is_known_okx_coin(coin):
             return None
-        symbol_item = SYMBOLS[inst_id]
         tfmap = {"5":"5m","5m":"5m","15":"15m","15m":"15m","30":"30m","30m":"30m",
                  "1h":"1H","60":"1H","1":"1H","2h":"2H","4h":"4H","4":"4H"}
         tf = tfmap.get(str(tf).strip().lower(), "1H")
@@ -4861,7 +4860,7 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             except Exception: pass
             try:
                 _bp = tf.lower() if tf.lower() in ("5m","15m","30m","1h","2h","4h") else "1h"
-                _ls, _tkb = _fetch_binance_ls_taker(symbol_item, _bp)
+                _ls, _tkb = _fetch_binance_ls_taker(f"{coin}/USDT", _bp)
                 if _tkb is not None: _votes.append(1 if _tkb > 1 else -1)
             except Exception: pass
             if _votes and sum(_votes) != 0:
@@ -5007,7 +5006,7 @@ def poll_dc_commands():
                             # 裸打「幣」或「幣 多/空 [時框]」→ 順籌碼即時判斷,只認已知幣防誤觸
                             _w = content.split()
                             if 1 <= len(_w) <= 3 and _w[0].isascii() and _w[0].isalpha() \
-                               and f"{_w[0].upper()}-USDT-SWAP" in SYMBOLS:
+                               and _is_known_okx_coin(_w[0]):
                                 _side = None; _tf = "1H"
                                 for _t in _w[1:]:
                                     _tl = _t.lower()
@@ -5109,7 +5108,7 @@ def poll_dc_commands():
                                 dc_log(f"⚠️ top 掃描錯誤: {type(_te).__name__}: {_te}")
 
                         # ── 幣順籌碼判斷（!幣 / /幣 也可，如 !ADA 空 15m）────
-                        elif f"{cmd.upper()}-USDT-SWAP" in SYMBOLS:
+                        elif _is_known_okx_coin(cmd):
                             _side = None; _tf = "1H"
                             for _t in parts[1:]:
                                 if _t in ("多","空","long","short","l","s","做多","做空"): _side = _t
@@ -5297,6 +5296,21 @@ def _fetch_okx_swap_set() -> set:
     except Exception as e:
         print(f"[SYMBOLS] OKX 合約列表抓取失敗: {e}", flush=True)
     return set()
+
+# ★2026-07-08:!幣判斷指令原本只認 SYMBOLS(bot動態掃描的~40-70幣),數據獵手上像LAB/TRIA
+#   這種OKX真實存在但沒被主動掃描的幣打進DC完全沒反應(靜默忽略,無錯誤訊息)。
+#   改認全OKX USDT永續合約集合(~400檔),不影響下單邏輯只影響!幣查詢的辨識範圍。
+_ALL_OKX_SWAP_IDS: set = set()
+_all_okx_swap_last_refresh: float = 0.0
+_ALL_OKX_SWAP_REFRESH_SEC = 6 * 3600
+
+def _is_known_okx_coin(coin: str) -> bool:
+    global _ALL_OKX_SWAP_IDS, _all_okx_swap_last_refresh
+    if time.time() - _all_okx_swap_last_refresh > _ALL_OKX_SWAP_REFRESH_SEC or not _ALL_OKX_SWAP_IDS:
+        _s = _fetch_okx_swap_set()
+        if _s:
+            _ALL_OKX_SWAP_IDS = _s; _all_okx_swap_last_refresh = time.time()
+    return f"{coin.upper()}-USDT-SWAP" in _ALL_OKX_SWAP_IDS
 
 def _fetch_coingecko_top100() -> list:
     """從 CoinGecko 抓市值前100幣種 symbol 列表（免 API KEY）"""
