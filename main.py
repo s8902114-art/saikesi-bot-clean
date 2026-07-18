@@ -3340,7 +3340,11 @@ def _check_conv_breakout(symbol_item, okx_bar_fmt, df, okx_swap_symbol):
 # 出場固定1.5R(非trail,trail版本在SNR平行測試證實有尾端假象風險,BPR保守用回測驗證過的固定R版本)。
 # ★live風險:regime(4H EMA200斜率)在盤整期可能live/backtest有落差,尚未有live樣本驗證。
 #   上線先給觀察倉位+熔斷:前20-30筆勝率<45%或連續虧損>8筆(回測最長記錄)即應關閉重查。
-BPR_ENABLED = True
+BPR_ENABLED = False  # ★2026-07-19關閉:14天真實對帳=bot最大流血源(空61筆勝率32.8%虧-6.1U+多30筆-0.6U);
+# live頻率22.7筆/天=上線壓測宣稱2.4的10倍,主因_check_bpr zone成交後不消耗、價格離開再回來同zone重複觸發
+# (回測simulate_trade_C每zone只進一次);且live勝率32.8% vs 出場照規格重演48.6%=執行落差未查明。
+# 觀察期條款(連虧>8筆暫停重查)已觸發。重開前置條件:①加traded-zone消耗 ②查為何BPR固定1.5R單會放好幾天
+# ③重演腳本_live_replay_bpr.py驗證頻率回到~2-3筆/天。
 BPR_MIN_GAP_PCT = 0.0005     # zone最小寬度(相對價格),濾雜訊微缺口,同回測MIN_GAP_PCT
 BPR_MAX_ZONE_AGE = 200       # FVG/BPR zone存活多少根K線內等待回測,同回測MAX_ZONE_AGE
 BPR_MAX_DIST = 30            # 上下FVG視為「重疊」的最大K線距離,同回測BPR_MAX_DIST
