@@ -551,7 +551,10 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     if "箱突破空" in s:    bits.append("跌破盤整箱底 + 帶量 + CVD↓ + OI升(順勢)")
     if "維加斯大通道空" in s: bits.append("回測維加斯大通道被擋 + 1H空方共振 + CVD↓ + 散戶爆多(fade)")
     if "主力建" in s:      bits.append("12h窄幅壓縮 + 帶量突破 + OI升建倉 + 4H順向(主力建倉噴出)")
-    if tf == "1H" and side == "short":
+    if "BPR" in s:         bits.append("BPR失衡區重合回測中軸(固定1.5R)")
+    # ★2026-07-18修:原本對「所有1H空單」無條件加「靠階梯壓力位」→BPR空/MACD空的卡都被標成階梯,
+    #   14天61筆BPR空全被誤讀成C3空,歸因差點錯人。階梯字樣只有C3空才真的有這個閘。
+    if tf == "1H" and side == "short" and "C3" in s:
         bits.append("靠階梯壓力位")
     if dh_boost and dh_boost > 1.0:
         bits.append(f"CVD 吸收確認(加碼×{dh_boost})")
