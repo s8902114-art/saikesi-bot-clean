@@ -2004,6 +2004,22 @@ def _bingx_replace_sl(trade, sl_price, qty):
     109420(position not exist):此 positionSide 無倉位→自動試另一持倉模式(BOTH↔LONG/SHORT)。
     回傳新orderId,或 None(=沒換成,舊/手動止損原樣保留,絕不裸倉)。"""
     sym = trade["inst_id"]; hdr = trade["headers"]; pos = trade["pos_side"]
+    # 0) ★2026-07-19 BingX端錯側防呆(用戶指出「BingX點位跟OKX不同」):pivot/保本價全是用OKX K線算的,
+    #    兩所價差(小幣可觀)可能讓新SL在BingX已越過現價→STOP_MARKET掛上即觸發=倉被莫名市價平掉。
+    #    掛單前用BingX自己的最新價驗證保護側,錯側→跳過本輪(舊SL保留,下輪pivot更新自然重試)。
+    try:
+        _pq = _bingx_request("GET", "/openApi/swap/v2/quote/price", {"symbol": sym}, hdr).json()
+        _bx_px = float((_pq.get("data") or {}).get("price") or 0)
+        if _bx_px > 0:
+            _slp = float(sl_price)
+            if trade.get("direction") == "long" and _slp >= _bx_px:
+                print(f"[BingX-SL] {sym} 新SL {_slp} ≥ BingX現價 {_bx_px}(OKX/BingX價差錯側),跳過本輪不移", flush=True)
+                return None
+            if trade.get("direction") == "short" and _slp <= _bx_px:
+                print(f"[BingX-SL] {sym} 新SL {_slp} ≤ BingX現價 {_bx_px}(OKX/BingX價差錯側),跳過本輪不移", flush=True)
+                return None
+    except Exception as _pxe:
+        print(f"[BingX-SL] {sym} 查BingX現價失敗(照原流程掛): {_pxe}", flush=True)
     # 1) 先記下現有止損 orderId(稍後新單確認成功才清),查失敗也照樣嘗試挂新(不因查單失敗而不保護)
     old_oids = []
     try:
