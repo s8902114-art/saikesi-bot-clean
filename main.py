@@ -1777,20 +1777,37 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
         n = len(df)
 
+        # ★2026-07-19 浮盈門檻(用戶指正「浮盈之後才叫移動停利」+14天實單65%的移動發生在虧損側):
+        #   進場後最大有利波動 < 1R 前不啟動移動停利,SL停在原結構停損。
+        #   回測驗證(_bt_trail_gate.py,7期):OISQ空+0.315→+0.378/OISQ多+0.103→+0.127/
+        #   MACD空+0.160→+0.168(正期4→5)/MACD多+0.347→+0.312(微降),3/4改善=免費甚至加分。
+        _entry_px = float(trade.get("entry_price") or 0)
+        _risk_d = float(trade.get("risk_dist") or 0)
+        if _entry_px > 0 and _risk_d > 0:
+            _mfe = (float(hi.max()) - _entry_px) if direction == "long" else (_entry_px - float(lo.min()))
+            if _mfe < 1.0 * _risk_d:
+                return False   # 浮盈不足1R,不移(留在結構停損,避免虧損中被雜訊pivot掃出)
+
         # 移SL用「pivot 擺盪點」(前後2根局部極值)。回測:pivot 勝 N字型(N MDD暴增58~71%)→回退。
         # ★bugfix 2026-06-21:先濾「市價合法側」再挑最緊pivot。舊版先挑全窗最極端pivot,噴後整理時
         #   它落在市價錯側→整個更新被否決凍住(該噴後跟漲的整理段不跟,AXS案例根因)。
+        # ★2026-07-19 加0.2ATR緩衝(對齊回測exit_swing_pivot的pv±0.2ATR;舊版用裸pivot值比回測緊,
+        #   盤整雜訊一掃就出,live被停損單MAE統計佐證)。
         PV = 2
+        _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - cl[:-1]), np.abs(lo[1:] - cl[:-1])))
+        _atr_now = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) >= 5 else 0.0
         cur_sl = float(trade.get("current_sl", 0) or 0)
         cur_px = float(cl[-1])
         last_swing = None
         for j in range(PV, n - PV):
             if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min() and lo[j] < cur_px:   # 只取市價下方(合法側)
-                    if last_swing is None or lo[j] > last_swing: last_swing = lo[j]
+                _pv = lo[j] - 0.2 * _atr_now
+                if lo[j] == lo[j-PV:j+PV+1].min() and _pv < cur_px:     # 只取市價下方(合法側,含緩衝)
+                    if last_swing is None or _pv > last_swing: last_swing = _pv
             else:
-                if hi[j] == hi[j-PV:j+PV+1].max() and hi[j] > cur_px:   # 只取市價上方(合法側)
-                    if last_swing is None or hi[j] < last_swing: last_swing = hi[j]
+                _pv = hi[j] + 0.2 * _atr_now
+                if hi[j] == hi[j-PV:j+PV+1].max() and _pv > cur_px:     # 只取市價上方(合法側,含緩衝)
+                    if last_swing is None or _pv < last_swing: last_swing = _pv
         if last_swing is None:
             print(f"[OKX-trail] {name} 合法側無pivot,不移(px={cur_px})", flush=True)
             return False
@@ -2135,20 +2152,33 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
                 df = subdf
             except Exception: pass
         hi = df["high"].values; lo = df["low"].values; n = len(df)
+        cl_v = df["close"].values
+        # ★2026-07-19 與OKX對齊:浮盈<1R不啟動移動停利(見_mai_move_sl_on_swing同日註解+_bt_trail_gate.py)
+        _entry_px = float(trade.get("entry_price") or 0)
+        _risk_d = float(trade.get("risk_dist") or 0)
+        if _entry_px > 0 and _risk_d > 0:
+            _mfe = (float(hi.max()) - _entry_px) if direction == "long" else (_entry_px - float(lo.min()))
+            if _mfe < 1.0 * _risk_d:
+                return False
         # pivot 擺盪點(前後2根局部極值)。回測勝 N字型(N MDD暴增)→回退。
         # ★bugfix 2026-06-21:與OKX對齊——先濾市價合法側再挑最緊pivot(舊版先挑全窗最極端,
         #   噴後整理時落在錯側→整段更新被否決凍住=BingX該跟不跟根因)。並補診斷log(BingX原本一個都沒有)。
+        # ★2026-07-19 加0.2ATR緩衝(對齊回測pv±0.2ATR,與OKX同日修改一致)。
         cur_px = float(df["close"].iloc[-1])
         cur_sl = float(trade.get("current_sl", 0) or 0)
         PV = 2
+        _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - cl_v[:-1]), np.abs(lo[1:] - cl_v[:-1])))
+        _atr_now = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) >= 5 else 0.0
         last = None
         for j in range(PV, n - PV):
             if direction == "long":
-                if lo[j] == lo[j-PV:j+PV+1].min() and lo[j] < cur_px:
-                    if last is None or lo[j] > last: last = lo[j]
+                _pv = lo[j] - 0.2 * _atr_now
+                if lo[j] == lo[j-PV:j+PV+1].min() and _pv < cur_px:
+                    if last is None or _pv > last: last = _pv
             else:
-                if hi[j] == hi[j-PV:j+PV+1].max() and hi[j] > cur_px:
-                    if last is None or hi[j] < last: last = hi[j]
+                _pv = hi[j] + 0.2 * _atr_now
+                if hi[j] == hi[j-PV:j+PV+1].max() and _pv > cur_px:
+                    if last is None or _pv < last: last = _pv
         if last is None:
             print(f"[BingX-Trail] {name} 合法側無pivot,不移(px={cur_px} sl={cur_sl})", flush=True); return False
         if direction == "long"  and last <= cur_sl:
