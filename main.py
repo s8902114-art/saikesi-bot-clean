@@ -4798,8 +4798,11 @@ def _quick_rank_score(inst_id, tf="1H", btc_chg=0.0):
         elif (not cvd_up) and chg1 < 0: s -= 12; lab = "空頭建倉"
         elif cvd_up and chg1 <= 0:  s += 4;  lab = "回補弱多"
         else:                       s -= 4;  lab = "出場弱空"
-        norm = int(max(-10, min(10, round(s/7))))
-        return (norm, lab, price)
+        # ★2026-07-18修:原norm=round(s/7)照抄judge_coin的除數,但這裡滿分只±33(judge結構±24+資費±4滿分~±49)
+        #   → 分數永遠壓在±5內、跟`幣`指令不同尺度;且!top用整數分排序→大量同分,前3名變成掃描順序決定。
+        #   改按本函數滿分±33歸一到±10,並回傳raw分s給!top排序用。
+        norm = int(max(-10, min(10, round(s * 10 / 33))))
+        return (norm, lab, price, s)
     except Exception:
         return None
 
@@ -4908,18 +4911,20 @@ def judge_coin(coin_raw, side_hint=None, brief=False, tf="1H"):
             if w == "short": align = " ✅順" if norm <= -5 else " ⚠️逆籌碼,別追" if norm >=  3 else " ➖訊號弱"
         # ★2026-07-08(用戶反映跟v2結構疊在一起「結論不同、很亂」):brief/完整輸出都只顯示主結構這一套,
         #   v2結構(oiv2_label/oiv2_score)只保留內部變數不再顯示,避免同畫面出現兩套可能互相矛盾的結構判讀。
-        if brief:
-            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{crash_warn}".strip()
-        cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
         # ATR(14,1H) + 近20根擺動高低 → 建議停損停利(SL=結構或至少1ATR;TP=2~3ATR)
         hi = df["high"].values; lo = df["low"].values; clv = cl.values
         _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - clv[:-1]), np.abs(lo[1:] - clv[:-1])))
         atr = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) else 0.0
         sw_lo = float(lo[-20:].min()); sw_hi = float(hi[-20:].max())
         # ★接刀警示(2026-07-08,數據獵手LAB案例逼出):近期若已重挫,OI/CVD再怎麼看多都可能是假反彈,慎防追多
+        # ★2026-07-18修:crash_warn原本定義在brief return之後→brief=True必NameError→
+        #   訊號卡「順籌碼」列自7/8起全變「⚠️判斷失敗: name 'crash_warn' is not defined」。移到brief前。
         _look_hi = float(hi[-min(len(hi), bars24*3):].max())
         _drawdown = (_look_hi - price) / _look_hi if _look_hi > 0 else 0.0
         crash_warn = f"\n⚠️ 近期已重挫 `{_drawdown:.0%}`(距高點),OI/CVD偏多也可能是接刀假象,慎防追多" if _drawdown >= 0.40 else ""
+        if brief:
+            return f"{struct_label} · 評分 `{norm:+d}/10`{align}{flip}{crash_warn}".strip()
+        cvd_txt = "升" if cvd_up else ("降" if cvd_up is not None else "?")
         d = None
         if side_hint:
             d = "long" if side_hint in ("多","long","l","做多") else "short" if side_hint in ("空","short","s","做空") else None
@@ -5113,17 +5118,18 @@ def poll_dc_commands():
                                 _rows = []
                                 for _sk in list(SYMBOLS.keys())[:60]:
                                     _qr = _quick_rank_score(_sk, _ttf, _bc)
-                                    if _qr: _rows.append((_sk.replace("-USDT-SWAP",""), _qr[0], _qr[1], _qr[2]))
+                                    if _qr: _rows.append((_sk.replace("-USDT-SWAP",""), _qr[0], _qr[1], _qr[2], _qr[3]))
                                     time.sleep(0.04)
                                 if not _rows:
                                     dc_log("⚠️ top:無資料")
                                 else:
-                                    _lg = sorted(_rows, key=lambda x: -x[1])[:3]
-                                    _sh = sorted(_rows, key=lambda x:  x[1])[:3]
+                                    # ★2026-07-18修:排序改用raw分(x[4]),不用四捨五入整數分(同分一堆時前3名=掃描順序)
+                                    _lg = sorted(_rows, key=lambda x: -x[4])[:3]
+                                    _sh = sorted(_rows, key=lambda x:  x[4])[:3]
                                     _msg = f"🏆 **當前評分排名** ({_ttf}，掃 {len(_rows)} 幣)\n🟢 **適合做多 前3**\n"
-                                    for c,n,l,p in _lg: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
+                                    for c,n,l,p,_ in _lg: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
                                     _msg += "🔴 **適合做空 前3**\n"
-                                    for c,n,l,p in _sh: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
+                                    for c,n,l,p,_ in _sh: _msg += f"　`{n:+d}/10` **{c}** {l} ${p:,.6g}\n"
                                     _msg += "_(輕量動能評分排名；個別幣詳細順籌碼+SL/TP 請打 `幣`，如 `ADA`)_"
                                     dc_log(_msg)
                             except Exception as _te:
