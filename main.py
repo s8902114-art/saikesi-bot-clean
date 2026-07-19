@@ -1791,8 +1791,8 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         # 移SL用「pivot 擺盪點」(前後2根局部極值)。回測:pivot 勝 N字型(N MDD暴增58~71%)→回退。
         # ★bugfix 2026-06-21:先濾「市價合法側」再挑最緊pivot。舊版先挑全窗最極端pivot,噴後整理時
         #   它落在市價錯側→整個更新被否決凍住(該噴後跟漲的整理段不跟,AXS案例根因)。
-        # ★2026-07-19 加0.2ATR緩衝(對齊回測exit_swing_pivot的pv±0.2ATR;舊版用裸pivot值比回測緊,
-        #   盤整雜訊一掃就出,live被停損單MAE統計佐證)。
+        # ★2026-07-19 加pivot緩衝(舊版裸pivot比回測緊)。同日LINK插針案例後加深0.2→0.4ATR:
+        #   回測_bt_trail_buffer.py掃0.2/0.4/0.6全無差(EV±0.005),live pivot(PV=2)比回測(7根窗)淺,加深免費避獵殺區。
         PV = 2
         _tr = np.maximum(hi[1:] - lo[1:], np.maximum(np.abs(hi[1:] - cl[:-1]), np.abs(lo[1:] - cl[:-1])))
         _atr_now = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) >= 5 else 0.0
@@ -1801,11 +1801,11 @@ def _swing_trail_update_sl(ex, trade, ref_tf=None) -> bool:
         last_swing = None
         for j in range(PV, n - PV):
             if direction == "long":
-                _pv = lo[j] - 0.2 * _atr_now
+                _pv = lo[j] - 0.4 * _atr_now
                 if lo[j] == lo[j-PV:j+PV+1].min() and _pv < cur_px:     # 只取市價下方(合法側,含緩衝)
                     if last_swing is None or _pv > last_swing: last_swing = _pv
             else:
-                _pv = hi[j] + 0.2 * _atr_now
+                _pv = hi[j] + 0.4 * _atr_now
                 if hi[j] == hi[j-PV:j+PV+1].max() and _pv > cur_px:     # 只取市價上方(合法側,含緩衝)
                     if last_swing is None or _pv < last_swing: last_swing = _pv
         if last_swing is None:
@@ -2179,7 +2179,7 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
         # pivot 擺盪點(前後2根局部極值)。回測勝 N字型(N MDD暴增)→回退。
         # ★bugfix 2026-06-21:與OKX對齊——先濾市價合法側再挑最緊pivot(舊版先挑全窗最極端,
         #   噴後整理時落在錯側→整段更新被否決凍住=BingX該跟不跟根因)。並補診斷log(BingX原本一個都沒有)。
-        # ★2026-07-19 加0.2ATR緩衝(對齊回測pv±0.2ATR,與OKX同日修改一致)。
+        # ★2026-07-19 pivot緩衝0.4ATR(與OKX一致;LINK插針案例後加深,回測0.2/0.4/0.6無差=免費)。
         cur_px = float(df["close"].iloc[-1])
         cur_sl = float(trade.get("current_sl", 0) or 0)
         PV = 2
@@ -2188,11 +2188,11 @@ def _bingx_swing_trail(trade, ref_tf=None) -> bool:
         last = None
         for j in range(PV, n - PV):
             if direction == "long":
-                _pv = lo[j] - 0.2 * _atr_now
+                _pv = lo[j] - 0.4 * _atr_now
                 if lo[j] == lo[j-PV:j+PV+1].min() and _pv < cur_px:
                     if last is None or _pv > last: last = _pv
             else:
-                _pv = hi[j] + 0.2 * _atr_now
+                _pv = hi[j] + 0.4 * _atr_now
                 if hi[j] == hi[j-PV:j+PV+1].max() and _pv > cur_px:
                     if last is None or _pv < last: last = _pv
         if last is None:
@@ -5655,12 +5655,44 @@ def adopt_untracked_okx_positions():
             entry=float(p.get("entryPrice") or 0) or float((p.get("info") or {}).get("avgPx") or 0)
             if entry<=0: continue
             inst_id=(p.get("info") or {}).get("instId") or OKX_SWAP.get(sym, sym)
+            # ★2026-07-19 手動倉不接管(用戶LINK案例:手動8.4張多單被接管→移動停利貼太近被插針掃出)。
+            #   判定:近期該inst同方向「開倉單」(非reduceOnly)是否帶ccxt broker tag(6b9ad766b55dBCDE)=bot下的。
+            #   全無bot tag=手動倉→只通知、絕不接管。判定失敗也保守不接管(寧漏勿越權)。
+            try:
+                _oh = ex.private_get_trade_orders_history_archive({"instType": "SWAP", "instId": inst_id, "limit": "100"})
+                _bot_opened = False
+                for _o in (_oh.get("data") or []):
+                    if _o.get("state") != "filled": continue
+                    if str(_o.get("reduceOnly")) == "true": continue
+                    if _o.get("posSide") and _o.get("posSide") != side: continue
+                    _is_open = (side == "long" and _o.get("side") == "buy") or (side == "short" and _o.get("side") == "sell")
+                    if _is_open and str(_o.get("tag") or "").startswith("6b9ad766b55d"):
+                        _bot_opened = True; break
+                if not _bot_opened:
+                    dc_log(f"🙅 發現手動倉位 {sym} {side}(開倉單無bot標記)→ 不接管、不碰它。停損/停利請自行管理")
+                    continue
+            except Exception as _own_err:
+                print(f"[Adopt] {sym} 開倉來源判定失敗(保守:不接管): {_own_err}", flush=True)
+                dc_log(f"⚠️ 未追蹤倉位 {sym} {side} 無法判定開倉來源→ 不接管(保守),請自行確認")
+                continue
             sl_id, sl_trig=_okx_fetch_algo_sl(inst_id)
             if not sl_trig:
                 dc_log(f"⚠️ 發現未追蹤倉位 {sym} {side}(讀不到止損)→ bot不自動接管，請手動設止損/保本")
                 continue
             risk=abs(entry-sl_trig)
             if risk<=0: continue
+            # ★2026-07-19 風險距離下限=1×ATR(1H):接管時既有SL可能貼極近(LINK案例0.08%),
+            #   使「達1R保本」「浮盈1R才trail」的1R變假、門檻秒過。
+            try:
+                _dfa = fetch_market_candles(inst_id, "1H", 20)
+                if _dfa is not None and not _dfa.empty and len(_dfa) >= 15:
+                    _clA = _dfa["close"]
+                    _trA = pd.concat([_dfa["high"]-_dfa["low"], (_dfa["high"]-_clA.shift()).abs(),
+                                      (_dfa["low"]-_clA.shift()).abs()], axis=1).max(axis=1)
+                    _atrA = float(_trA.ewm(alpha=1/14, adjust=False).mean().iloc[-1])
+                    if _atrA > 0: risk = max(risk, _atrA)
+            except Exception as _atr_err:
+                print(f"[Adopt] {sym} ATR下限計算失敗(用原risk): {_atr_err}", flush=True)
             # 接管倉統一走 swing_full(整倉,與 BingX 一致)——不補TP。
             # 用戶要:接管動作 = 達1R保本 + N字型移動停利(check_trailing swing_full 分支處理)。
             # 原「有TP→固定R(等TP1才移SL)」改掉,改成主動的整倉移SL。
@@ -5725,6 +5757,10 @@ def adopt_untracked_bingx_positions():
             if (ccxt_sym, direction) in tracked: continue
             entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
             if entry <= 0: continue
+            # ★2026-07-19 BingX下單不帶broker tag,無法驗證開倉來源→比照OKX手動倉保護原則,
+            #   一律不自動接管(寧漏勿越權;bot自己的倉靠active_trades.json持久化,redeploy不會丟)。
+            dc_log(f"🙅 BingX 發現未追蹤倉位 {bx_sym} {direction}→ 無法驗證是否bot開倉,不接管、不碰它")
+            continue
 
             # 抓開放訂單，找 SL(STOP_MARKET) 和 TP
             orders_r = _bingx_request("GET", "/openApi/swap/v2/trade/openOrders",
