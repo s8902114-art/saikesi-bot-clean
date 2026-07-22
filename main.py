@@ -3194,15 +3194,23 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
 VEGAS_SHORT_ENABLED = False  # 2026-07-01忠實複刻重測確認關閉:7期間n=70,EV-0.229(PF0.65),5/7期負,補資料後更負,維持關
 BOX_SHORT_ENABLED = True     # 2026-07-01忠實複刻重測轉正式:7期間n=2228,EV+0.124,23Q4~24Q1負(早期)、24Q2起連續5期同號正(18個月),非雜訊,開啟
 # 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
+BOX_DECISIVE_ATR = 0.15  # ★2026-07-19 果斷破底margin(用戶指正:現行cl<bl接受任意幅度收破→6筆實單3筆假突破,
+# 破底幅0.05~0.59%多為noise)。用戶定義=針尖(wick極值)定箱✓+實體要突破+很明顯。回測_bt_box_decisive.py 7期:
+# margin 0→0.15 EV+0.124→+0.132、維持5/7正、砍16%最爛noise單;0.3更肥但掉4/7。取0.15=更好EV+同一致性+少churn。
+
 def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tuple[bool, str]:
-    """箱突破做空：96根窄箱(range<8%)收盤跌破箱底 + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
+    """箱突破做空：96根窄箱(range<8%)收盤果斷跌破箱底(>0.15ATR) + 帶量1.5x + CVD↓ + OI升(3根)。只用現成資料。"""
     try:
         hi = df["high"].values; lo = df["low"].values; cl = df["close"].values
         vol = df["vol"].values if "vol" in df.columns else None
         if len(cl) < 100 or vol is None: return False, ""
+        # ATR(14) 供果斷破底門檻用
+        _tr = np.maximum(hi[1:]-lo[1:], np.maximum(np.abs(hi[1:]-cl[:-1]), np.abs(lo[1:]-cl[:-1])))
+        _atr = float(pd.Series(_tr).ewm(alpha=1/14, adjust=False).mean().iloc[-1]) if len(_tr) >= 15 else 0.0
         bh = hi[-97:-1].max(); bl = lo[-97:-1].min()
         if bl <= 0 or (bh-bl)/bl > 0.08: return False, ""        # 箱要夠窄=盤整
-        if not (cl[-1] < bl and cl[-2] >= bl): return False, ""  # 收盤首根跌破箱底
+        # ★收盤要「果斷」跌破箱底針尖(實體破,幅度>0.15ATR),不接受針尖被戳一下的marginal假突破
+        if not (cl[-1] < bl - BOX_DECISIVE_ATR*_atr and cl[-2] >= bl): return False, ""
         va = float(np.mean(vol[-21:-1]))
         if not (va > 0 and vol[-1] > 1.5*va): return False, ""    # 帶量突破
         cona = CONA_PERP.get(symbol_item)
