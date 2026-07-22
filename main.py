@@ -2324,6 +2324,25 @@ def check_trailing_stops_for_real():
                     print(f"[CME-Gap] {name} 超時平倉失敗: {_cte}")
                 active_real_trades.pop(trade_key, None); save_active_trades(); continue
 
+            # ── ★全域時間停損(2026-07-19,改善持單體感):超過GLOBAL_TIMESTOP_H小時未觸TP/SL→市價平 ──
+            #   cme_gap豁免(自有300h超時)。ts_open=真實開倉時間(接管倉的entry_ts被回撥24h不能用,故另存ts_open)。
+            # ts_open優先;無ts_open時只有「非接管倉」能用entry_ts(接管倉entry_ts被回撥24h,舊json無ts_open→跳過不誤平)
+            _ts_open = int(trade.get("ts_open") or 0)
+            if not _ts_open and trade.get("tf_id") != "adopted":
+                _ts_open = int(trade.get("entry_ts", 0) or 0)
+            if (trade.get("exit_strategy") != "cme_gap" and _ts_open > 0
+                    and time.time() - _ts_open > GLOBAL_TIMESTOP_H * 3600):
+                try:
+                    ex.create_market_order(symbol=symbol,
+                        side=("sell" if direction == "long" else "buy"),
+                        amount=float(trade.get("remaining_amount", 0) or 0),
+                        params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
+                    _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
+                    dc_log(f"⏰ {name} 開倉滿{GLOBAL_TIMESTOP_H}h未到目標,市價平倉(時間停損)")
+                except Exception as _tse:
+                    print(f"[TimeStop] {name} 平倉失敗: {_tse}")
+                active_real_trades.pop(trade_key, None); save_active_trades(); continue
+
             # ── 山寨多單 OI降早出(OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
                 try:
@@ -2670,6 +2689,28 @@ def check_trailing_stops_for_real():
                             active_real_trades.pop(trade_key, None); save_active_trades(); continue
                 except Exception as _cte:
                     print(f"[BingX CME-Gap] {trade_key} 超時平倉失敗: {_cte}")
+
+            # ── ★全域時間停損(2026-07-19,與OKX段對齊):超過GLOBAL_TIMESTOP_H小時未觸TP/SL→市價平 ──
+            _ts_open_bx = int(trade.get("ts_open") or 0)
+            if not _ts_open_bx and trade.get("tf_id") != "adopted":
+                _ts_open_bx = int(trade.get("entry_ts", 0) or 0)
+            if (trade.get("exit_strategy") != "cme_gap" and _ts_open_bx > 0
+                    and time.time() - _ts_open_bx > GLOBAL_TIMESTOP_H * 3600):
+                try:
+                    _rem = float(trade.get("remaining_qty", 0) or 0)
+                    if _rem > 0:
+                        _r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
+                            "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
+                            "type": "MARKET", "quantity": str(_rem)}, headers).json()
+                        if _r.get("code", 0) == 0:
+                            try:
+                                _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
+                                               {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
+                            except Exception: pass
+                            dc_log(f"⏰ BingX {bingx_symbol} 開倉滿{GLOBAL_TIMESTOP_H}h未到目標,市價平倉(時間停損)")
+                            active_real_trades.pop(trade_key, None); save_active_trades(); continue
+                except Exception as _tse:
+                    print(f"[BingX TimeStop] {trade_key} 平倉失敗: {_tse}")
 
             # ── 山寨多單 OI降早出(預設關,與OKX對齊):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
@@ -5727,6 +5768,7 @@ def adopt_untracked_okx_positions():
                 "init_contracts":ct,"pyramid_added":True,"pyramid_eligible":False,
                 "exit_strategy":inferred_es,
                 "entry_ts":int(time.time()) - 24*3600,  # ★往前24h(2026-06-20):redeploy重撿會重設entry_ts,6h只6根K→trail找不到pivot;24h給夠pivot(錯側由合法側檢查擋)
+                "ts_open":int(time.time()),  # ★2026-07-19真實接管時間(給時間停損用;entry_ts被回撥24h不能拿來算時停)
             }
             adopted+=1
             dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ swing_full 達1R保本+N字型移SL")
@@ -5834,6 +5876,7 @@ def adopt_untracked_bingx_positions():
                 "tf_id":         "adopted",
                 "exit_strategy": inferred_es,
                 "entry_ts":      int(time.time()) - 24*3600,  # ★往前24h(2026-06-20):被redeploy重撿時entry_ts會重設,6h只給6根K→pivot湊不齊trail不動(BingX全卡原停損bug根因)。24h給24根K,trail找得到pivot;錯側進場前pivot由合法側檢查擋掉=安全
+                "ts_open":       int(time.time()),  # ★2026-07-19真實接管時間(時間停損用)
                 "init_qty":      str(round(qty, 4)),
                 "add_count":     0,
                 "add_swings_n":  0,
@@ -5874,6 +5917,12 @@ CME_GAP_SL_WIN      = 12         # SL=補滿前12根1H極值
 CME_GAP_FILL_WIN_H  = 336        # 缺口有效期2週
 CME_GAP_TIMEOUT_H   = 300        # 進場後300h未觸SL/TP→市價平倉(回測同款)
 CME_GAP_STATE_FILE  = "cme_gap_state.json"
+
+# ★2026-07-19 全域時間停損(用戶要求改善持單體感):任何倉開超過此時數還沒觸TP/SL→市價平。
+# 動機:真實持倉分佈=贏單中位0h(秒收)但輸單拖3.8h、3筆抱>3天(最長85h)→「贏的秒跑輸的拖著看紅盤」體感最差。
+# 回測(_bt_fixed_tp時停掃描,固定2.5R空):24h時停→平均持倉68/45h砍到20/18h、勝率44→50%、EV降但2策略仍5/7正。
+# 用戶選24h(帳戶小無所謂,體感優先)。cme_gap有自己的300h超時故豁免。
+GLOBAL_TIMESTOP_H   = 24
 _cme_state: Dict[str, Any] = {}
 
 def _cme_load_state():
