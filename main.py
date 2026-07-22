@@ -4433,9 +4433,9 @@ class SykesTradingBot:
         elif tf_id == "1H" and direction == "long" and is_double_bottom:
             exit_strategy = "swing_tp"                                   # 1H W底多：TP1+轉折移SL
         elif tf_id == "1H" and direction == "short" and is_macd_short:
-            exit_strategy = "line_full"                                  # ★1H MACD空→麥門切線整倉出場(2026-06-16):
-            #   3幣WF驗證段:切線+0.795/MDD9% >> 現役pivot移SL +0.390、N字型+0.649、固定2R+0.655。
-            #   crypto上漂=空單肉短,切線收盤破線即平=全場最強空單出場。山寨經3709行2.5R落袋規則銀行化。
+            exit_strategy = ""                                           # ★2026-07-19 1H MACD空改固定2.5R全平(用戶選保守版)。
+            #   舊「麥門切線」的+0.795是3幣小樣本;全市值7期忠實重測:切線只+0.222/4期正,
+            #   固定2.5R=+0.265/5期正(EV+一致性都勝)。tp override見下方SL/TP區塊(比照吞噬空單一目標)。
         elif tf_id == "1H" and direction == "long" and is_macd_long:
             exit_strategy = "swing_full"                                 # 1H MACD多(新增):整倉轉折移SL讓跑(驗+0.605>TP1.5+0.465,順勢抱)
         elif tf_id == "1H" and direction == "short" and is_short:
@@ -4446,8 +4446,9 @@ class SykesTradingBot:
             exit_strategy = "swing_full"                                 # ★15m MACD空(新)：整倉pivot移SL(保守版,回測訓+0.148/驗+0.254/MDD24%)
         elif is_box_short:
             exit_strategy = "box_trend"                                  # 箱突破空：1R保本+4R整倉大TP(讓趨勢跑)
-        elif is_oisq_long or is_oisq_short:
-            exit_strategy = "swing_full"                                 # OI壓縮突破：整倉轉折移SL讓跑(抓噴出尾,驗+0.309/賺賠3.1/MDD6%)
+        elif is_oisq_long:
+            exit_strategy = "swing_full"                                 # OI壓縮突破多：整倉轉折移SL讓跑(抓噴出尾,驗+0.309/賺賠3.1/MDD6%)
+            # ★OISQ空2026-07-19改固定2.5R全平(不進此分支,exit_strategy=""):全市值7期讓跑+0.392/5期→固定2.5R+0.506/6期
         elif is_conv_long:
             exit_strategy = "swing_full"                                 # 收斂突破多(限主流)：整倉轉折移SL讓跑(吃轉折加碼,session驗+0.17/加碼+0.8~1.0)
         elif is_bpr_long or is_bpr_short:
@@ -4485,6 +4486,10 @@ class SykesTradingBot:
         # 吞噬空：固定 2R 單一目標(回測 2R > 1.5R 早收;高點被拒的空要讓它跑到2R)
         if direction == "short" and is_engulf_short and not is_box_short:
             p = {**p, "tp1_mult": 2.0, "tp2_intraday_mult": 2.0, "tp2_swing_mult": 2.0}
+        # ★1H MACD空：固定 2.5R 單一目標close-all(2026-07-19,用戶選保守版)。全市值7期回測固定2.5R+0.265/5期正>切線+0.222/4期正。
+        #   OISQ空的tp在下方OISQ SL區塊直接設(它有自己的range止損);此處只管MACD空(走預設SL/TP路徑)。
+        if direction == "short" and tf_id == "1H" and is_macd_short and not is_box_short and not is_engulf_short and not is_oisq_short:
+            p = {**p, "tp1_mult": 2.5, "tp2_intraday_mult": 2.5, "tp2_swing_mult": 2.5}
         # BPR：固定 1.5R 單一目標(對齊回測simulate_trade_C的exit_fixed_r(...,1.5,1.5,999),非trail)
         if is_bpr_long or is_bpr_short:
             p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 1.5, "tp2_swing_mult": 1.5}
@@ -4551,7 +4556,8 @@ class SykesTradingBot:
             tp1_target = current_close - risk_dist * p["tp1_mult"]          # 固定R 1.0
             tp2_target = current_close - risk_dist * p["tp2_intraday_mult"] # 2.5
 
-        # OI壓縮突破:止損放「12h range 對邊 ± 0.3ATR」(對齊回測)。讓跑出場(swing_full)不掛固定TP。
+        # OI壓縮突破:止損放「12h range 對邊 ± 0.3ATR」(對齊回測)。
+        #   多=讓跑(swing_full)不掛固定TP;★空=固定2.5R全平(2026-07-19,用戶保守版,全市值7期+0.506/6期正)。
         if is_oisq_long or is_oisq_short:
             _rh_sq = float(df["high"].values[-13:-1].max()); _rl_sq = float(df["low"].values[-13:-1].min())
             if is_oisq_long:  calculated_sl = round(_rl_sq - 0.3 * current_atr, 8)
@@ -4561,8 +4567,12 @@ class SykesTradingBot:
                 if _dbg: print(f"[OISq-SL] {symbol_item} range止損超範圍({risk_pct:.3%})→跳過", flush=True)
                 return
             risk_dist  = abs(current_close - calculated_sl)
-            tp1_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 1.5  # 讓跑不掛固定TP,此值僅供顯示
-            tp2_target = current_close + (risk_dist if is_oisq_long else -risk_dist) * 3.0
+            if is_oisq_long:
+                tp1_target = current_close + risk_dist * 1.5   # 多:讓跑不掛固定TP,此值僅供顯示
+                tp2_target = current_close + risk_dist * 3.0
+            else:
+                tp1_target = current_close - risk_dist * 2.5   # ★空:固定2.5R單一目標全平
+                tp2_target = current_close - risk_dist * 2.5
 
         # BPR:止損放zone遠端(bot多/top空),距離不足0.6%則外推(對齊回測apply_sl_floor,非直接跳過)。固定1.5R單一目標。
         if is_bpr_long or is_bpr_short:
