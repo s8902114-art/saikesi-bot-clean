@@ -3150,6 +3150,14 @@ def _dh_cvd_ok(symbol_item: str, okx_bar_fmt: str, tf_id: str, direction: str) -
 
 # ── 數據獵手做空 + ls_ratio/taker_ratio（OKX rubik 公開端點，快取5分；原幣安 fapi 被雲端IP封鎖）──
 C3_15M_LONG_ENABLED = False      # 2026-07-01暫關:忠實複刻重測EV-0.078(n=566)且逐期惡化,原宣稱+0.133是裸訊號跟CVD/ls加碼子集混在一起,先關
+MACD_SHORT_1H_ENABLED = False    # ★2026-08-01關閉:結構性太薄,出場怎麼調都救不了。
+# 用戶問「這樣的勝率R蓋得過嗎」逼出的容錯分析(容錯=實際勝率-兩平勝率,live勝率一向低回測8-10點):
+#   TP2.0R/無時停 容錯10.1點(最佳,EV+0.257但最長連虧15) / TP2.5R/無 9.6點 / TP1.5R/無 9.4點
+#   / TP2.5R+24h 8.8點 / TP2.5R+12h(當時現行) 8.0點(最差,EV被砍60%)
+#   → **所有配置容錯都只有8~10點,live衰減直接吃光**。對照OISQ空17.8點/OISQ多13.2點=健康。
+# 13天真R實證也一致:MACD -0.122R(n=17,最長連虧7)。非bug,是edge本身薄。
+# 重開前置條件:進場側找到能把容錯推到≥13點的濾網(出場微調已窮盡,別再試);腳本_bt_winrate_config.py。
+# ※只關1H MACD空;15m MACD空(限3幣+tFlow,未在此輪測試範圍)不受影響。
 MACD_LONG_1H_ENABLED = True      # 2026-07-07重測(真4H重採樣,含現役延伸濾<=4ATR):n=54,EV+0.315,PF2.42,5/7期正
                                  # (23Q4/24Q1/24Q3/24Q4牛/25H2正,只24Q2/25H1負)——樣本不算大但一致性夠,維持開。
                                  # ★訂正:先前一度誤植成"3/7期正"與15m那版混記,已用同腳本重算確認是5/7,更正。
@@ -4324,7 +4332,7 @@ class SykesTradingBot:
                         _lo1h = df["low"].values
                         _dlow = float(_lo1h[-240:].min()) if len(_lo1h) >= 240 else float(_lo1h.min())
                         _floor_ok = (current_close < _dlow) or ((current_close - _dlow) >= 1.0 * current_atr)
-                        if _vol_ok and _brk_dn and _floor_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
+                        if MACD_SHORT_1H_ENABLED and _vol_ok and _brk_dn and _floor_ok and (not trend_up_4h) and dead and macd_difslope_ok(dif, "short"):
                             _tfok, _tfr = tflow_confirm(_bn_sym, "short")
                             if _tfok is not False:    # None(非3幣/thin/失敗)=放行,只靠帶量+突破
                                 is_macd_short = True; dh_boost = BOOST_MULT
