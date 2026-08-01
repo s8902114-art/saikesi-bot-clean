@@ -2277,6 +2277,21 @@ def check_trailing_stops_for_real():
         print(f"[Trailing] 初始化交易所失敗: {e}")
         return
 
+    # ★2026-08-01 持倉存在性改「每輪全查一次」(原本逐倉 fetch_positions([symbol]) 在迴圈內打N次API,
+    #   OKX倉位端點限流(10次/2秒)→瞬斷回空→連2輪即誤判「倉位已關閉」把還開著的倉踢出追蹤池
+    #   →trail/保本/時間停損全部失效(13天實證:31筆持倉>24h但時停只觸發2次、保本0次)。
+    #   全查=1次API,既省限流又避免誤刪;查詢失敗時本輪完全不做移除判定(_pos_ok=False)。
+    _pos_set = set(); _pos_ok = False
+    try:
+        for _p in ex.fetch_positions():
+            if abs(float(_p.get("contracts") or 0)) > 0 and _p.get("side"):
+                _pos_set.add((_p.get("symbol"), _p.get("side")))
+        _pos_ok = True
+    except Exception as _fpe:
+        print(f"[Trailing] 全倉查詢失敗(本輪不做移除判定): {_fpe}", flush=True)
+    _okx_n = sum(1 for t in active_real_trades.values() if t.get("exchange") == "okx")
+    print(f"[Trailing] 追蹤池 OKX={_okx_n} 交易所實際持倉={len(_pos_set)} 查詢OK={_pos_ok}", flush=True)
+
     for trade_key in list(active_real_trades.keys()):
         trade     = active_real_trades[trade_key]
         # ★★致命bug修復:此段用 OKX client 查持倉,只能處理 OKX 倉位。
@@ -2290,19 +2305,15 @@ def check_trailing_stops_for_real():
         name      = symbol.split("/")[0]
 
         try:
-            # 確認倉位是否仍存在
-            positions = ex.fetch_positions([symbol])
-            has_pos = any(
-                p["symbol"] == symbol
-                and abs(float(p.get("contracts") or 0)) > 0
-                and p.get("side") == direction
-                for p in positions
-            )
+            # 確認倉位是否仍存在(用本輪全查結果,不再逐倉打API)
+            if not _pos_ok:
+                continue                      # 全查失敗→本輪跳過此倉的管理與移除判定(不誤刪)
+            has_pos = (symbol, direction) in _pos_set
             if not has_pos:
-                # ★防孤兒倉(2026-06-18):單次查無可能是API瞬斷/symbol格式不符(SOL案例),
-                #   需連2輪查無才移除,避免把還開著的倉踢出追蹤變孤兒(失管)。
+                # ★防孤兒倉(2026-06-18→2026-08-01加嚴):連3輪查無才移除。
+                #   舊版連2輪+逐倉查限流瞬斷=大量誤刪→倉位失管跑到80h沒人砍(13天實證)。
                 _miss = int(trade.get("_pos_miss", 0)) + 1
-                if _miss < 2:
+                if _miss < 3:
                     trade["_pos_miss"] = _miss; save_active_trades(); continue
                 print(f"[Trailing] {name} 倉位已關閉(連{_miss}輪查無)，移除追蹤")
                 active_real_trades.pop(trade_key, None); save_active_trades()
@@ -6093,10 +6104,13 @@ def main_polling_loop():
         try:
             active_tfs_to_run = synchronise_and_wait_next_candle()
 
+            # ★2026-08-01 出場管理必須先跑,且不受 !pause 影響。
+            #   舊版 `if _PAUSED: continue` 擺在前面→暫停時連「既有倉的移動停損/保本/時間停損」都停擺,
+            #   等於裸奔只剩原始SL(與熔斷訊息宣稱的「既有倉照常管理」不符)。!pause 語意=停開新倉,不是停管理。
+            check_trailing_stops_for_real()
+
             if _PAUSED:
                 continue
-
-            check_trailing_stops_for_real()
 
             # CME週末缺口:武裝/補滿偵測/進場(便宜,只打3幣K線API)
             try:
