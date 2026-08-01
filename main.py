@@ -3246,6 +3246,42 @@ def _check_dh_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tup
 VEGAS_SHORT_ENABLED = False  # 2026-07-01忠實複刻重測確認關閉:7期間n=70,EV-0.229(PF0.65),5/7期負,補資料後更負,維持關
 BOX_SHORT_ENABLED = True     # 2026-07-01忠實複刻重測轉正式:7期間n=2228,EV+0.124,23Q4~24Q1負(早期)、24Q2起連續5期同號正(18個月),非雜訊,開啟
 # 15m 維加斯大通道 fade 做空(2026-06-13,WF驗+0.182/MDD16%/各年不虧)
+def _multitouch_support_dist(inst_id: str, entry_px: float, tol: float = 0.015,
+                             pv: int = 2, need: int = 2, want_bars: int = 1920):
+    """★2026-08-01 大支撐距離(用戶指控「一直空在4H/日線大支撐上方」的驗證版實作)。
+    定義=近20天15m擺動低(前後各2根,已確認)群聚:彼此<1.5%且≥2次觸及=「被測試過的大支撐」,
+    取進場價下方最近的群心,回傳 (進場價-支撐)/進場價。抓不到足夠資料→回None(呼叫端放行不擋)。
+    OKX單次上限300根→用 history-candles 的 after 分頁往回抓(只在訊號已通過其他濾網時才呼叫,頻率低)。
+    ★回測依據(_bt_box_decisive衍生,7期n=1875):此定義下「支撐上方1.5~12%」的箱突破空
+      EV=-0.186/勝率35%(對照其他+0.099/47%)→擋掉後EV+0.132→+0.154,只砍7%訊號、總利潤+22R。
+      ※註:改用4H擺動低的單次API版本被測掉(擋到的681筆EV仍+0.080=擋掉好單,總利潤反而少),故採本版。"""
+    try:
+        lows = []; after = None
+        for _ in range(8):                        # 8×300=2400根上限
+            q = {"instId": inst_id, "bar": "15m", "limit": "300"}
+            if after: q["after"] = after
+            rows = _fetch_okx_public_data("/api/v5/market/history-candles", q)
+            if not rows: break
+            for r in rows:
+                lows.append((int(r[0]), float(r[3])))   # ts, low
+            after = str(rows[-1][0])
+            if len(lows) >= want_bars: break
+        if len(lows) < 400: return None
+        lows.sort(key=lambda x: x[0])
+        arr = np.array([v for _, v in lows][-want_bars:])
+        sw = [arr[j] for j in range(pv, len(arr)-pv) if arr[j] == arr[j-pv:j+pv+1].min()]
+        sw = [v for v in sw if v < entry_px]
+        if len(sw) < need: return None
+        for v in sorted(sw, reverse=True):
+            grp = [x for x in sw if abs(x-v)/v <= tol]
+            if len(grp) >= need:
+                return (entry_px - float(np.mean(grp))) / entry_px
+        return None
+    except Exception as e:
+        print(f"[大支撐] {inst_id} 計算失敗(放行): {e}")
+        return None
+
+BOX_SUPPORT_GATE = True   # 箱突破空:大支撐危險區(上方1.5~12%)擋空。見_multitouch_support_dist註解回測依據。
 BOX_DECISIVE_ATR = 0.15  # ★2026-07-19 果斷破底margin(用戶指正:現行cl<bl接受任意幅度收破→6筆實單3筆假突破,
 # 破底幅0.05~0.59%多為noise)。用戶定義=針尖(wick極值)定箱✓+實體要突破+很明顯。回測_bt_box_decisive.py 7期:
 # margin 0→0.15 EV+0.124→+0.132、維持5/7正、砍16%最爛noise單;0.3更肥但掉4/7。取0.15=更好EV+同一致性+少churn。
@@ -3273,6 +3309,13 @@ def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tu
         if len(cvd) < 2 or len(oi) < 4: return False, ""
         if not (cvd.iloc[-1] < cvd.iloc[-2]): return False, ""    # CVD↓(賣方主導)
         if not (oi.iloc[-1] > oi.iloc[-4]): return False, ""      # OI升(新空進場)
+        # ★2026-08-01 大支撐危險區閘(用戶反覆指出「一直空在4H/日線大支撐上方會虧」,7期回測證實對箱突破空成立):
+        #   放在所有濾網之後才算(分頁抓K線較貴,此時訊號已極少)。抓不到資料→放行不擋。
+        if BOX_SUPPORT_GATE:
+            _g = _multitouch_support_dist(OKX_SWAP.get(symbol_item, symbol_item), float(cl[-1]))
+            if _g is not None and 0.015 < _g <= 0.12:
+                print(f"[箱突破-大支撐] {symbol_item} 收盤在多次測試支撐上方 {_g*100:.1f}%(危險區),擋空")
+                return False, ""
         return True, "破窄箱底+帶量+CVD↓+OI升"
     except Exception as e:
         print(f"[Box-Short] {symbol_item} 失敗: {e}")
