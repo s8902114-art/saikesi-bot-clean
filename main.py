@@ -4665,6 +4665,13 @@ class SykesTradingBot:
             _rh_sq = float(df["high"].values[-13:-1].max()); _rl_sq = float(df["low"].values[-13:-1].min())
             if is_oisq_long:  calculated_sl = round(_rl_sq - 0.3 * current_atr, 8)
             else:             calculated_sl = round(_rh_sq + 0.3 * current_atr, 8)
+            # ★2026-08-02 停損上限2.5ATR(用戶問「怎樣才抓得到真正的噴出段」逼出的發現):
+            #   OISQ的range對邊停損中位數寬達3.4-3.8ATR(一般結構停損才1.5-2.5)→就算真的噴3ATR也只值0.8-0.9R,
+            #   「噴出抓到了但R沒收好」。7期回測收緊到2.5ATR上限:多EV+0.154→+0.221(+43%)/空+0.277→+0.345(+25%),
+            #   容錯幾乎不變(13.2→12.6 / 17.8→17.7)、正期不變(6/7 / 5/7)、逐期幾乎全面改善。
+            #   (更緊的2.0ATR多單容錯掉到10.1、1.5ATR崩到4.9=過度收緊會被雜訊掃,2.5是甜蜜點)
+            if is_oisq_long:  calculated_sl = max(calculated_sl, current_close - 2.5 * current_atr)
+            else:             calculated_sl = min(calculated_sl, current_close + 2.5 * current_atr)
             risk_pct = abs(calculated_sl - current_close) / current_close
             if risk_pct < MIN_SL_PCT or risk_pct > MAX_SL:
                 if _dbg: print(f"[OISq-SL] {symbol_item} range止損超範圍({risk_pct:.3%})→跳過", flush=True)
