@@ -2341,15 +2341,16 @@ def check_trailing_stops_for_real():
             _ts_open = int(trade.get("ts_open") or 0)
             if not _ts_open and trade.get("tf_id") != "adopted":
                 _ts_open = int(trade.get("entry_ts", 0) or 0)
+            _tsh = _timestop_hours(trade)
             if (trade.get("exit_strategy") != "cme_gap" and _ts_open > 0
-                    and time.time() - _ts_open > GLOBAL_TIMESTOP_H * 3600):
+                    and time.time() - _ts_open > _tsh * 3600):
                 try:
                     ex.create_market_order(symbol=symbol,
                         side=("sell" if direction == "long" else "buy"),
                         amount=float(trade.get("remaining_amount", 0) or 0),
                         params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
                     _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
-                    dc_log(f"⏰ {name} 開倉滿{GLOBAL_TIMESTOP_H}h未到目標,市價平倉(時間停損)")
+                    dc_log(f"⏰ {name} 開倉滿{_tsh}h未到目標,市價平倉(時間停損)")
                 except Exception as _tse:
                     print(f"[TimeStop] {name} 平倉失敗: {_tse}")
                 active_real_trades.pop(trade_key, None); save_active_trades(); continue
@@ -2705,8 +2706,9 @@ def check_trailing_stops_for_real():
             _ts_open_bx = int(trade.get("ts_open") or 0)
             if not _ts_open_bx and trade.get("tf_id") != "adopted":
                 _ts_open_bx = int(trade.get("entry_ts", 0) or 0)
+            _tsh_bx = _timestop_hours(trade)
             if (trade.get("exit_strategy") != "cme_gap" and _ts_open_bx > 0
-                    and time.time() - _ts_open_bx > GLOBAL_TIMESTOP_H * 3600):
+                    and time.time() - _ts_open_bx > _tsh_bx * 3600):
                 try:
                     _rem = float(trade.get("remaining_qty", 0) or 0)
                     if _rem > 0:
@@ -2718,7 +2720,7 @@ def check_trailing_stops_for_real():
                                 _bingx_request("POST", "/openApi/swap/v2/trade/cancelOrder",
                                                {"symbol": bingx_symbol, "orderId": sl_order_id}, headers)
                             except Exception: pass
-                            dc_log(f"⏰ BingX {bingx_symbol} 開倉滿{GLOBAL_TIMESTOP_H}h未到目標,市價平倉(時間停損)")
+                            dc_log(f"⏰ BingX {bingx_symbol} 開倉滿{_tsh_bx}h未到目標,市價平倉(時間停損)")
                             active_real_trades.pop(trade_key, None); save_active_trades(); continue
                 except Exception as _tse:
                     print(f"[BingX TimeStop] {trade_key} 平倉失敗: {_tse}")
@@ -6007,6 +6009,17 @@ GLOBAL_TIMESTOP_H   = 12   # ★2026-08-01 24→12h(用戶:「不要那種靠少
 #   OISQ空 45.7%→52.1%→54.3%; OISQ多 39.0%→53.1%→55.4%(6/7期正)。EV略降(空+0.145→+0.102)但仍正。
 # ★為何不改用小TP(0.5R)衝勝率:兩平勝率66.7% vs 回測72.5%=容錯僅5.8點,而live勝率一向比回測低8-10點
 #   →實盤會直接翻負(看起來一直在贏、帳戶卻一直縮)。TP維持2.5R(容錯15.6點)靠時停提勝率才是穩的做法。
+# ★★2026-08-02 訂正:12h**只適用固定R型**。全策略檢視發現讓跑型吃不消(我原本全域套用=沒分策略驗證的錯):
+#   MACD多(swing_full讓跑,用真實出場模型重測): 無時停EV+0.309/容錯18.9 → 24h +0.271/18.3 → **12h +0.134/12.1**
+#     =12h砍掉57%EV、容錯掉6.2點,只換到+3.5點勝率 → 不划算,改24h。
+#   OISQ多(讓跑+2.5ATR上限): 24h +0.215/容錯11.3 ≈ 12h +0.183/11.1(12h勝率高2.4點) → 兩者接近,統一走24h。
+#   固定R型(OISQ空/吞噬空/箱突破空)維持12h(已驗證:OISQ空容錯17.8🟢)。
+LETRUN_TIMESTOP_H   = 24   # 讓跑型專用(見上方訂正說明)
+_LETRUN_ES = ("swing_full", "line_full", "line_add", "swing_tp", "swing_tp_1h", "tp_line")
+
+def _timestop_hours(trade) -> int:
+    """依出場型態決定時間停損時數:讓跑型24h/固定R型12h(cme_gap另有300h,不走此函數)。"""
+    return LETRUN_TIMESTOP_H if trade.get("exit_strategy") in _LETRUN_ES else GLOBAL_TIMESTOP_H
 _cme_state: Dict[str, Any] = {}
 
 def _cme_load_state():
