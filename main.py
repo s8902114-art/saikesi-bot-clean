@@ -192,7 +192,12 @@ CONC_FLOOR = 0.3           # 風險遞減下限(不會縮到太小)。Discord !c
 # 系統底層控制開關
 
 _LIVE_MODE = True if os.environ.get("OKX_API_KEY") else False
-_PAUSED = False
+_PAUSED = True   # ★2026-08-02 止血暫停(用戶授權「直接處理」):3個月手續費-80.11U而帳戶僅2-20U;
+# 13天理論獲利+2.28U但同期手續費-5.32U=理論獲利的2.3倍 → 頻率×手續費把edge吃光還倒扣。
+# 且實盤12.3個來回/天 vs 回測組合3.79筆/天=3.2倍(手冊鐵則:差3倍以上=有bug),頻率來源未查明。
+# ★注意:!pause已於同日修好=只擋新倉,既有倉的移動停損/保本/時間停損照常運作(不會裸奔)。
+# 恢復條件:①頻率查明並修正到接近回測 ②_pull_records.py分頁修好後重新對帳 ③確認手續費佔比合理。
+# 用 !resume 可隨時恢復。
 _BOT_START_TS = time.time()
 _INITIAL_BALANCE: Optional[float] = None   # 啟動時抓取一次，固定風險基準
 _STATE_LOCK = Lock()
