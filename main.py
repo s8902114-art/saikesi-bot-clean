@@ -928,7 +928,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                               stop_loss: float, tp1: float, tp2: float, exit_mode: str = "fixed",
                               tf_id: str = "15m", position_scale: float = 1.0,
                               pyramid_eligible: bool = False,
-                              exit_strategy: str = "", allow_stack: bool = False) -> None:
+                              exit_strategy: str = "", allow_stack: bool = False,
+                              timestop_h: int = 0) -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1310,6 +1311,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "pyramid_eligible": pyramid_eligible,  # 僅驗證過的多單(C3/W底)可加碼
                 "exit_strategy":    exit_strategy,     # ""固定R/line_full切線/swing_*移SL/line_add加碼
                 "entry_ts":         int(time.time()),  # 開倉時戳(切線/移SL只看進場後的K)
+                "ts_h":             int(timestop_h or 0),   # ★2026-08-02 本策略專屬時間停損(0=用型態預設)
                 "full_contracts":   str(total_contracts),  # 整倉張數(市價平用)
                 "add_count":        0,                 # line_add:已N型轉折加碼次數(守3)
                 "add_swings_n":     0,                 # line_add:已處理的順勢轉折數(避免同轉折重複加)
@@ -1345,7 +1347,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
                                   stop_loss: float, tp1: float, tp2: float,
                                   exit_mode: str = "fixed", tf_id: str = "15m",
                                   position_scale: float = 1.0, exit_strategy: str = "",
-                                  allow_stack: bool = False) -> None:
+                                  allow_stack: bool = False,
+                                timestop_h: int = 0) -> None:
     """
     BingX 永續合約下單
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1623,6 +1626,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
             "tf_id":            tf_id,
             "exit_strategy":    exit_strategy,
             "entry_ts":         int(time.time()),
+            "ts_h":             int(timestop_h or 0),   # ★2026-08-02 本策略專屬時間停損(0=用型態預設)
             "init_qty":         _base_qty,    # line_add 加碼基礎量
             "add_count":        0,
             "add_swings_n":     0,
@@ -4530,6 +4534,7 @@ class SykesTradingBot:
         #   15m MACD多(參1H轉折驗+0.142/RA0.36) → swing_tp_1h
         #   箱突破空/15m C3多 → 固定R(切線/移SL未變好)
         exit_strategy = ""
+        _strat_ts_h = 0          # ★2026-08-02 策略專屬時間停損(0=用型態預設:讓跑24h/固定R 12h)
         if is_dh_short:
             exit_strategy = "line_full"                                  # DH空：整倉切線讓跑(2026-06-13關加碼:
             #   按年顯示加碼只在強熊好(2022),震盪/牛市害它(2024純跑+0.32 vs 加碼-0.02)。切線出場不變,只去加碼。
@@ -4543,8 +4548,12 @@ class SykesTradingBot:
             #   固定2.5R=+0.265/5期正(EV+一致性都勝)。tp override見下方SL/TP區塊(比照吞噬空單一目標)。
         elif tf_id == "1H" and direction == "long" and is_macd_long:
             exit_strategy = "swing_full"                                 # 1H MACD多(新增):整倉轉折移SL讓跑(驗+0.605>TP1.5+0.465,順勢抱)
+            _strat_ts_h = 24    # 24h最佳(EV+0.271/容錯18.3🟢);12h砍57%EV、容錯掉6.2點
         elif tf_id == "1H" and direction == "short" and is_short:
             exit_strategy = "swing_full"                                 # 1H C3空+階梯：整倉pivot移SL(驗+0.263/MDD10%)
+            _strat_ts_h = 12    # ★2026-08-02 C3空專屬12h(讓跑型預設24h對它不利):
+            # 3期回測(n=49,樣本小視為線索) 12h勝率63.3%/EV+0.171/容錯13.5🟢/連虧3 vs 24h 53.1%/+0.161/10.2🟡/連虧4
+            # =12h每一項都較好。★證明「按出場型態設時停」仍太粗,必須逐策略。
         elif tf_id == "15m" and direction == "long" and is_macd_long:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
         elif tf_id == "15m" and direction == "short" and is_macd_short:
@@ -4768,7 +4777,7 @@ class SykesTradingBot:
                         p["exit_mode"], tf_id,
                         position_scale=dh_boost * _concentration_mult(direction, "okx"),
                         pyramid_eligible=_pyr_elig,
-                        exit_strategy=exit_strategy,
+                        exit_strategy=exit_strategy, timestop_h=_strat_ts_h,
                     )
             if EXCHANGE_ENABLED.get("bingx", True):
                 if _dir_skew_block(direction, "bingx"):
@@ -4779,7 +4788,7 @@ class SykesTradingBot:
                         signal_payload["sl"], signal_payload["tp1"], signal_payload["tp2"],
                         p["exit_mode"], tf_id,
                         position_scale=dh_boost * _concentration_mult(direction, "bingx"),
-                        exit_strategy=exit_strategy,
+                        exit_strategy=exit_strategy, timestop_h=_strat_ts_h,
                     )
 
             # ── 高頻固定1R 平行層(各跑各的,觸發就都開):現役3格訊號成立→多開一筆hf_1r獨立倉 ──
@@ -6019,6 +6028,8 @@ _LETRUN_ES = ("swing_full", "line_full", "line_add", "swing_tp", "swing_tp_1h", 
 
 def _timestop_hours(trade) -> int:
     """依出場型態決定時間停損時數:讓跑型24h/固定R型12h(cme_gap另有300h,不走此函數)。"""
+    _h = int(trade.get("ts_h") or 0)
+    if _h > 0: return _h                     # 策略專屬(下單時寫入)優先
     return LETRUN_TIMESTOP_H if trade.get("exit_strategy") in _LETRUN_ES else GLOBAL_TIMESTOP_H
 _cme_state: Dict[str, Any] = {}
 
