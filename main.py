@@ -2351,7 +2351,12 @@ def check_trailing_stops_for_real():
             if not _ts_open and trade.get("tf_id") != "adopted":
                 _ts_open = int(trade.get("entry_ts", 0) or 0)
             _tsh = _timestop_hours(trade)
-            if (trade.get("exit_strategy") != "cme_gap" and _ts_open > 0
+            # ★2026-08-03 用戶要求「手動單不要有持倉時數限制」:接管倉必須帶bot_verified(=接管時用broker tag驗過是bot開的)
+            #   才准被時間停損平掉。7/19手動倉保護上線「之前」被接管、殘留在active_trades.json的舊資料沒有此旗標→一律不碰。
+            _adopted_unverified = (trade.get("tf_id") == "adopted" and not trade.get("bot_verified"))
+            if _adopted_unverified and _ts_open > 0 and time.time() - _ts_open > _tsh * 3600:
+                print(f"[TimeStop] {name} 接管倉未驗證來源(可能是手動倉)→不套時間停損", flush=True)
+            if (not _adopted_unverified and trade.get("exit_strategy") != "cme_gap" and _ts_open > 0
                     and time.time() - _ts_open > _tsh * 3600):
                 try:
                     ex.create_market_order(symbol=symbol,
@@ -2716,6 +2721,8 @@ def check_trailing_stops_for_real():
             if not _ts_open_bx and trade.get("tf_id") != "adopted":
                 _ts_open_bx = int(trade.get("entry_ts", 0) or 0)
             _tsh_bx = _timestop_hours(trade)
+            if trade.get("tf_id") == "adopted" and not trade.get("bot_verified"):
+                _ts_open_bx = 0   # ★2026-08-03 未驗證來源的接管倉不套時停(手動倉保護,與OKX一致)
             if (trade.get("exit_strategy") != "cme_gap" and _ts_open_bx > 0
                     and time.time() - _ts_open_bx > _tsh_bx * 3600):
                 try:
@@ -5876,6 +5883,7 @@ def adopt_untracked_okx_positions():
                 "exit_strategy":inferred_es,
                 "entry_ts":int(time.time()) - 24*3600,  # ★往前24h(2026-06-20):redeploy重撿會重設entry_ts,6h只6根K→trail找不到pivot;24h給夠pivot(錯側由合法側檢查擋)
                 "ts_open":int(time.time()),  # ★2026-07-19真實接管時間(給時間停損用;entry_ts被回撥24h不能拿來算時停)
+                "bot_verified":True,   # ★2026-08-03 已用broker tag驗證=bot自己開的倉,才准被時間停損碰
             }
             adopted+=1
             dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ swing_full 達1R保本+N字型移SL")
