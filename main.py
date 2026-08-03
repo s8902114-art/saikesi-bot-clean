@@ -5832,13 +5832,27 @@ def adopt_untracked_okx_positions():
             # ★2026-07-19 手動倉不接管(用戶LINK案例:手動8.4張多單被接管→移動停利貼太近被插針掃出)。
             #   判定:近期該inst同方向「開倉單」(非reduceOnly)是否帶ccxt broker tag(6b9ad766b55dBCDE)=bot下的。
             #   全無bot tag=手動倉→只通知、絕不接管。判定失敗也保守不接管(寧漏勿越權)。
+            # ★★2026-08-03 修正致命邏輯錯誤(用戶WLD手動多單被接管並時停平掉的根因):
+            #   舊版問「這個幣**歷史上**bot有沒有開過同方向倉」,archive端點回3個月資料→bot六七月做過WLD多
+            #   →命中→把用戶8/2手動開的WLD多當成bot倉接管。**正確問法是「**這一筆倉**是不是bot開的」**。
+            #   修法:用倉位建立時間(info.cTime)當錨,只採計「本倉建立之後」的開倉單;並改用7天端點(orders-history)
+            #   為主(涵蓋當前倉的生命週期且不含陳年舊單),archive僅在7天端點無資料時備援。
+            _pos_ct = 0
+            try: _pos_ct = int((p.get("info") or {}).get("cTime") or 0)
+            except Exception: _pos_ct = 0
             try:
-                _oh = ex.private_get_trade_orders_history_archive({"instType": "SWAP", "instId": inst_id, "limit": "100"})
+                _oh = ex.private_get_trade_orders_history({"instType": "SWAP", "instId": inst_id, "limit": "100"})
+                _rows = _oh.get("data") or []
+                if not _rows:
+                    _oh = ex.private_get_trade_orders_history_archive({"instType": "SWAP", "instId": inst_id, "limit": "100"})
+                    _rows = _oh.get("data") or []
                 _bot_opened = False
-                for _o in (_oh.get("data") or []):
+                for _o in _rows:
                     if _o.get("state") != "filled": continue
                     if str(_o.get("reduceOnly")) == "true": continue
                     if _o.get("posSide") and _o.get("posSide") != side: continue
+                    # ★只採計本倉建立之後(容60秒誤差)的開倉單;早於本倉=別筆舊倉的單,與本倉無關
+                    if _pos_ct and int(_o.get("cTime") or 0) < _pos_ct - 60000: continue
                     _is_open = (side == "long" and _o.get("side") == "buy") or (side == "short" and _o.get("side") == "sell")
                     if _is_open and str(_o.get("tag") or "").startswith("6b9ad766b55d"):
                         _bot_opened = True; break
