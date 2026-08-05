@@ -3381,6 +3381,38 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
         return False, ""
 
 
+
+MTF_BIAS_GATE_ENABLED = True   # ★2026-08-05 多時框偏見對齊確認層(用戶TradingView「紅綠燈」概念的可驗證版)
+# ★來源說明:用戶的Bisancos「紅綠燈Pro/3+1」指標原始碼受保護(TradingView原始碼選項灰色)=黑盒無法忠實複刻,
+#   故本實作是**通用概念**版(各時框收盤 vs 該時框EMA20),**不是**該指標的複刻,結果也不能用來證實/證偽它。
+# ★概念獨立驗證(_bt_mtf_bias_concept.py,19,522個交易日觀測/7期):下級時框與日線對齊時,
+#   「1ATR先到」勝率 47.1%(0對齊) → 55.3%(1對齊) → 56.4%(2對齊);2:1出場EV +0.019(3/7期正) → +0.23(7/7期正)。
+#   ※用戶轉述作者稱「約7成勝率」——實測含停損的勝率是~56%;7成較可能是「當日收盤方向」口徑(實測58-67%),
+#     兩者不是同一個定義,非作者造假。
+# ★疊到現役策略的增益(_bt_mtf_gate_on_strats.py,7期,只擋14-21%訊號):
+#   OISQ空 勝率53.6→62.2% / EV+0.345→+0.584 / 容錯17.7→30.7 / 正期5→6期
+#   OISQ多 勝率47.2→49.2% / EV+0.215→+0.291 / 容錯11.3🟡→14.7🟢 / 正期6/7不變
+#   MACD多 勝率55.4→62.5% / EV+0.271→+0.403 / 容錯18.3→27.6 (★n僅56→48=樣本小,方向一致但幅度別當準)
+def _mtf_bias_ok(okx_swap_symbol: str, direction: str) -> bool:
+    """日線與4H偏見是否都與進場方向同向。偏見=該時框收盤在EMA20之上(多)/之下(空)。
+    抓不到資料→回True(放行不擋,與其他濾網一致的保守處理)。"""
+    if not MTF_BIAS_GATE_ENABLED: return True
+    try:
+        want = 1 if direction == "long" else -1
+        for _bar in ("1D", "4H"):
+            _d = fetch_market_candles(okx_swap_symbol, _bar, 60)
+            if _d is None or _d.empty or len(_d) < 25: return True     # 資料不足→放行
+            _c = _d["close"]
+            _e = _c.ewm(span=20, adjust=False).mean()
+            _b = 1 if float(_c.iloc[-1]) > float(_e.iloc[-1]) else -1
+            if _b != want:
+                print(f"[偏見閘] {okx_swap_symbol} {direction} 與{_bar}偏見不同向,擋單")
+                return False
+        return True
+    except Exception as _e:
+        print(f"[偏見閘] {okx_swap_symbol} 計算失敗(放行): {_e}")
+        return True
+
 OI_SQUEEZE_ENABLED = True   # ★2026-07-07迭代重開(多空雙向,見_check_oi_squeeze開頭+上方門檻常數註解):
                             # 原全市值多空合測n=14太小不可信;拆開4象限(多空×主流山寨)找到各自鬆門檻版本
                             # 空:OI2%/vol2.0x n=125/EV+0.222/PF1.80/5-7期正;多:OI1.5%/vol2.25x n=377/EV+0.103/PF1.41/6-7期正
@@ -4416,6 +4448,10 @@ class SykesTradingBot:
         if OI_SQUEEZE_ENABLED and tf_id == "1H":
             try:
                 _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
+                # ★2026-08-05 多時框偏見對齊確認層(見 _mtf_bias_ok 註解的回測依據):
+                #   OISQ空 勝率53.6→62.2%/容錯17.7→30.7;OISQ多 勝率47.2→49.2%/容錯11.3→14.7。只擋19-21%訊號。
+                if _sq in ("long", "short") and not _mtf_bias_ok(okx_swap_symbol, _sq):
+                    _sq = None
                 if _sq == "long":  is_oisq_long = True;  dh_boost = BOOST_MULT; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
                 elif _sq == "short": is_oisq_short = True; dh_boost = BOOST_MULT; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
             except Exception as _sqe:
