@@ -3513,6 +3513,114 @@ def _funding_overheated(inst_id: str):
         return None
 
 
+# ── 反向 S/R 區間閘(2026-08-26 上線) ────────────────────────────────────────
+SR_ZONE_GATE_ENABLED = True
+SR_ZONE_PV        = 3      # 樞紐左右確認根數(1H)
+SR_ZONE_TURN_ATR  = 1.5    # 官方「曾經有明顯轉折(爆漲或暴跌)」:離開樞紐後 conf 根內走幅 >= 1.5×ATR
+SR_ZONE_CONF      = 8      # 轉折確認窗(根)
+SR_ZONE_MERGE_ATR = 0.6    # 群聚容差:錨點距離 <= 0.6×ATR 視為同一區
+SR_ZONE_MIN_TOUCH = 2      # 官方「兩次成立,三次確認」→ 最低2次
+SR_ZONE_BUF_ATR   = 0.3    # 區間外緣容差
+SR_ZONE_BARS      = 900    # 1H 回看根數(約37天)
+_SR_ZONE_CACHE: Dict[str, Any] = {}   # instId -> (ts, zones)
+
+def _sr_zones_1h(inst_id: str):
+    """依官方講義定義建 1H 支撐/壓力**區間**(不是一條線)。回 list[dict(kind,lo,hi,touches)]。
+
+    ★來源:菁英交易學院「傳統技術分析 步驟2 支撐與壓力」講義(規格抄錄在
+      trading-backtest/_ELITE_COURSE_SPEC.md 第二節),原文要點:
+        「支撐與壓力不是一條線,而是一個『區域』」
+        畫法:找**明顯影線** → 觸及越多次越好 → **兩次成立,三次確認** → 時間週期越大越有效
+        有效性:**曾經有明顯轉折(爆漲或暴跌)** 且 **測試過不只一次**
+        用矩形畫區間的理由:「初學者常畫一條超精準的線,結果價格突破就誤認為可以交易,
+        但事實上他遇到了假突破」→ 區間是為了容錯
+    實作:①用**影線極值**(high/low)當錨點 ②樞紐左右各 PV 根確認 ③離開樞紐後 CONF 根內
+         走幅 >= TURN_ATR×ATR 才算「明顯轉折」 ④錨點距離 <= MERGE_ATR×ATR 併成同一區
+         ⑤區間 = [最低錨點, 最高錨點],touches = 併入的錨點數
+    """
+    try:
+        _c = _SR_ZONE_CACHE.get(inst_id)
+        if _c and time.time() - _c[0] < 1800:
+            return _c[1]
+        rows = []
+        after = None
+        for _ in range(4):                      # 4×300=1200根上限
+            q = {"instId": inst_id, "bar": "1H", "limit": "300"}
+            if after: q["after"] = after
+            r = _fetch_okx_public_data("/api/v5/market/history-candles", q)
+            if not r: break
+            rows += r
+            after = r[-1][0]
+            if len(rows) >= SR_ZONE_BARS: break
+        if len(rows) < 300:
+            _SR_ZONE_CACHE[inst_id] = (time.time(), None); return None
+        arr = sorted(({"ts": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
+                      for x in rows), key=lambda z: z["ts"])
+        hi = np.array([x["h"] for x in arr]); lo = np.array([x["l"] for x in arr])
+        cl = np.array([x["c"] for x in arr]); n = len(arr)
+        pc = np.concatenate([[cl[0]], cl[:-1]])
+        tr = np.maximum(hi - lo, np.maximum(np.abs(hi - pc), np.abs(lo - pc)))
+        atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+        pv, cf = SR_ZONE_PV, SR_ZONE_CONF
+        zones = []
+        def _add(price, kind, a):
+            tol = SR_ZONE_MERGE_ATR * a
+            for z in zones:
+                if z["kind"] == kind and (z["lo"] - tol) <= price <= (z["hi"] + tol):
+                    z["lo"] = min(z["lo"], price); z["hi"] = max(z["hi"], price)
+                    z["touches"] += 1; return
+            zones.append({"kind": kind, "lo": price, "hi": price, "touches": 1})
+        for j in range(pv, n - pv - cf):
+            a = atr[j]
+            if not (a > 0): continue
+            e = min(j + cf, n - 1)
+            if (all(hi[j] > hi[j-k] for k in range(1, pv+1)) and
+                    all(hi[j] >= hi[j+k] for k in range(1, pv+1)) and
+                    (hi[j] - lo[j+1:e+1].min()) >= SR_ZONE_TURN_ATR * a):
+                _add(float(hi[j]), "res", a)            # ★影線極值當錨點
+            if (all(lo[j] < lo[j-k] for k in range(1, pv+1)) and
+                    all(lo[j] <= lo[j+k] for k in range(1, pv+1)) and
+                    (hi[j+1:e+1].max() - lo[j]) >= SR_ZONE_TURN_ATR * a):
+                _add(float(lo[j]), "sup", a)
+        zones = [z for z in zones if z["touches"] >= SR_ZONE_MIN_TOUCH]
+        # 支壓互換(官方第8頁):價已站到另一側 → 角色翻轉
+        last = float(cl[-1]); atr_now = float(atr[-1])
+        for z in zones:
+            if z["kind"] == "sup" and last < z["lo"]: z["kind"] = "res"
+            elif z["kind"] == "res" and last > z["hi"]: z["kind"] = "sup"
+        out = {"zones": zones, "atr": atr_now, "last": last}
+        _SR_ZONE_CACHE[inst_id] = (time.time(), out)
+        return out
+    except Exception as _ze:
+        print(f"[S/R區間] {inst_id} 計算失敗(放行): {_ze}", flush=True)
+        return None
+
+def _sr_reverse_zone_hit(inst_id: str, direction: str):
+    """進場價是不是正撞在**反向區間**上(做多撞壓力區 / 做空撞支撐區)→ 該擋。
+    回 True=撞到該擋 / False=沒撞 / None=資料不足(放行)。
+
+    ★回測依據(_bt_zone_on_live.py + _bt_zone_sens.py,7期含費,疊在 live 現況之上):
+      OISQ多 容錯 14.1 → 16.8(勝50.0→49.1%,EV+0.258→+0.348,擋45%,正期6/7不變,訓+0.29/驗+0.39)
+      OISQ空 容錯 25.1 → 28.0(勝59.0→62.7%,EV+0.498→+0.540,擋41%,訓+0.53/驗+0.55)
+      **參數敏感度:turn_atr(1.0/1.5/2.0)×pv(2/3/4)×觸及(2/3)×容差(0/0.3/0.6) 共30組全部改善**,
+      訓練/驗證兩段皆正,獲利集中度不惡化(多 10%→15%)=非曲線擬合。
+      取網格正中間 turn1.5/pv3/觸及2/容差0.3 上線(不挑最好看的那組)。
+    ★這條就是用戶反覆抱怨「一直空在4H和日線大支撐,這種單一直虧,講幾百次了」的代碼化解法。
+    """
+    if not SR_ZONE_GATE_ENABLED: return None
+    d = _sr_zones_1h(inst_id)
+    if not d or not d.get("zones"): return None
+    want = "res" if direction == "long" else "sup"
+    px = d["last"]; buf = SR_ZONE_BUF_ATR * d["atr"]
+    for z in d["zones"]:
+        if z["kind"] != want: continue
+        if (z["lo"] - buf) <= px <= (z["hi"] + buf):
+            print(f"[S/R區間] {inst_id} {direction} 撞到反向{'壓力' if want=='res' else '支撐'}區 "
+                  f"[{z['lo']:.6g}~{z['hi']:.6g}] 觸及{z['touches']}次 → 擋單", flush=True)
+            return True
+    return False
+
+
 OI_SQUEEZE_ENABLED = True   # ★2026-07-07迭代重開(多空雙向,見_check_oi_squeeze開頭+上方門檻常數註解):
                             # 原全市值多空合測n=14太小不可信;拆開4象限(多空×主流山寨)找到各自鬆門檻版本
                             # 空:OI2%/vol2.0x n=125/EV+0.222/PF1.80/5-7期正;多:OI1.5%/vol2.25x n=377/EV+0.103/PF1.41/6-7期正
@@ -4556,6 +4664,9 @@ class SykesTradingBot:
                 # ★2026-08-26 資費過熱閘(回測依據見 _funding_overheated 註解)。多空皆擋。
                 if _sq in ("long", "short") and _funding_overheated(okx_swap_symbol) is True:
                     print(f"[資費閘] {symbol_item} {_sq} 資費過熱,擋單")
+                    _sq = None
+                # ★2026-08-26 反向S/R區間閘(見 _sr_reverse_zone_hit 註解的回測依據+官方定義出處)
+                if _sq in ("long", "short") and _sr_reverse_zone_hit(okx_swap_symbol, _sq) is True:
                     _sq = None
                 if _sq == "long":  is_oisq_long = True;  dh_boost = BOOST_MULT; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
                 elif _sq == "short": is_oisq_short = True; dh_boost = BOOST_MULT; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
