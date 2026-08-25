@@ -3402,24 +3402,30 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
 
 
 
-MTF_BIAS_GATE_ENABLED = True   # ★2026-08-05 多時框偏見對齊確認層(用戶TradingView「紅綠燈」概念的可驗證版)
-# ★來源說明:用戶的Bisancos「紅綠燈Pro/3+1」指標原始碼受保護(TradingView原始碼選項灰色)=黑盒無法忠實複刻,
-#   故本實作是**通用概念**版(各時框收盤 vs 該時框EMA20),**不是**該指標的複刻,結果也不能用來證實/證偽它。
-# ★概念獨立驗證(_bt_mtf_bias_concept.py,19,522個交易日觀測/7期):下級時框與日線對齊時,
-#   「1ATR先到」勝率 47.1%(0對齊) → 55.3%(1對齊) → 56.4%(2對齊);2:1出場EV +0.019(3/7期正) → +0.23(7/7期正)。
-#   ※用戶轉述作者稱「約7成勝率」——實測含停損的勝率是~56%;7成較可能是「當日收盤方向」口徑(實測58-67%),
-#     兩者不是同一個定義,非作者造假。
-# ★疊到現役策略的增益(_bt_mtf_gate_on_strats.py,7期,只擋14-21%訊號):
-#   OISQ空 勝率53.6→62.2% / EV+0.345→+0.584 / 容錯17.7→30.7 / 正期5→6期
-#   OISQ多 勝率47.2→49.2% / EV+0.215→+0.291 / 容錯11.3🟡→14.7🟢 / 正期6/7不變
-#   MACD多 勝率55.4→62.5% / EV+0.271→+0.403 / 容錯18.3→27.6 (★n僅56→48=樣本小,方向一致但幅度別當準)
+MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
+# 舊腳本(_bt_mtf_bias_concept.py / _bt_mtf_gate_on_strats.py) 用 pandas resample 後 reindex(method="ffill"),
+# 而 resample 的索引是K棒的**起始**時間 → 當天的每個小時就已經用到當天日線的最終收盤。
+# 修正對齊(只用已收盤那根)後重驗(_diag_mtf_lookahead.py, 19,434筆/7期):
+#   概念層 「0個對齊47.3% → 2個都對齊56.6%」(+9.3pt) 縮水成 「49.3% → 50.3%」(**+1.0pt**)。
+#   策略層(_bt_oisq_gate_final.py,live忠實C版=現價 vs 已收盤K的EMA20):
+#     OISQ多 裸訊號n=370/勝47.6%/容錯11.0 → 加閘 n=298/勝45.3%/容錯8.0 = **變差**。
+#     被日線閘擋掉的69筆:勝58.0%/EV+0.386/容錯24.9;留下的301筆:勝45.2%/EV+0.165/容錯8.5
+#     → 對多單它擋掉的是**好單**。
+#     OISQ空 裸n=138/勝54.3%/容錯18.9 → 加日線閘 n=120/勝56.7%/容錯22.4 = 有幫助(保留)。
+#     4H那層只擋1%訊號=冗餘,已拿掉。
+# → 現行:**只對空單、只用日線**。多單不再套。
+# ★來源說明:用戶的Bisancos「紅綠燈Pro/3+1」指標原始碼受保護=黑盒,本實作是通用概念版,非該指標複刻。
+MTF_BIAS_SHORT_ONLY = True     # 2026-08-26:多單套這個閘容錯從11.0掉到8.0(擋掉的69筆勝58%比留下的301筆45%好),只留給空單
+MTF_BIAS_DAILY_ONLY = True     # 2026-08-26:4H那層只擋1%訊號=冗餘(擋<10%視為沒作用)
 def _mtf_bias_ok(okx_swap_symbol: str, direction: str) -> bool:
     """日線與4H偏見是否都與進場方向同向。偏見=該時框收盤在EMA20之上(多)/之下(空)。
     抓不到資料→回True(放行不擋,與其他濾網一致的保守處理)。"""
     if not MTF_BIAS_GATE_ENABLED: return True
+    if MTF_BIAS_SHORT_ONLY and direction != "short": return True   # ★多單不套(實測有害,見上方註解)
     try:
         want = 1 if direction == "long" else -1
-        for _bar in ("1D", "4H"):
+        _bars = ("1D",) if MTF_BIAS_DAILY_ONLY else ("1D", "4H")
+        for _bar in _bars:
             _d = fetch_market_candles(okx_swap_symbol, _bar, 60)
             if _d is None or _d.empty or len(_d) < 25: return True     # 資料不足→放行
             _c = _d["close"]
@@ -3432,6 +3438,80 @@ def _mtf_bias_ok(okx_swap_symbol: str, direction: str) -> bool:
     except Exception as _e:
         print(f"[偏見閘] {okx_swap_symbol} 計算失敗(放行): {_e}")
         return True
+
+# ── 資費過熱閘(2026-08-26 上線) ─────────────────────────────────────────────
+FUNDING_GATE_ENABLED = True
+FUNDING_GATE_PCTL    = 0.75    # 資費 > 該幣過去30天資費的p75 → 擋單(多空皆擋)
+FUNDING_GATE_DAYS    = 30
+_FUNDING_HIST_CACHE: Dict[str, Any] = {}   # instId -> (ts, overheated_or_None, pctl)
+
+def _funding_overheated(inst_id: str):
+    """資費是否高於它**自己的常態帶**(過去30天資費的p75)。回 True/False;資料不足回 None(放行)。
+
+    ★用戶指正(2026-08-26):「資費要看常態處在哪個區間,超過這個區間的才叫資費正或資費負」。
+      實測確認(_diag_funding_band.py,27幣/2年):資費中位是**正的**(+0.0082%/8h),負資費只佔20.8%時間
+      → 用「>0 = 資費正」會把八成時間都標成正,等於沒有分類。必須用相對常態帶。
+
+    ★回測依據(_bt_oisq_gate_final.py / _bt_fgate_vs_vol.py,7期含費,幣安資費史):
+      OISQ多(不套偏見閘) 容錯11.0→13.8🟢 / 勝47.6→50.5%;擋掉20%訊號
+      OISQ空(套日線偏見閘) 容錯22.1→27.0🟢 / 勝56.3→59.8%
+      12組參數(窗長60/90/120 × 帶p10-90/p20-80/p25-75/p30-70)全部改善=非單一參數依賴
+      被擋那批:多單勝36.0%(留下50.5%)、空單勝38.5%(留下58.0%),且總R只有+4.24/−1.39=沒砍到尾部
+      訓練/驗證兩段都改善(多 10.1→14.7 / 13.1→15.1;空 17.5→25.3 / 30.2→28.9)
+      拔掉最大5筆盈利仍站得住(多11.3/空22.6);bootstrap 5000次 P(EV>0)=100%
+      ★不是波動率代理:被擋單的ATR百分位 多0.425 vs 留下0.364、空0.288 vs 留下0.413(**方向相反**),
+        量能百分位幾乎一樣(0.933/0.936);純波動率閘只到13.3/24.6,資費閘到15.0/26.8且疊加還能再進步。
+      ★這推翻了原影片邏輯(影片:資費正=多頭擁擠=該做空);實測是過熱時**多空都爛**=「這幣現在別碰」。
+
+    ★★已知弱點(必須live驗證):回測用**幣安**資費史,live只能用**OKX**(幣安fapi在Railway被地理封鎖)。
+      實測(_dl_okx_funding.py,近3個月17幣,OKX史料上限):兩所資費相關0.66、「過熱」分類只有37%重疊。
+      → 本閘屬「概念移植」而非直接移植。每次擋單都印百分位方便事後對帳(觀察條款寫成代碼)。
+      重查條件:累積30筆被擋訊號後,用 _rec_analyze 對帳被擋那批是否真的較差;若無差異則關掉本閘。
+      另:OKX 部分合約是4H結算(非8H),故用**時間窗(30天)**而非固定筆數取帶。
+    """
+    if not FUNDING_GATE_ENABLED:
+        return None
+    try:
+        _c = _FUNDING_HIST_CACHE.get(inst_id)
+        if _c and time.time() - _c[0] < 3600:
+            return _c[1]
+        rows = _fetch_okx_public_data("/api/v5/public/funding-rate-history",
+                                      {"instId": inst_id, "limit": "100"})
+        recs = []
+        for r in (rows or []):
+            try:
+                recs.append((int(r.get("fundingTime") or 0), float(r.get("fundingRate"))))
+            except Exception:
+                continue
+        recs.sort()
+        if len(recs) < 20:
+            _FUNDING_HIST_CACHE[inst_id] = (time.time(), None, None)
+            return None
+        cur_ts, cur = recs[-1]
+        cutoff = cur_ts - FUNDING_GATE_DAYS * 86400 * 1000
+        hist = [v for (t, v) in recs[:-1] if t >= cutoff]      # 常態帶只用過去,不含當筆
+        if len(hist) < 20:
+            _FUNDING_HIST_CACHE[inst_id] = (time.time(), None, None)
+            return None
+        _h = np.asarray(hist, dtype=float)
+        # ★2026-08-26 實測修正:OKX 對多數山寨的資費**釘在 0.01%/8h 上限**(幣安是連續變動的,
+        #   回測沒暴露這問題)。嚴格 cur > p75 在「p75 也等於上限」時永遠不成立 →
+        #   實測15幣有7幣百分位=100 卻全部放行,擋單率只有7%(回測預期~20%)。
+        #   改用 midrank(並列取中位排名),並要求分布有離散度(全部釘在同一值時無從判斷→放行)。
+        if float(_h.max() - _h.min()) <= 0:
+            _FUNDING_HIST_CACHE[inst_id] = (time.time(), None, None)
+            return None
+        pctl = float(((_h < cur).mean() + (_h <= cur).mean()) / 2.0 * 100)
+        hot = bool(pctl >= FUNDING_GATE_PCTL * 100)
+        _FUNDING_HIST_CACHE[inst_id] = (time.time(), hot, pctl)
+        if hot:
+            print(f"[資費閘] {inst_id} 現資費{cur*100:.4f}%/結算 落在30天分布的第{pctl:.0f}百分位 "
+                  f"(門檻{FUNDING_GATE_PCTL*100:.0f}) → 過熱擋單", flush=True)
+        return hot
+    except Exception as _fe:
+        print(f"[資費閘] {inst_id} 計算失敗(放行): {_fe}", flush=True)
+        return None
+
 
 OI_SQUEEZE_ENABLED = True   # ★2026-07-07迭代重開(多空雙向,見_check_oi_squeeze開頭+上方門檻常數註解):
                             # 原全市值多空合測n=14太小不可信;拆開4象限(多空×主流山寨)找到各自鬆門檻版本
@@ -4469,8 +4549,13 @@ class SykesTradingBot:
             try:
                 _sq = _check_oi_squeeze(symbol_item, okx_bar_fmt, df, okx_swap_symbol)
                 # ★2026-08-05 多時框偏見對齊確認層(見 _mtf_bias_ok 註解的回測依據):
-                #   OISQ空 勝率53.6→62.2%/容錯17.7→30.7;OISQ多 勝率47.2→49.2%/容錯11.3→14.7。只擋19-21%訊號。
+                #   ⚠️2026-08-26訂正:舊數字(空62.2%/容錯30.7)是未來函數造的。修正後只對空單有效(18.9→22.4),
+                #   多單反而被害(11.0→8.0)→已改成 short-only + daily-only。
                 if _sq in ("long", "short") and not _mtf_bias_ok(okx_swap_symbol, _sq):
+                    _sq = None
+                # ★2026-08-26 資費過熱閘(回測依據見 _funding_overheated 註解)。多空皆擋。
+                if _sq in ("long", "short") and _funding_overheated(okx_swap_symbol) is True:
+                    print(f"[資費閘] {symbol_item} {_sq} 資費過熱,擋單")
                     _sq = None
                 if _sq == "long":  is_oisq_long = True;  dh_boost = BOOST_MULT; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
                 elif _sq == "short": is_oisq_short = True; dh_boost = BOOST_MULT; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
