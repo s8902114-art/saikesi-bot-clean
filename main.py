@@ -194,6 +194,8 @@ CONC_FLOOR = 0.3           # 風險遞減下限(不會縮到太小)。Discord !c
 _LIVE_MODE = True if os.environ.get("OKX_API_KEY") else False
 _PAUSED = False  # ★2026-08-02 恢復,但只開「有用的」5支(容錯≥11且一致性過關):
 # MACD多(1H)18.3🟢 / OISQ空17.8🟢 / CME缺口~14🟢 / C3階梯空13.5🟢(n=49小) / OISQ多11.3🟡
+# ⚠️2026-08-26訂正:C3階梯空那個13.5是**3期n=49**的數字;跑滿7期的裸基準其實是容錯-1.5🔴。
+#   已把進場改成官方的三步驟序列(見 short_C1/C2/C3 註解)→ 7期 n=129/勝52.7%/容錯11.6🟡/正期4-5。
 # 已關(容錯不足或未審):吞噬空4.5🔴、箱突破空8.2🟡4期正、HF_1R平行層(未審且會加倍C3空倉位)、
 #   1H MACD空8-10🔴、15m MACD多0.2🔴、BPR(頻率10倍bug)、其餘既有停用項。
 # 預估頻率約1.7張/天(對照全開7.6張/天=降78%,手續費同步降),兩週約可收24筆=足以判斷live勝率是否回到45-50%。
@@ -4352,10 +4354,43 @@ class SykesTradingBot:
                     (not ADX_ENABLED or current_adx >= ADX_THR) and
                     (funding_rate is None or funding_rate <= FUNDING_LONG_MAX))
 
-        short_C1 = (current_close < small_top and current_high > small_top)
-        short_C2 = current_close < ema12.iloc[-1]
-        short_C3 = (rsi_ma_s.iloc[-2] >= 50 and
-                    rsi_ma_s.iloc[-1] < 50)    # rsiMa 從 >=50 穿越到 <50（QQE 轉紅）
+        # ★2026-08-26 改成官方的「三步驟**依序**」(原本是三條件同一根K同時成立)
+        # 依據:菁英交易學院「賽克斯指標 步驟2」影片逐字稿(規格見 trading-backtest/_ELITE_COURSE_SPEC.md 10-1)
+        #   官方原話(做空):「第一步我們要先等待價格**上來測試這個小通道,沒有出現突破的動作**;
+        #   第二步就要**跌破我們黃色這條過濾線**;第三步呢,就是要 QQE 由藍柱轉為紅柱」
+        #   → 是**跨多根K的先後順序**,不是同一根全中。我原本寫成同根,等於在測另一個東西。
+        # 回測(_bt_c3_official_fix.py / _bt_c3_seq_sens.py,7期含費,live忠實出場=swing_full+12h時停):
+        #   同根(舊)      n=78  勝38.5% EV-0.019 PF0.94 容錯-1.5🔴 連虧9 正期2/5 訓-0.20/驗+0.07
+        #   序列跨度6(新) n=129 勝52.7% EV+0.135 PF1.59 容錯11.6🟡 連虧6 正期4/5 訓+0.00/驗+0.22
+        #   ★穩健性:跨度3/4/6/8/12 全部大幅改善(容錯10.6~13.0)、訓驗兩段皆非負 → 非曲線擬合,
+        #     取網格中間值6上線(不挑最好看的4)。
+        #   ★同時測過但**不採用**:觸發改QQE MOD柱色轉紅(容錯只有5.0~8.8、連虧26-33,比rsiMa差)、
+        #     止損改「測試通道那根的高點」(容錯-4.3,更差)、加均線纏繞閘(11.6→8.2,更差)。
+        # ⚠️同時訂正:live 舊註解說 C3階梯空「容錯13.5🟢」是**3期n=49**的數字;
+        #   跑滿7期的裸基準其實是 容錯-1.5🔴。這支策略原本的依據比註解寫的薄很多。
+        C3_SEQ_WIN = 6      # 序列最大跨度(根)
+        _cs = df["close"].values; _hs = df["high"].values
+        _e12 = ema12.values; _e144 = ema144.values; _e169 = ema169.values
+        _iN = len(_cs) - 1
+        # 第三步(當根):rsiMa 由 >=50 穿越到 <50
+        short_C3 = (rsi_ma_s.iloc[-2] >= 50 and rsi_ma_s.iloc[-1] < 50)
+        # 第二步:往回找「目前這段連續收在過濾線下」的起點 = 跌破過濾線那根
+        _brk = None
+        for _f in range(_iN, max(0, _iN - C3_SEQ_WIN) - 1, -1):
+            if _cs[_f] < _e12[_f]:
+                _brk = _f
+            else:
+                break
+        # 第一步:在跌破過濾線之前,要有一根「上來測試小通道但沒有突破」
+        _test_i = None
+        if _brk is not None:
+            for _f in range(_brk, max(0, _brk - C3_SEQ_WIN) - 1, -1):
+                _st = max(_e144[_f], _e169[_f])
+                if _hs[_f] > _st and _cs[_f] < _st:
+                    _test_i = _f
+                    break
+        short_C1 = (_test_i is not None)          # 測試小通道未突破(可發生在前幾根)
+        short_C2 = (_brk is not None)             # 已跌破過濾線並維持在其下
         short_adx_ok = (not ADX_ENABLED or current_adx >= ADX_THR)
         short_fund_ok = (funding_rate is None or funding_rate >= FUNDING_SHORT_MIN)
         is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
@@ -4477,8 +4512,8 @@ class SykesTradingBot:
             print(f"  funding_rate={funding_rate}", flush=True)
             print(f"  ── 做空條件 ──", flush=True)
             print(f"  bearTrend={bear_trend}  (EMA144={ema144.iloc[-1]:.6f} < EMA576={ema576.iloc[-1]:.6f})", flush=True)
-            print(f"  C1={short_C1}  (close<smallTop={current_close < small_top}  high>smallTop={current_high > small_top})", flush=True)
-            print(f"  C2={short_C2}  (close<EMA12={current_close < ema12.iloc[-1]:.6f})", flush=True)
+            print(f"  C1={short_C1}  (序列:測試小通道未突破的那根 index={_test_i})", flush=True)
+            print(f"  C2={short_C2}  (序列:跌破過濾線起點 index={_brk}, EMA12={ema12.iloc[-1]:.6f})", flush=True)
             print(f"  C3={short_C3}  (rsiMa[-2]={rsi_ma_s.iloc[-2]:.2f}>=50 AND rsiMa[-1]={rsi_ma_s.iloc[-1]:.2f}<50)", flush=True)
             print(f"  ADX_ok={short_adx_ok}  (ADX_ENABLED={ADX_ENABLED}, ADX={current_adx:.2f} vs THR={ADX_THR})", flush=True)
             print(f"  Fund_ok={short_fund_ok}  (funding={funding_rate}, min={FUNDING_SHORT_MIN})", flush=True)
