@@ -5285,7 +5285,14 @@ class SykesTradingBot:
         elif is_bpr_long or is_bpr_short:
             exit_strategy = ""                                           # BPR:固定1.5R(對齊回測,見下方SL區塊p override)
         elif is_4j_long or is_4j_short:
-            exit_strategy = ""                                           # 4J:官方「一比一」(對齊回測,見下方SL區塊)
+            exit_strategy = ""                                           # 4J:TP1=1R半平+保本 / TP2=3R(見下方SL區塊)
+            # ★2026-08-27 專屬時間停損。用戶:「4J的不套用12小時停損」——而且數據支持:
+            #   全域預設12h會砍掉EV約5%、總R約10%(12h vs 回測值):
+            #     4H→30m 12h EV+0.546/78.1R年 → 96h EV+0.576/86.4R年
+            #     2H→15m 12h EV+0.554/171.8R年 → 48h EV+0.577/180.7R年
+            #   (12h 的回撤反而略小 -2.52R/-5.15R vs -2.87R/-6.24R,但總報酬差更多)
+            #   設成**回測用的值**,讓 live 與我報出的期望值同規格。腳本 _bt_4j_ts.py。
+            _strat_ts_h = 96 if tf_id == "30m" else 48
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
