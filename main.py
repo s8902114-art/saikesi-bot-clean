@@ -3480,11 +3480,39 @@ FOURJ_BUF_S         = 0.30   # 4H回踩容差
 FOURJ_BUF_E         = 0.35   # 1H觸及位階容差
 FOURJ_RETR_MAX      = 0.50   # 回踩深度上限(突破腿的斐波;官方反覆強調先看0.5)
 FOURJ_WAIT          = 24     # 突破後最多等24根4H找回踩
-FOURJ_ADX_MIN       = 25.0   # 4H ADX(14) 門檻 = 「盤整不做」的代碼化
+FOURJ_ADX_MIN       = 0.0    # ★2026-08-27 停用(25→0)。這個閘是 PV8 時代為了救「23H1橫盤 EV=0.000」
+                             #   才事後加的;改成 PV3 之後那個問題本來就不見了(PV3 在23H1橫盤是
+                             #   +0.185/容錯10.0🟡,新兩階更是 +0.370/+0.431 全🟢)。
+                             #   PV3 下實測(10期):不過濾 n=364 EV+0.345 容錯17.6 10/10期 103筆/年;
+                             #   ADX>=20 n=252 +0.413 容錯21.0 72筆/年;ADX>=25 n=197 +0.407 20.6 56筆/年。
+                             #   **總期望值 不過濾最高**(35.5 vs 29.7 vs 22.8 R/年),且容錯仍🟢、期數全正。
+                             #   移除一個事後加的參數 = 少一個研究者自由度。保留常數以便隨時回開。
+                             # ★用戶提議的「改用支撐壓力區間定義盤整」已測,**不採用**:
+                             #   把區間參數調到大級別(箱體寬中位1.6→4.0ATR)後,箱體寬當閘擋掉70~84%訊號
+                             #   但EV/容錯全面下降(+0.345/17.6 → +0.217~+0.262/11.1~13.5);
+                             #   而「實體突破區間」永遠0筆——與本策略**定義互斥**(突破後回踩進場時,
+                             #   價格必然貼著位階,不可能同時收在區間遠側之外)。詳見 _bt_4j_zonechop.py。
 FOURJ_SL_LOOKBACK   = 6      # 停損取1H近6根前低/前高
 FOURJ_TP_R          = 1.0    # 官方「一比一」
 FOURJ_OBS_SCALE     = 0.5    # 全新策略半倉觀察,累計30筆live成交後人工對帳再決定拿掉
-_FOURJ_CACHE: Dict[str, Any] = {}     # instId -> (ts, setup_or_None)
+# ★三階分形階梯(2026-08-27:用戶指出「他說各時區都能用」「日內交易也沒那麼少」)。
+#   每階規格完全相同,只換時框對。日內網格(_bt_4j_intraday.py,15m資料7期,18格)實測:
+#     4H→30m PV3 容錯29.7🟢 7/7期 約50筆/年   ← 品質最高
+#     4H→1H  PV3 容錯20.6🟢 10/10期 約56筆/年 ← 已上線(1H資料10期)
+#     2H→15m PV3 容錯18.6🟢 7/7期 約87筆/年
+#   三階重疊率 0~9% = 獨立訊號源。1H→15m(容錯9.2🟡/236筆年)品質偏低,先不上。
+#   結構TF 對應 進場tf_id:
+#   ★同一個結構TF的不同進場TF **重疊73~93%**(4H→1H vs 4H→30m 撞84%)=同一筆交易,
+#     所以每個結構TF只能選一個進場TF;不同結構TF之間只重疊11~17%,可以並存。
+#   同一份15m資料(7期)公平比較(PV3/不過濾):
+#     4H→30m 容錯28.9 96筆/年 總55.5R/年  ← 4H結構選它(取代原本的4H→1H:18.8/103筆/38.5R)
+#     4H→15m 容錯26.1 81筆/年 總42.8R/年
+#     2H→15m 容錯16.3 183筆/年 總59.8R/年 ← 2H結構選它(2H→30m只有11.3🟡)
+#   ★樣本外壓力段(2022深熊/2023H1橫盤,沒參與參數選擇):
+#     2H→15m 三段全🟢(+0.437/+0.423/+0.431,合併+0.430/容錯21.7) ← 最穩
+#     4H→30m +0.621🟢/+0.081🔴/+0.370🟢(22H2那期弱,n=37),合併+0.355/容錯17.9🟢
+FOURJ_LADDER = {"30m": "4H", "15m": "2H"}
+_FOURJ_CACHE: Dict[str, Any] = {}     # f"{instId}|{structBar}" -> (ts, setup_or_None)
 # ★同一個 setup 只進一次(2026-08-27 對帳發現):live 是逐根1H判定,同一個回踩位階會被
 #   重複觸發;回測是「每個setup最多進一次」。實測差異很大——
 #   live無去重 n=130 EV+0.241 容錯12.4 最長連虧6 訓練段-0.03(翻負);
@@ -3506,16 +3534,17 @@ def _fourj_adx(h, l, c, n=14):
     return _e(np.nan_to_num(dx))
 
 
-def _fourj_setup(okx_swap_symbol: str):
+def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
     """回傳目前**還在進場窗內**的 4H setup:(direction, level) 或 None。
     ★只用**已收盤**的4H K(API 的 iloc[-1] 是未完成K,必須丟掉,見 CLAUDE.md 時框對齊陷阱)。"""
     try:
-        _c = _FOURJ_CACHE.get(okx_swap_symbol)
+        _ck = f"{okx_swap_symbol}|{struct_bar}"
+        _c = _FOURJ_CACHE.get(_ck)
         if _c and time.time() - _c[0] < 900:
             return _c[1]
-        d = fetch_market_candles(okx_swap_symbol, "4H", 300)
+        d = fetch_market_candles(okx_swap_symbol, struct_bar, 300)
         if d is None or d.empty or len(d) < 120:
-            _FOURJ_CACHE[okx_swap_symbol] = (time.time(), None); return None
+            _FOURJ_CACHE[_ck] = (time.time(), None); return None
         d = d.iloc[:-1]                                   # ★丟掉未完成的4H
         hi = d["high"].values.astype(float); lo = d["low"].values.astype(float)
         cl = d["close"].values.astype(float); op = d["open"].values.astype(float)
@@ -3567,23 +3596,26 @@ def _fourj_setup(okx_swap_symbol: str):
                     retr = (cl[f] - float(lo[i:f+1].min()))/leg if leg > 0 else 9.9
                 if retr > FOURJ_RETR_MAX: continue
                 out = (d_, lvl)
-                _FOURJ_CACHE[okx_swap_symbol] = (time.time(), out)
+                _FOURJ_CACHE[_ck] = (time.time(), out)
                 return out
-        _FOURJ_CACHE[okx_swap_symbol] = (time.time(), None)
+        _FOURJ_CACHE[_ck] = (time.time(), None)
         return None
     except Exception as _e:
-        print(f"[4J] {okx_swap_symbol} setup 計算失敗: {_e}", flush=True)
+        print(f"[4J] {okx_swap_symbol}/{struct_bar} setup 計算失敗: {_e}", flush=True)
         return None
 
 
-def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame):
-    """1H 進場時機:價格觸及該 4H 位階(±0.35x1H ATR) 且**順向收盤** → 回 (方向, 位階)。"""
+def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame, tf_id: str = "1H"):
+    """進場時機:價格觸及該結構TF位階(±0.35x進場TF ATR) 且**順向收盤** → 回 (方向, 位階)。
+    結構TF 由 FOURJ_LADDER[tf_id] 決定(1H進場配4H結構 / 30m配4H / 15m配2H)。"""
     if not FOURJ_ENABLED: return None
+    _sb = FOURJ_LADDER.get(tf_id)
+    if not _sb: return None
     try:
-        st = _fourj_setup(okx_swap_symbol)
+        st = _fourj_setup(okx_swap_symbol, _sb)
         if not st: return None
         d_, lvl = st
-        _fk = f"{okx_swap_symbol}|{d_}|{lvl:.10g}"
+        _fk = f"{okx_swap_symbol}|{_sb}|{d_}|{lvl:.10g}"
         _now = time.time()
         for _k in [k for k, v in _FOURJ_FIRED.items() if _now - v > 14*86400]:
             _FOURJ_FIRED.pop(_k, None)                 # 清14天前的紀錄,避免無限膨脹
@@ -4984,13 +5016,14 @@ class SykesTradingBot:
 
         # ── 4J 結構回踩(1H進場,2026-08-27):4H定結構與關鍵位 → 1H抓進場時機。固定1:1 ──
         is_4j_long = False; is_4j_short = False; _4j_level = None
-        if FOURJ_ENABLED and tf_id == "1H":
+        if FOURJ_ENABLED and tf_id in FOURJ_LADDER:
             try:
-                _4j = _check_4j(symbol_item, okx_swap_symbol, df)
+                _4j = _check_4j(symbol_item, okx_swap_symbol, df, tf_id)
                 if _4j:
                     _4j_level = _4j[1]
-                    if _4j[0] == "long":  is_4j_long = True;  print(f"[4J多] {symbol_item} 4H結構突破後回踩(固定1:1)")
-                    else:                 is_4j_short = True; print(f"[4J空] {symbol_item} 4H結構跌破後回踩(固定1:1)")
+                    _sbar = FOURJ_LADDER[tf_id]
+                    if _4j[0] == "long":  is_4j_long = True;  print(f"[4J多] {symbol_item} {_sbar}結構突破後回踩→{tf_id}進場(固定1:1)")
+                    else:                 is_4j_short = True; print(f"[4J空] {symbol_item} {_sbar}結構跌破後回踩→{tf_id}進場(固定1:1)")
                     # ★半倉觀察(2026-08-27上線):全新策略無live樣本。累計30筆live成交後人工對帳
                     #   是否符合回測(勝率68%/EV+0.357/最長連虧4),達標再拿掉 0.5x。
                     dh_boost = FOURJ_OBS_SCALE
@@ -5090,7 +5123,7 @@ class SykesTradingBot:
             if is_oisq_long:     _signal_source.append("主力建多")
             if is_conv_long:     _signal_source.append("收斂突破多")
             if is_bpr_long:      _signal_source.append("BPR失衡區重合")
-            if is_4j_long:       _signal_source.append("4J結構回踩多")
+            if is_4j_long:       _signal_source.append(f"4J結構回踩多({FOURJ_LADDER.get(tf_id,'?')}→{tf_id})")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -5103,7 +5136,7 @@ class SykesTradingBot:
             if is_oisq_short:    _signal_source.append("主力建空")
             if is_engulf_short:  _signal_source.append("吞噬空")
             if is_bpr_short:     _signal_source.append("BPR失衡區重合")
-            if is_4j_short:      _signal_source.append("4J結構回踩空")
+            if is_4j_short:      _signal_source.append(f"4J結構回踩空({FOURJ_LADDER.get(tf_id,'?')}→{tf_id})")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
