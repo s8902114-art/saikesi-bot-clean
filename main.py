@@ -6311,6 +6311,44 @@ def _fetch_coingecko_top100() -> list:
 
 TOP_MOVERS_N        = 25            # 漲幅前N + 跌幅前N(共~50)加入掃描
 MIN_MOVER_VOLCCY    = 10_000_000.0  # 流動性門檻:24h成交額(volCcy24h)需 ≥ 此值,濾掉插針山寨
+# ★2026-08-27 流動性底池(用戶:「幣池要開多一點嗎 流動性差的除外」「裸k基本上所有商品適用」)
+#   原本底池只有「CoinGecko市值前100 ∩ OKX永續」= 實測54幣,加漲跌幅榜/OI榜後約94~98幣。
+#   ★發現的洞:我的回測只涵蓋47幣 → 策略其實正在約50個**從沒回測過**的幣上下單。
+#   補測(新抓49幣,純加密貨幣 ∩ OKX有永續 ∩ 幣安24h成交額>=10M ∩ 原本沒資料,25H1+25H2):
+#     4H→30m 原47幣 EV+0.452/容錯36.9 → **新幣 EV+0.603/容錯47.8**
+#     2H→15m 原47幣 EV+0.558/容錯38.9 → **新幣 EV+0.605/容錯43.6**
+#     按成交額分三層,**連最低那層都成立**(4H→30m低1/3 +0.406/31.2;2H→15m低1/3 +0.659/44.8)
+#   → 裸K確實跨幣種通用,而且新幣不比原有幣差。**但只驗證到 24h成交額 10M,更低沒測**,
+#     故門檻設 10M(與 MIN_MOVER_VOLCCY 同值),不再往下放。
+#   實測:OKX USDT永續共438個,>=10M 有 166 個 → 底池從54擴到約166,總池約 170~180。
+LIQ_POOL_ENABLED     = True
+LIQ_POOL_MIN_VOLCCY  = 10_000_000.0   # 24h成交額門檻(與回測驗證到的下限一致,別再調低)
+
+def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
+    """OKX 全部 USDT 永續中,24h成交額 >= 門檻 的 inst_id 列表(免API KEY,一支輕量API)。"""
+    if not LIQ_POOL_ENABLED:
+        return []
+    try:
+        r = requests.get("https://www.okx.com/api/v5/market/tickers",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code != 200:
+            print(f"[SYMBOLS] 流動性底池 HTTP {r.status_code}", flush=True); return []
+        out = []
+        for t in r.json().get("data", []):
+            inst = t.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
+                continue
+            try:
+                if float(t.get("volCcy24h", 0) or 0) >= min_volccy:
+                    out.append(inst)
+            except (ValueError, TypeError):
+                continue
+        print(f"[SYMBOLS] 流動性底池:{len(out)} 幣(24h成交額≥{min_volccy/1e6:.0f}M)", flush=True)
+        return out
+    except Exception as e:
+        print(f"[SYMBOLS] 流動性底池抓取失敗: {e}", flush=True)
+        return []
+
 def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOVER_VOLCCY) -> list:
     """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻)。
     漲幅榜→動量/突破多單廣度;跌幅榜→breakdown空/box 候選。回傳 inst_id 列表。"""
@@ -6443,8 +6481,17 @@ def build_dynamic_symbols() -> bool:
         if inst_id in okx_swaps:
             new_symbols[inst_id] = f"{coin}/USDT"
 
+    # ★加流動性底池(2026-08-27):OKX全市場 24h成交額>=10M 的永續(見 _fetch_okx_liquid_pool 註解的回測依據)
+    _n_liq = len(new_symbols)
+    for inst_id in _fetch_okx_liquid_pool():
+        if inst_id in okx_swaps and inst_id not in new_symbols:
+            coin = inst_id.split("-")[0]
+            if coin not in STABLECOINS:
+                new_symbols[inst_id] = f"{coin}/USDT"
+    if len(new_symbols) > _n_liq:
+        print(f"[SYMBOLS] 流動性底池額外加入 {len(new_symbols)-_n_liq} 幣 → 共 {len(new_symbols)}", flush=True)
     global _top100_base_symbols
-    _top100_base_symbols = dict(new_symbols)   # 存純淨底池,供輕量刷新用(見refresh_top_movers_only)
+    _top100_base_symbols = dict(new_symbols)   # ★底池改成「市值前100 + 流動性池」,供輕量刷新整批重組用
 
     # 加每日漲跌幅榜(配流動性門檻)→ 擴廣度,波動在哪訊號在哪(2026-06-13)
     _n_before = len(new_symbols)
