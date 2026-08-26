@@ -3441,6 +3441,166 @@ def _mtf_bias_ok(okx_swap_symbol: str, direction: str) -> bool:
         print(f"[偏見閘] {okx_swap_symbol} 計算失敗(放行): {_e}")
         return True
 
+# ── 4J 結構回踩(2026-08-27 上線,半倉觀察) ─────────────────────────────────
+# 出處:YouTube 頻道 4J(SMC/市場結構路線),逐字稿在 _live_transcripts/4J*,規格 _ELITE_COURSE_SPEC.md 13-11/13-12
+#   結構定義(0825):「什麼叫結構出現?就是這裡**高點不斷的抬高**…後面有**一根實體K是一個很明顯的突破**」
+#   進場(0825):「那要怎麼樣去進場?**就是回踩嘛**…價格跌回來前面高點,這就是**壓力支撐的轉換位**」
+#   出場(0825):「頂的部分你可以設**一比一**」
+#   盤整不做(0825):「這裡就是**盤整局面**…你在這裡做單是**沒有任何意義的**,而且很容易被洗出去」
+#   ★分工(0818):「**大時間級別是代表方向**…我們要看短時間級別,原因是因為我們要**找點位**、找**進場時機**」
+#     → 結構與關鍵位在 4H,進場時機在 1H。這一條是關鍵:同一批 setup 用4H收盤進場只有 EV+0.069/容錯3.7,
+#       降到1H進場變 EV+0.316/容錯16.4(配對檢定,停損距 6.51%→3.57%,R幾乎翻倍)。
+#
+# 回測依據(_bt_4j_multiscale.py「B 4H→1H」,10個不重疊期間 2022H1~2025H2,含費0.1%):
+#   回測路徑 n=125 勝率68.0% EV+0.357 PF2.20 容錯18.8🟢 最長連虧4 **7/7期為正** 約35筆/年(42幣合計)
+#   ★**live路徑實測**(_diag_4j_liveR.py,同資料跑 live 的程式邏輯,含同setup去重):
+#     n=111 勝率65.8% EV+0.295 PF1.88 容錯15.2🟢 最長連虧4 訓+0.04/驗+0.51
+#     ★**上線預期用這組數字,不是回測那組**(差異來自 live 是逐根1H判定,進場時辰與回測差幾小時;
+#       同資料對帳一致率70.8%、筆數130 vs 125=1.04x,頻率沒問題)
+#   ★樣本外壓力段(2022深熊/2023橫盤,完全沒參與參數選擇):22H1深熊 EV+0.829、23H1橫盤 +0.272
+#   ★打架查核(ChatGPT+Gemini)全部通過:未來函數0/120違規、bootstrap三抽法5%分位>+0.17、
+#     留一期最壞+0.267/留一幣最壞+0.282、K棒內悲觀=樂觀(無同根雙觸)、改下一根開盤進場EV不變、
+#     往返成本拉到0.30%仍容錯12.7🟢。與現役策略重疊率僅1.7%(獨立訊號源)。
+#   ★已知弱點(所以只給半倉):①ADX>=25 是看到23H1橫盤EV=0.000後才加的,壓力段已被用掉→
+#     需要2026年全新holdout;②每幣一年約只有1次訊號(最多的AAVE才9筆/4年)→幣種層級無法下結論,
+#     故**不限制幣種**(限幣等於關掉策略);③23Q4-25H2那組幣有存活偏差。
+FOURJ_ENABLED       = True
+FOURJ_PV            = 8      # 4H樞紐左右確認根數(=「明顯的」高低點;PV5/6訓練段為負,PV7-12全正)
+FOURJ_EXT_ATR       = 0.30   # 「很明顯的突破」:收盤超出位階 >= 0.30x4H ATR
+FOURJ_BUF_S         = 0.30   # 4H回踩容差
+FOURJ_BUF_E         = 0.35   # 1H觸及位階容差
+FOURJ_RETR_MAX      = 0.50   # 回踩深度上限(突破腿的斐波;官方反覆強調先看0.5)
+FOURJ_WAIT          = 24     # 突破後最多等24根4H找回踩
+FOURJ_ADX_MIN       = 25.0   # 4H ADX(14) 門檻 = 「盤整不做」的代碼化
+FOURJ_SL_LOOKBACK   = 6      # 停損取1H近6根前低/前高
+FOURJ_TP_R          = 1.0    # 官方「一比一」
+FOURJ_OBS_SCALE     = 0.5    # 全新策略半倉觀察,累計30筆live成交後人工對帳再決定拿掉
+_FOURJ_CACHE: Dict[str, Any] = {}     # instId -> (ts, setup_or_None)
+# ★同一個 setup 只進一次(2026-08-27 對帳發現):live 是逐根1H判定,同一個回踩位階會被
+#   重複觸發;回測是「每個setup最多進一次」。實測差異很大——
+#   live無去重 n=130 EV+0.241 容錯12.4 最長連虧6 訓練段-0.03(翻負);
+#   live加去重 n=111 EV+0.295 容錯15.2 最長連虧4 訓練段+0.04。→ 必須去重。
+_FOURJ_FIRED: Dict[str, float] = {}   # f"{instId}|{dir}|{level}" -> 觸發時間
+
+
+def _fourj_adx(h, l, c, n=14):
+    up = np.diff(h, prepend=h[0]); dn = -np.diff(l, prepend=l[0])
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    ndm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    pc = np.concatenate([[c[0]], c[:-1]])
+    tr = np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
+    _e = lambda x: pd.Series(x).ewm(alpha=1/n, adjust=False).mean().values
+    at = _e(tr)
+    pdi = 100*_e(pdm)/np.where(at > 0, at, np.nan)
+    ndi = 100*_e(ndm)/np.where(at > 0, at, np.nan)
+    dx = 100*np.abs(pdi-ndi)/np.where((pdi+ndi) > 0, pdi+ndi, np.nan)
+    return _e(np.nan_to_num(dx))
+
+
+def _fourj_setup(okx_swap_symbol: str):
+    """回傳目前**還在進場窗內**的 4H setup:(direction, level) 或 None。
+    ★只用**已收盤**的4H K(API 的 iloc[-1] 是未完成K,必須丟掉,見 CLAUDE.md 時框對齊陷阱)。"""
+    try:
+        _c = _FOURJ_CACHE.get(okx_swap_symbol)
+        if _c and time.time() - _c[0] < 900:
+            return _c[1]
+        d = fetch_market_candles(okx_swap_symbol, "4H", 300)
+        if d is None or d.empty or len(d) < 120:
+            _FOURJ_CACHE[okx_swap_symbol] = (time.time(), None); return None
+        d = d.iloc[:-1]                                   # ★丟掉未完成的4H
+        hi = d["high"].values.astype(float); lo = d["low"].values.astype(float)
+        cl = d["close"].values.astype(float); op = d["open"].values.astype(float)
+        n = len(hi)
+        pc = np.concatenate([[cl[0]], cl[:-1]])
+        tr = np.maximum(hi-lo, np.maximum(np.abs(hi-pc), np.abs(lo-pc)))
+        atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
+        adxv = _fourj_adx(hi, lo, cl)
+        pv = FOURJ_PV
+        ph = []; pl = []
+        for j in range(pv, n-pv):
+            if (all(hi[j] > hi[j-k] for k in range(1, pv+1)) and
+                    all(hi[j] >= hi[j+k] for k in range(1, pv+1))): ph.append(j)
+            if (all(lo[j] < lo[j-k] for k in range(1, pv+1)) and
+                    all(lo[j] <= lo[j+k] for k in range(1, pv+1))): pl.append(j)
+        # 往回找最近一個「突破→回踩」且**還在進場窗內**的 setup。
+        # 進場窗與回測一致:回踩那根4H收盤後再給1根4H(即回踩根 f,窗到 f+1 這根4H結束)。
+        for i in range(n-2, max(pv, n-2-FOURJ_WAIT*2)-1, -1):
+            a = atr[i]
+            if not (a > 0) or not (adxv[i] >= FOURJ_ADX_MIN): continue
+            H = [j for j in ph if j <= i-pv]; L = [j for j in pl if j <= i-pv]
+            if len(H) < 2 or len(L) < 2: continue
+            for d_ in ("long", "short"):
+                if d_ == "long":
+                    lvl = float(hi[H[-1]])
+                    if not (cl[i] > lvl + FOURJ_EXT_ATR*a and cl[i] > op[i] and cl[i-1] <= lvl):
+                        continue
+                    if not (hi[H[-1]] > hi[H[-2]] and lo[L[-1]] > lo[L[-2]]): continue
+                else:
+                    lvl = float(lo[L[-1]])
+                    if not (cl[i] < lvl - FOURJ_EXT_ATR*a and cl[i] < op[i] and cl[i-1] >= lvl):
+                        continue
+                    if not (lo[L[-1]] < lo[L[-2]] and hi[H[-1]] < hi[H[-2]]): continue
+                f = None
+                for g in range(i+1, min(i+FOURJ_WAIT, n)):
+                    if d_ == "long":
+                        if cl[g] < lvl - FOURJ_BUF_S*atr[g]: break
+                        if lo[g] <= lvl + FOURJ_BUF_S*atr[g] and cl[g] > lvl: f = g; break
+                    else:
+                        if cl[g] > lvl + FOURJ_BUF_S*atr[g]: break
+                        if hi[g] >= lvl - FOURJ_BUF_S*atr[g] and cl[g] < lvl: f = g; break
+                if f is None: continue
+                if f < n-2: continue                       # 進場窗已過(回踩根 + 1根4H)
+                if d_ == "long":
+                    leg = float(hi[i:f+1].max()) - lvl
+                    retr = (float(hi[i:f+1].max()) - cl[f])/leg if leg > 0 else 9.9
+                else:
+                    leg = lvl - float(lo[i:f+1].min())
+                    retr = (cl[f] - float(lo[i:f+1].min()))/leg if leg > 0 else 9.9
+                if retr > FOURJ_RETR_MAX: continue
+                out = (d_, lvl)
+                _FOURJ_CACHE[okx_swap_symbol] = (time.time(), out)
+                return out
+        _FOURJ_CACHE[okx_swap_symbol] = (time.time(), None)
+        return None
+    except Exception as _e:
+        print(f"[4J] {okx_swap_symbol} setup 計算失敗: {_e}", flush=True)
+        return None
+
+
+def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame):
+    """1H 進場時機:價格觸及該 4H 位階(±0.35x1H ATR) 且**順向收盤** → 回 (方向, 位階)。"""
+    if not FOURJ_ENABLED: return None
+    try:
+        st = _fourj_setup(okx_swap_symbol)
+        if not st: return None
+        d_, lvl = st
+        _fk = f"{okx_swap_symbol}|{d_}|{lvl:.10g}"
+        _now = time.time()
+        for _k in [k for k, v in _FOURJ_FIRED.items() if _now - v > 14*86400]:
+            _FOURJ_FIRED.pop(_k, None)                 # 清14天前的紀錄,避免無限膨脹
+        if _fk in _FOURJ_FIRED: return None            # ★這個 setup 已經進過,不再進
+        hi = df["high"].values; lo = df["low"].values
+        cl = df["close"].values; op = df["open"].values
+        if len(cl) < 20: return None
+        a1 = float(df["atr"].iloc[-1]) if "atr" in df.columns else float(
+            pd.Series(np.maximum(hi-lo, np.maximum(np.abs(hi-np.concatenate([[cl[0]], cl[:-1]])),
+                      np.abs(lo-np.concatenate([[cl[0]], cl[:-1]]))))).ewm(alpha=1/14,
+                      adjust=False).mean().iloc[-1])
+        if not (a1 > 0): return None
+        if d_ == "long":
+            if lo[-1] <= lvl + FOURJ_BUF_E*a1 and cl[-1] > lvl and cl[-1] > op[-1]:
+                _FOURJ_FIRED[_fk] = _now
+                return ("long", lvl)
+        else:
+            if hi[-1] >= lvl - FOURJ_BUF_E*a1 and cl[-1] < lvl and cl[-1] < op[-1]:
+                _FOURJ_FIRED[_fk] = _now
+                return ("short", lvl)
+        return None
+    except Exception as _e:
+        print(f"[4J] {symbol_item} 判斷失敗: {_e}", flush=True)
+        return None
+
+
 # ── 資費過熱閘(2026-08-26 上線) ─────────────────────────────────────────────
 FUNDING_GATE_ENABLED = True
 FUNDING_GATE_PCTL    = 0.75    # 資費 > 該幣過去30天資費的p75 → 擋單(多空皆擋)
@@ -4813,6 +4973,21 @@ class SykesTradingBot:
             except Exception as _bpre:
                 print(f"[BPR] {symbol_item} 判斷失敗: {_bpre}")
 
+        # ── 4J 結構回踩(1H進場,2026-08-27):4H定結構與關鍵位 → 1H抓進場時機。固定1:1 ──
+        is_4j_long = False; is_4j_short = False; _4j_level = None
+        if FOURJ_ENABLED and tf_id == "1H":
+            try:
+                _4j = _check_4j(symbol_item, okx_swap_symbol, df)
+                if _4j:
+                    _4j_level = _4j[1]
+                    if _4j[0] == "long":  is_4j_long = True;  print(f"[4J多] {symbol_item} 4H結構突破後回踩(固定1:1)")
+                    else:                 is_4j_short = True; print(f"[4J空] {symbol_item} 4H結構跌破後回踩(固定1:1)")
+                    # ★半倉觀察(2026-08-27上線):全新策略無live樣本。累計30筆live成交後人工對帳
+                    #   是否符合回測(勝率68%/EV+0.357/最長連虧4),達標再拿掉 0.5x。
+                    dh_boost = FOURJ_OBS_SCALE
+            except Exception as _e4:
+                print(f"[4J] {symbol_item} 判斷失敗: {_e4}")
+
         # ── 收斂突破+OI升 1H做多(限主流,2026-06-21):結構式收斂+收盤破近高+順勢+OI升,讓跑(吃轉折加碼) ──
         is_conv_long = False
         if CONV_BREAKOUT_ENABLED and tf_id == "1H":
@@ -4882,8 +5057,8 @@ class SykesTradingBot:
                 print(f"[POC-Gate-L] {symbol_item} 失敗(放行): {_pgl}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short
 
         if not combined_long and not combined_short:
             return
@@ -4906,6 +5081,7 @@ class SykesTradingBot:
             if is_oisq_long:     _signal_source.append("主力建多")
             if is_conv_long:     _signal_source.append("收斂突破多")
             if is_bpr_long:      _signal_source.append("BPR失衡區重合")
+            if is_4j_long:       _signal_source.append("4J結構回踩多")
         else:
             _signal_source = []
             if is_short:         _signal_source.append("C3")
@@ -4918,6 +5094,7 @@ class SykesTradingBot:
             if is_oisq_short:    _signal_source.append("主力建空")
             if is_engulf_short:  _signal_source.append("吞噬空")
             if is_bpr_short:     _signal_source.append("BPR失衡區重合")
+            if is_4j_short:      _signal_source.append("4J結構回踩空")
         signal_source_tag = "+".join(_signal_source)
 
         # ── 出場策略分派（麥門切線/移動停利/加碼 PDF 正版，WF+離群終檢，2026-06-03）──────
@@ -4968,6 +5145,8 @@ class SykesTradingBot:
             exit_strategy = "swing_full"                                 # 收斂突破多(限主流)：整倉轉折移SL讓跑(吃轉折加碼,session驗+0.17/加碼+0.8~1.0)
         elif is_bpr_long or is_bpr_short:
             exit_strategy = ""                                           # BPR:固定1.5R(對齊回測,見下方SL區塊p override)
+        elif is_4j_long or is_4j_short:
+            exit_strategy = ""                                           # 4J:官方「一比一」(對齊回測,見下方SL區塊)
 
         # ── 跨時框同幣同向去重 ──────────────────────────────────────────────
         # 同一幣、同一方向，DIR_SIGNAL_COOLDOWN 秒內只允許一次（不分時框），
@@ -5008,6 +5187,9 @@ class SykesTradingBot:
         # BPR：固定 1.5R 單一目標(對齊回測simulate_trade_C的exit_fixed_r(...,1.5,1.5,999),非trail)
         if is_bpr_long or is_bpr_short:
             p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 1.5, "tp2_swing_mult": 1.5}
+        if is_4j_long or is_4j_short:
+            p = {**p, "tp1_mult": FOURJ_TP_R, "tp2_intraday_mult": FOURJ_TP_R,
+                 "tp2_swing_mult": FOURJ_TP_R}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
@@ -5114,6 +5296,27 @@ class SykesTradingBot:
             risk_dist  = abs(current_close - calculated_sl)
             tp1_target = current_close + (risk_dist if is_bpr_long else -risk_dist) * 1.5
             tp2_target = tp1_target                          # 固定單一目標(比照吞噬空/箱突破模式,非TP1/TP2分批)
+
+        # 4J:停損=**1H 前低/前高**(近6根)±0.2ATR,對齊回測 _bt_4j_multiscale.py
+        #   (官方影片01原話「你的止損就是放在**前面的高點**」;他講的1~2%停損綁在他自己的時框,
+        #    不可跨時框搬——回測實測固定1.5%套到4H級結構是災難 -0.20,故用結構停損)
+        if is_4j_long or is_4j_short:
+            _lb = FOURJ_SL_LOOKBACK
+            if is_4j_long:
+                calculated_sl = float(df["low"].values[-_lb:].min()) - 0.2 * current_atr
+                _floor_sl = current_close * (1.0 - MIN_SL_PCT)
+                if calculated_sl > _floor_sl: calculated_sl = _floor_sl
+            else:
+                calculated_sl = float(df["high"].values[-_lb:].max()) + 0.2 * current_atr
+                _floor_sl = current_close * (1.0 + MIN_SL_PCT)
+                if calculated_sl < _floor_sl: calculated_sl = _floor_sl
+            risk_pct = abs(current_close - calculated_sl) / current_close
+            if calculated_sl == current_close or risk_pct > MAX_SL:
+                if _dbg: print(f"[4J-SL] {symbol_item} 止損無效/超範圍({risk_pct:.3%})→跳過", flush=True)
+                return
+            risk_dist  = abs(current_close - calculated_sl)
+            tp1_target = current_close + (risk_dist if is_4j_long else -risk_dist) * FOURJ_TP_R
+            tp2_target = tp1_target                          # 官方1:1,單一目標
 
         # ★山寨讓跑改半倉2.5R落袋(2026-06-15,COAI教訓:山寨噴到頂用swing_full一路抱會吐回)。
         #   市值幣維持讓跑(不會這樣噴崩);山寨(非MAJOR)讓跑類→swing_tp 半倉2.5R落袋+BE+剩半trail。多空通用。
