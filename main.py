@@ -3493,8 +3493,24 @@ FOURJ_ADX_MIN       = 0.0    # ★2026-08-27 停用(25→0)。這個閘是 PV8 �
                              #   而「實體突破區間」永遠0筆——與本策略**定義互斥**(突破後回踩進場時,
                              #   價格必然貼著位階,不可能同時收在區間遠側之外)。詳見 _bt_4j_zonechop.py。
 FOURJ_SL_LOOKBACK   = 6      # 停損取1H近6根前低/前高
-FOURJ_TP_R          = 1.0    # 官方「一比一」
-FOURJ_OBS_SCALE     = 0.5    # 全新策略半倉觀察,累計30筆live成交後人工對帳再決定拿掉
+# ★出場(2026-08-27 重測後改版)。用戶問「停利怎麼抓的」→ 發現我在 PV8→PV3、換兩階之後
+#   **從來沒重測過出場**。10期(含2022深熊/2023橫盤)實測,兩階合併:
+#     固定1:1(原本)        EV+0.411 容錯20.6 連虧7  108R/年 最大回撤 -7.6R
+#     ★1R半平+保本+3R      EV+0.545 容錯25.1 連虧7  143R/年 最大回撤 -8.7R  ← 採用
+#     1R保本後緊跟移動停利   EV+0.731 容錯30.8 連虧7  192R/年 最大回撤 -9.7R  ← 更好但要新寫出場引擎
+#     live現成的swing_full EV+0.856 容錯24.3 連虧**16** 225R/年 最大回撤**-18.5R** ← 不採用
+#       (它要等pivot確認(f-3且近6根極值)才移損,跟太鬆吃回吐 → 連虧與回撤都翻倍)
+#     固定3R              EV+0.718 容錯18.9 連虧16 189R/年 最大回撤 -19.7R ← 不採用
+#   官方雖說「一比一」,但他自己也留口:0825「都可以」、影片01「想做1:2、1:3 記得**分批止盈**」。
+#   TP1=1R 平一半並自動移保本(bot既有機制),TP2=3R。
+FOURJ_TP1_R         = 1.0    # TP1:1R 平50% + 止損移保本(官方的「一比一」保留成第一目標)
+FOURJ_TP2_R         = 3.0    # TP2:剩下半倉跑到3R
+FOURJ_OBS_SCALE     = 0.5    # ★半倉。用戶問過「勝率那麼高幹嘛半倉」——理由不是不信勝率,是**回撤**:
+                             #   兩階合併回測(10期)同日最多9筆訊號,逐筆權益最大回撤 -8.7R。
+                             #   換算:半倉(2.5%/筆) -21.8% / 全倉(5%/筆) **-43.7%**,
+                             #   且這**只算4J自己**,未含 OISQ/MACD/C3/CME 同時曝險。
+                             #   (若改用EV最高的swing_full出場,全倉回撤是 -92.7% = 爆倉)
+                             #   累計30筆live成交後人工對帳勝率與最長連虧,達標再評估拿掉。
 # ★三階分形階梯(2026-08-27:用戶指出「他說各時區都能用」「日內交易也沒那麼少」)。
 #   每階規格完全相同,只換時框對。日內網格(_bt_4j_intraday.py,15m資料7期,18格)實測:
 #     4H→30m PV3 容錯29.7🟢 7/7期 約50筆/年   ← 品質最高
@@ -5235,8 +5251,11 @@ class SykesTradingBot:
         if is_bpr_long or is_bpr_short:
             p = {**p, "tp1_mult": 1.5, "tp2_intraday_mult": 1.5, "tp2_swing_mult": 1.5}
         if is_4j_long or is_4j_short:
-            p = {**p, "tp1_mult": FOURJ_TP_R, "tp2_intraday_mult": FOURJ_TP_R,
-                 "tp2_swing_mult": FOURJ_TP_R}
+            # ★2026-08-27 出場改版:官方是「一比一」,但用戶問「停利怎麼抓的」逼出重測 →
+            #   1:1 是**最差**的出場(EV+0.411/容錯20.6)。改成 TP1=1R半平+保本、TP2=3R:
+            #   兩階合併 EV+0.545 容錯25.1 連虧7 143R/年(1:1是108R/年)。詳見 FOURJ_TP_* 註解。
+            p = {**p, "tp1_mult": FOURJ_TP1_R, "tp2_intraday_mult": FOURJ_TP2_R,
+                 "tp2_swing_mult": FOURJ_TP2_R}
 
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
@@ -5362,8 +5381,9 @@ class SykesTradingBot:
                 if _dbg: print(f"[4J-SL] {symbol_item} 止損無效/超範圍({risk_pct:.3%})→跳過", flush=True)
                 return
             risk_dist  = abs(current_close - calculated_sl)
-            tp1_target = current_close + (risk_dist if is_4j_long else -risk_dist) * FOURJ_TP_R
-            tp2_target = tp1_target                          # 官方1:1,單一目標
+            _sgn = 1.0 if is_4j_long else -1.0
+            tp1_target = current_close + _sgn * risk_dist * FOURJ_TP1_R   # 1R 平一半→自動移保本
+            tp2_target = current_close + _sgn * risk_dist * FOURJ_TP2_R   # 剩半倉跑3R
 
         # ★山寨讓跑改半倉2.5R落袋(2026-06-15,COAI教訓:山寨噴到頂用swing_full一路抱會吐回)。
         #   市值幣維持讓跑(不會這樣噴崩);山寨(非MAJOR)讓跑類→swing_tp 半倉2.5R落袋+BE+剩半trail。多空通用。
