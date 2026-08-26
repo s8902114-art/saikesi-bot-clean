@@ -4396,6 +4396,18 @@ class SykesTradingBot:
         is_short = (bear_trend and short_C1 and short_C2 and short_C3 and
                     short_adx_ok and short_fund_ok)
 
+        # ★2026-08-26 資費過熱閘也套到 1H C3空(原本只串在 OISQ)。
+        # 回測(_bt_gates_on_c3.py,7期含費,對象=新版三步驟序列C3空,live忠實出場):
+        #   基準 n=129/勝52.7%/EV+0.135/容錯11.6🟡/正期4-5/訓+0.00 驗+0.22
+        #   +資費過熱閘 n=118(只擋9%)/勝53.4%/EV+0.161/容錯**14.0🟢**/正期**4/4**/訓+0.03 驗+0.24
+        # ★同時測過但**不加**:
+        #   日線偏見閘 → 擋 **0%**(C3空本來就要求 bear_trend,日線偏見必然同向)= 冗餘
+        #   反向S/R區間閘 → 擋53%但容錯 11.6→11.4 幾乎沒變(C3空已有階梯Fibo壓力位+POC籌碼支撐閘
+        #     兩層在管位置,第三層重複);三閘全上 n只剩55、正期2/3,樣本太薄不值得
+        if is_short and tf_id == "1H" and _funding_overheated(okx_swap_symbol) is True:
+            print(f"[資費閘] {symbol_item} C3空 資費過熱,擋單")
+            is_short = False
+
         # ── 數據獵手 CVD 加碼（C方案）：15m 多單 CVD吸收確認 → 下注 ×DH_BOOST_MULT ──
         # 不過濾(保留全部15m多的頻率=複利引擎)，只把資金往高品質的CVD確認單傾斜。
         # 回測(全策略×階梯下注)：C×1.5 成長>不過濾基準、MDD還略低，優於硬性過濾(A)。
