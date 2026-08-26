@@ -3539,8 +3539,13 @@ def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
     ★只用**已收盤**的4H K(API 的 iloc[-1] 是未完成K,必須丟掉,見 CLAUDE.md 時框對齊陷阱)。"""
     try:
         _ck = f"{okx_swap_symbol}|{struct_bar}"
+        # ★快取TTL要綁結構TF,不能一律900秒(2026-08-27 改成雙階後發現):15m進場每15分鐘評估一次,
+        #   TTL=900秒等於每根15m都重抓一次2H K線 → 每小時多 4×幣數 支API呼叫,~100幣就是400+/小時,
+        #   再加30m階約200+/小時。OKX限流被打到會**靜默影響其他策略**(不會報錯,只是抓不到資料放行)。
+        #   結構K本來2~4小時才換一根,TTL取「結構K長度的一半」就夠新,呼叫量降到1/2~1/4。
+        _ttl = 1800 if struct_bar == "2H" else 3600
         _c = _FOURJ_CACHE.get(_ck)
-        if _c and time.time() - _c[0] < 900:
+        if _c and time.time() - _c[0] < _ttl:
             return _c[1]
         d = fetch_market_candles(okx_swap_symbol, struct_bar, 300)
         if d is None or d.empty or len(d) < 120:
