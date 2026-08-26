@@ -935,7 +935,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                               tf_id: str = "15m", position_scale: float = 1.0,
                               pyramid_eligible: bool = False,
                               exit_strategy: str = "", allow_stack: bool = False,
-                              timestop_h: int = 0) -> None:
+                              timestop_h: int = 0, be_pct: float = 0.0) -> None:
     """
     實盤訂單路由模組：整合動態槓桿、USDT 單位下單、市價與限價單組合
     position_scale：倉位縮放係數（1.0=正常，0.5=半倉，由 dynamic_sl_tp 傳入）
@@ -1318,6 +1318,8 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
                 "exit_strategy":    exit_strategy,     # ""固定R/line_full切線/swing_*移SL/line_add加碼
                 "entry_ts":         int(time.time()),  # 開倉時戳(切線/移SL只看進場後的K)
                 "ts_h":             int(timestop_h or 0),   # ★2026-08-02 本策略專屬時間停損(0=用型態預設)
+                "be_pct":           float(be_pct or 0.0),  # ★浮盈達進場價的N%就移保本(0=不用;目前只有4J)
+                "be_done":          False,
                 "full_contracts":   str(total_contracts),  # 整倉張數(市價平用)
                 "add_count":        0,                 # line_add:已N型轉折加碼次數(守3)
                 "add_swings_n":     0,                 # line_add:已處理的順勢轉折數(避免同轉折重複加)
@@ -2398,6 +2400,54 @@ def check_trailing_stops_for_real():
                 except Exception as _pe:
                     print(f"[Pyramid] {name} 加碼判斷失敗: {_pe}")
 
+            # ── ★早期保本(be_pct):浮盈達「進場價的 N%」就把SL移到保本 ─────────────
+            # 2026-08-27 用戶指定「實盤1%的時候要保本」。這跟本專案舊紀錄衝突
+            # (memory/project_exit_finding「達1R保本兜底重創讓跑策略」、CLAUDE.md「保本延後至1.5R」),
+            # 所以實測了才上:4J兩階合併 n=926,10期(含2022深熊/2023橫盤):
+            #   現行(TP1成交才移保本)  勝率74.1% EV+0.545 容錯25.1 143R/年 最大回撤-8.73R
+            #   ★+1%保本(用戶版)      勝率58.3% EV+0.490 容錯**31.5**(最高) 129R/年 最大回撤**-5.99R**
+            #   +0.5%保本            勝率46.7% EV+0.404 容錯28.8 106R/年 -5.68R(掃太兇,連虧16)
+            #   +1.5%保本            勝率63.8% EV+0.502 容錯29.8 132R/年 -6.82R
+            # → EV只掉10%,但**回撤降31%、容錯升到最高**。以「每單位回撤換到的年報酬」看
+            #   16.4 → 21.5(+31%)。舊紀錄的「保本太早有害」是對**讓跑型**策略,
+            #   對這種「TP1半平+固定TP2」的緊停損策略不成立。腳本 _bt_4j_be.py。
+            # 只對有帶 be_pct 的倉生效(目前=4J),其他策略行為不變。
+            _bep = float(trade.get("be_pct") or 0)
+            if _bep > 0 and not trade.get("be_done") and not trade.get("tp1_hit"):
+                try:
+                    _ep = float(trade["entry_price"])
+                    _cp = float(ex.fetch_ticker(symbol).get("last") or 0)
+                    if _cp > 0 and _ep > 0:
+                        _gain = (_cp - _ep)/_ep if direction == "long" else (_ep - _cp)/_ep
+                        if _gain >= _bep:
+                            _fb = _ep * 0.001                       # 保本價含往返手續費
+                            _be = _ep + _fb if direction == "long" else _ep - _fb
+                            _slnow = float(trade.get("current_sl") or 0)
+                            _better = (_be > _slnow) if direction == "long" else (_be < _slnow)
+                            if _better:
+                                try: _bx = ex.price_to_precision(symbol, _be)
+                                except Exception: _bx = format(_be, "f")
+                                _exs = "sell" if direction == "long" else "buy"
+                                # place-before-cancel:先掛新SL成功才取消舊的(不裸倉,對齊0706那次修法)
+                                _r = _place_okx_algo_sl(inst_id=inst_id, side=_exs, amount="0",
+                                                        sl_trigger_px=_bx, pos_side=direction)
+                                _nid = (_r.get("data") or [{}])[0].get("algoId")
+                                if not _nid and str((_r.get("data") or [{}])[0].get("sCode") or "") == "51088":
+                                    _okx_cancel_all_algos(inst_id); time.sleep(0.3)
+                                    _r = _place_okx_algo_sl(inst_id=inst_id, side=_exs, amount="0",
+                                                            sl_trigger_px=_bx, pos_side=direction)
+                                    _nid = (_r.get("data") or [{}])[0].get("algoId")
+                                if _nid:
+                                    _old = trade.get("sl_algo_id")
+                                    trade["sl_algo_id"] = _nid; trade["current_sl"] = _be
+                                    trade["be_done"] = True
+                                    if _old and _old != _nid: _cancel_okx_algo_order(inst_id, _old)
+                                    save_active_trades()
+                                    dc_log(f"🔒 {name} 浮盈{_gain*100:.2f}%(≥{_bep*100:.0f}%),止損移保本 {_be}")
+                                    print(f"[EarlyBE] {name} {direction} 浮盈{_gain*100:.2f}%→保本{_be}", flush=True)
+                except Exception as _bee:
+                    print(f"[EarlyBE] {name} 保本判斷失敗: {_bee}", flush=True)
+
             # ── 整倉麥門切線(line_full)：DH空 / 30m C3多 ─────────────────────
             # 不掛TP,整倉沿切線跑,「實體收盤突破切線」→市價平全倉;SL已掛硬底兜底。
             # 不走 TP1/保本邏輯(整倉跟趨勢,WF:DH+0.629/30m+0.582,去top3仍正)。
@@ -3475,9 +3525,18 @@ FOURJ_PV            = 3      # ★2026-08-27 當天改 8→3。用戶指正「�
                              #     PV8 n=125 68.0% +0.357 18.8 7/7期   35筆/年
                              #   PV3 訊號多60%、EV與容錯都更高、且**十期沒有一期為負**。
                              #   另在獨立的15m資料(7期)網格上,PV3 在每一個時框對都是最好或並列最好 → 非單一格。
-FOURJ_EXT_ATR       = 0.30   # 「很明顯的突破」:收盤超出位階 >= 0.30x4H ATR
-FOURJ_BUF_S         = 0.30   # 4H回踩容差
-FOURJ_BUF_E         = 0.35   # 1H觸及位階容差
+# ★2026-08-27 用戶指正「我們從來沒在用atr」——查證屬實:**4J 的13支逐字稿裡 "ATR" 出現 0 次**。
+#   他說的是影片01「你的止損就是放在**前面的高點**」,沒有緩衝、沒有ATR。
+#   下面三個ATR係數原本都是**我自己加的**,實測(10期,含2022深熊/2023橫盤,含費)全部都在傷害策略:
+#     4H→30m 現行(.30/.35/.20) n=313 勝率55.3% EV+0.518 容錯32.8 連虧7 46.0R/年 回撤-5.38R
+#            ★全去ATR(0/0/0)  n=528 勝率58.7% EV+0.576 容錯40.1 連虧6 86.4R/年 回撤**-2.87R**
+#     2H→15m 現行            n=641 勝率57.4% EV+0.425 容錯26.5 連虧10 77.2R/年 回撤-6.35R
+#            ★全去ATR        n=1103 勝率67.3% EV+0.577 容錯38.3 連虧9 **180.7R/年** 回撤-6.24R
+#   訊號多70%、勝率更高、EV更高、容錯更高、總R翻倍、回撤更小 → 全部歸零,照他說的做。
+#   腳本 _bt_4j_noatr.py。★教訓:把口述規則「量化成ATR倍數」不是中立的,是在改策略。
+FOURJ_EXT_ATR       = 0.0    # 突破 = 順向實體K**收盤穿越**,不加任何緩衝
+FOURJ_BUF_S         = 0.0    # 回踩 = 價格**觸及**位階,不加容差
+FOURJ_BUF_E         = 0.0    # 進場 = 進場TF**觸及**位階,不加容差
 FOURJ_RETR_MAX      = 0.50   # 回踩深度上限(突破腿的斐波;官方反覆強調先看0.5)
 FOURJ_WAIT          = 24     # 突破後最多等24根4H找回踩
 FOURJ_ADX_MIN       = 0.0    # ★2026-08-27 停用(25→0)。這個閘是 PV8 時代為了救「23H1橫盤 EV=0.000」
@@ -3492,7 +3551,7 @@ FOURJ_ADX_MIN       = 0.0    # ★2026-08-27 停用(25→0)。這個閘是 PV8 �
                              #   但EV/容錯全面下降(+0.345/17.6 → +0.217~+0.262/11.1~13.5);
                              #   而「實體突破區間」永遠0筆——與本策略**定義互斥**(突破後回踩進場時,
                              #   價格必然貼著位階,不可能同時收在區間遠側之外)。詳見 _bt_4j_zonechop.py。
-FOURJ_SL_LOOKBACK   = 6      # 停損取1H近6根前低/前高
+FOURJ_SL_LOOKBACK   = 6      # 停損 = 進場TF近6根的**前低/前高**(官方原話,不加ATR緩衝)
 # ★出場(2026-08-27 重測後改版)。用戶問「停利怎麼抓的」→ 發現我在 PV8→PV3、換兩階之後
 #   **從來沒重測過出場**。10期(含2022深熊/2023橫盤)實測,兩階合併:
 #     固定1:1(原本)        EV+0.411 容錯20.6 連虧7  108R/年 最大回撤 -7.6R
@@ -3505,6 +3564,15 @@ FOURJ_SL_LOOKBACK   = 6      # 停損取1H近6根前低/前高
 #   TP1=1R 平一半並自動移保本(bot既有機制),TP2=3R。
 FOURJ_TP1_R         = 1.0    # TP1:1R 平50% + 止損移保本(官方的「一比一」保留成第一目標)
 FOURJ_TP2_R         = 3.0    # TP2:剩下半倉跑到3R
+FOURJ_BE_PCT        = 0.01   # ★2026-08-27 用戶指定「實盤1%的時候要保本」:浮盈達進場價的1%
+                             #   就把停損移到保本(含手續費)。實測(兩階合併n=926,10期含2022深熊/橫盤):
+                             #     現行(TP1成交才移) 勝率74.1% EV+0.545 容錯25.1 143R/年 回撤-8.73R
+                             #     ★+1%保本         勝率58.3% EV+0.490 容錯**31.5**(最高) 129R/年 回撤**-5.99R**
+                             #     +0.5%保本        勝率46.7% EV+0.404 容錯28.8 106R/年 -5.68R(掃太兇,連虧16)
+                             #     +1.5%保本        勝率63.8% EV+0.502 容錯29.8 132R/年 -6.82R
+                             #   EV只掉10%但回撤降31%、容錯升到最高;每單位回撤換到的年報酬 16.4→21.5(+31%)。
+                             #   ★這與舊紀錄「保本太早有害」不衝突:那條是對**讓跑型**策略,
+                             #     對本策略(TP1半平+固定TP2、緊結構停損)不成立。腳本 _bt_4j_be.py。
 FOURJ_OBS_SCALE     = 0.5    # ★半倉。用戶問過「勝率那麼高幹嘛半倉」——理由不是不信勝率,是**回撤**:
                              #   兩階合併回測(10期)同日最多9筆訊號,逐筆權益最大回撤 -8.7R。
                              #   換算:半倉(2.5%/筆) -21.8% / 全倉(5%/筆) **-43.7%**,
@@ -5369,11 +5437,11 @@ class SykesTradingBot:
         if is_4j_long or is_4j_short:
             _lb = FOURJ_SL_LOOKBACK
             if is_4j_long:
-                calculated_sl = float(df["low"].values[-_lb:].min()) - 0.2 * current_atr
+                calculated_sl = float(df["low"].values[-_lb:].min())      # ★純前低,不加ATR緩衝
                 _floor_sl = current_close * (1.0 - MIN_SL_PCT)
                 if calculated_sl > _floor_sl: calculated_sl = _floor_sl
             else:
-                calculated_sl = float(df["high"].values[-_lb:].max()) + 0.2 * current_atr
+                calculated_sl = float(df["high"].values[-_lb:].max())     # ★純前高
                 _floor_sl = current_close * (1.0 + MIN_SL_PCT)
                 if calculated_sl < _floor_sl: calculated_sl = _floor_sl
             risk_pct = abs(current_close - calculated_sl) / current_close
@@ -5449,6 +5517,8 @@ class SykesTradingBot:
                         position_scale=dh_boost * _concentration_mult(direction, "okx"),
                         pyramid_eligible=_pyr_elig,
                         exit_strategy=exit_strategy, timestop_h=_strat_ts_h,
+                        # ★4J:浮盈達進場價1%就移保本(用戶指定,見 FOURJ_BE_PCT 註解的回測依據)
+                        be_pct=(FOURJ_BE_PCT if (is_4j_long or is_4j_short) else 0.0),
                     )
             if EXCHANGE_ENABLED.get("bingx", True):
                 if _dir_skew_block(direction, "bingx"):
