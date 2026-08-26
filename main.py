@@ -3524,6 +3524,11 @@ SR_ZONE_MERGE_ATR = 0.6    # 群聚容差:錨點距離 <= 0.6×ATR 視為同一�
 SR_ZONE_MIN_TOUCH = 2      # 官方「兩次成立,三次確認」→ 最低2次
 SR_ZONE_BUF_ATR   = 0.3    # 區間外緣容差
 SR_ZONE_BARS      = 900    # 1H 回看根數(約37天)
+# ★2026-08-26 生命週期(對齊回測 ZoneState 的 keep/max_age;沒有這兩個 live 會留下900根內的
+#   **所有**區間→區間過密→「停損側最近的同向區間」永遠貼著價格→止損位置閘實測擋單率0%
+#   (回測27%/22%)。回測預期擋單率 vs live實際對不上 = 實作有bug,不是策略問題。)
+SR_ZONE_KEEP      = 12     # 最多保留幾個區(依最近觸及排序)
+SR_ZONE_MAX_AGE   = 1200   # 區間存活根數(超過未被觸及就淘汰)
 _SR_ZONE_CACHE: Dict[str, Any] = {}   # instId -> (ts, zones)
 
 def _sr_zones_1h(inst_id: str):
@@ -3556,34 +3561,57 @@ def _sr_zones_1h(inst_id: str):
             if len(rows) >= SR_ZONE_BARS: break
         if len(rows) < 300:
             _SR_ZONE_CACHE[inst_id] = (time.time(), None); return None
-        arr = sorted(({"ts": int(x[0]), "h": float(x[2]), "l": float(x[3]), "c": float(x[4])}
+        arr = sorted(({"ts": int(x[0]), "o": float(x[1]), "h": float(x[2]),
+                       "l": float(x[3]), "c": float(x[4])}
                       for x in rows), key=lambda z: z["ts"])
         hi = np.array([x["h"] for x in arr]); lo = np.array([x["l"] for x in arr])
-        cl = np.array([x["c"] for x in arr]); n = len(arr)
+        cl = np.array([x["c"] for x in arr]); op = np.array([x["o"] for x in arr])
+        bt = np.maximum(op, cl); bb = np.minimum(op, cl); n = len(arr)
         pc = np.concatenate([[cl[0]], cl[:-1]])
         tr = np.maximum(hi - lo, np.maximum(np.abs(hi - pc), np.abs(lo - pc)))
         atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
         pv, cf = SR_ZONE_PV, SR_ZONE_CONF
         zones = []
-        def _add(price, kind, a):
+        def _add(price, kind, a, j):
+            # ★2026-08-26 依官方「繪製五大重點」第④點修正:**盡量不要畫到實體**。
+            #   校正原話(傳統技術分析_2):「我們前面壓力抓的範圍是**影線**…支撐也可以套用這個邏輯,
+            #   **把區間拉大畫到影線的範圍**」。原版用單一價格當錨點,區間會橫跨實體(等於畫錯)。
+            #   新版:錨點=該K棒的影線段(壓力=[實體上緣,最高價];支撐=[最低價,實體下緣]);
+            #   合併後 壓力區下緣取「所有錨點實體上緣的最大值」→ 保證不吃進任何錨點K的實體。
+            #   回測(_bt_zone_on_live.py,7期):OISQ多 容錯14.1→16.9(6/7期正)、OISQ空 25.1→27.0(4/4)。
+            w_lo, w_hi = (bt[j], hi[j]) if kind == "res" else (lo[j], bb[j])
+            w_lo = float(w_lo); w_hi = float(w_hi)   # ★numpy.float64 會讓下游比較回 numpy.bool_
+            if w_hi <= w_lo: w_lo = w_hi = price
             tol = SR_ZONE_MERGE_ATR * a
             for z in zones:
-                if z["kind"] == kind and (z["lo"] - tol) <= price <= (z["hi"] + tol):
-                    z["lo"] = min(z["lo"], price); z["hi"] = max(z["hi"], price)
-                    z["touches"] += 1; return
-            zones.append({"kind": kind, "lo": price, "hi": price, "touches": 1})
+                if z["kind"] == kind and (w_hi >= z["lo"] - tol) and (w_lo <= z["hi"] + tol):
+                    z["wlo"].append(w_lo); z["whi"].append(w_hi)
+                    if kind == "res":
+                        z["lo"] = max(z["wlo"]); z["hi"] = max(z["whi"])
+                    else:
+                        z["lo"] = min(z["wlo"]); z["hi"] = min(z["whi"])
+                    if z["hi"] < z["lo"]: z["lo"], z["hi"] = z["hi"], z["lo"]
+                    z["touches"] += 1; z["last_j"] = j; return
+            zones.append({"kind": kind, "lo": w_lo, "hi": w_hi, "touches": 1,
+                          "wlo": [w_lo], "whi": [w_hi], "last_j": j})
         for j in range(pv, n - pv - cf):
             a = atr[j]
-            if not (a > 0): continue
-            e = min(j + cf, n - 1)
-            if (all(hi[j] > hi[j-k] for k in range(1, pv+1)) and
-                    all(hi[j] >= hi[j+k] for k in range(1, pv+1)) and
-                    (hi[j] - lo[j+1:e+1].min()) >= SR_ZONE_TURN_ATR * a):
-                _add(float(hi[j]), "res", a)            # ★影線極值當錨點
-            if (all(lo[j] < lo[j-k] for k in range(1, pv+1)) and
-                    all(lo[j] <= lo[j+k] for k in range(1, pv+1)) and
-                    (hi[j+1:e+1].max() - lo[j]) >= SR_ZONE_TURN_ATR * a):
-                _add(float(lo[j]), "sup", a)
+            if a > 0:
+                e = min(j + cf, n - 1)
+                if (all(hi[j] > hi[j-k] for k in range(1, pv+1)) and
+                        all(hi[j] >= hi[j+k] for k in range(1, pv+1)) and
+                        (hi[j] - lo[j+1:e+1].min()) >= SR_ZONE_TURN_ATR * a):
+                    _add(float(hi[j]), "res", a, j)     # ★錨點=上影線段(不畫到實體)
+                if (all(lo[j] < lo[j-k] for k in range(1, pv+1)) and
+                        all(lo[j] <= lo[j+k] for k in range(1, pv+1)) and
+                        (hi[j+1:e+1].max() - lo[j]) >= SR_ZONE_TURN_ATR * a):
+                    _add(float(lo[j]), "sup", a, j)
+            # ★逐根淘汰(與回測 ZoneState.update 同結構):先汰舊、再依最近觸及留前 KEEP 個。
+            #   淘汰在 min_touches 過濾**之前**,與回測一致(1觸的區也佔名額)。
+            if zones:
+                zones = [z for z in zones if j - z["last_j"] <= SR_ZONE_MAX_AGE]
+                zones.sort(key=lambda z: -z["last_j"])
+                del zones[SR_ZONE_KEEP:]
         zones = [z for z in zones if z["touches"] >= SR_ZONE_MIN_TOUCH]
         # 支壓互換(官方第8頁):價已站到另一側 → 角色翻轉
         last = float(cl[-1]); atr_now = float(atr[-1])
@@ -3596,6 +3624,44 @@ def _sr_zones_1h(inst_id: str):
     except Exception as _ze:
         print(f"[S/R區間] {inst_id} 計算失敗(放行): {_ze}", flush=True)
         return None
+
+SR_SL_POS_GATE_ENABLED = True   # ★2026-08-26 止損位置閘(見 _sr_sl_position_ok)
+
+def _sr_sl_position_ok(inst_id: str, direction: str, entry: float, sl: float):
+    """★止損不得卡在「停損側最近的同向區間」內部或另一側。回 True/False/None(無資料→放行)。
+
+    出處(菁英交易學院 直播 0825,作者本人檢討學員單):
+      「下面就是一個**支撐位**,結果他把**止損守在這個支撐位上方**,那怎麼合理?…
+        這邊明確他是一根針兩個針三根針然後假跌破…**要設止損應該是設下面這邊**」
+      → 多單止損必須在最近支撐區的**下緣之下**;空單止損必須在最近壓力區的**上緣之上**。
+        止損落在區間裡=把停損放在「本來就會被插針測試」的位置,等於送分給掃損。
+
+    回測依據(_bt_zone_room.py,7期,含費,**增量檢定**:基準已含現行反向S/R區間閘):
+      OISQ多 n197→143(再擋27%) 容錯 16.9→**19.6** EV+0.320→+0.349 正期 6/7 不變
+      OISQ空 n 63→ 49(再擋22%) 容錯 27.0→**28.7** EV+0.539→+0.551 正期 4/4 不變
+      逐期:空單7期中5期改善;多單4改善3變差(24Q2 +0.344→+0.055 是最差的一期)→
+      所以這層是「容錯/勝率」的改善(多單勝率51.8→53.1、空單65.1→67.3),不是EV暴增,別過度期待。
+    ★同時測過但**不採用**的「上方空間閘」(room_R>=1.0,直播0813「上方空間很大」):
+      與本閘和反向區間閘重疊52%,多單只換到容錯+1.0pt卻再擋48%訊號,不划算;
+      空單看似+6.5pt但n只剩34筆/7期,樣本不足以支撐。留待live累積樣本後重評。
+    """
+    if not SR_SL_POS_GATE_ENABLED: return None
+    d = _sr_zones_1h(inst_id)
+    if not d or not d.get("zones"): return None
+    px = d["last"]
+    want = "sup" if direction == "long" else "res"
+    near = None
+    for z in d["zones"]:
+        if z["kind"] != want: continue
+        if direction == "long" and z["hi"] < px:
+            if near is None or z["hi"] > near["hi"]: near = z
+        elif direction == "short" and z["lo"] > px:
+            if near is None or z["lo"] < near["lo"]: near = z
+    if near is None: return None                    # 停損側沒有同向區間 → 無從違規
+    # ★bool() 不可省:區間邊界若是 numpy.float64,比較會回 numpy.bool_,
+    #   呼叫端的 `is False` **永遠不成立** → 閘門形同不存在(2026-08-26 用真實OKX資料驗觸發率抓到)。
+    return bool(sl < near["lo"]) if direction == "long" else bool(sl > near["hi"])
+
 
 def _sr_reverse_zone_hit(inst_id: str, direction: str):
     """進場價是不是正撞在**反向區間**上(做多撞壓力區 / 做空撞支撐區)→ 該擋。
@@ -4715,6 +4781,18 @@ class SykesTradingBot:
                 # ★2026-08-26 反向S/R區間閘(見 _sr_reverse_zone_hit 註解的回測依據+官方定義出處)
                 if _sq in ("long", "short") and _sr_reverse_zone_hit(okx_swap_symbol, _sq) is True:
                     _sq = None
+                # ★2026-08-26 止損位置閘(見 _sr_sl_position_ok)。用**下方實際會下的那個SL**去判,
+                #   公式與 is_oisq_long/short 區塊(range對邊±0.3ATR、2.5ATR上限)逐字對齊。
+                if _sq in ("long", "short"):
+                    _rh_g = float(df["high"].values[-13:-1].max())
+                    _rl_g = float(df["low"].values[-13:-1].min())
+                    if _sq == "long":
+                        _sl_g = max(_rl_g - 0.3 * current_atr, current_close - 2.5 * current_atr)
+                    else:
+                        _sl_g = min(_rh_g + 0.3 * current_atr, current_close + 2.5 * current_atr)
+                    if _sr_sl_position_ok(okx_swap_symbol, _sq, current_close, _sl_g) is False:
+                        print(f"[止損位置閘] {symbol_item} {_sq} 止損卡在同向區間內,擋單")
+                        _sq = None
                 if _sq == "long":  is_oisq_long = True;  dh_boost = BOOST_MULT; print(f"[主力建多] {symbol_item} 壓縮突破噴出(×1.5)")
                 elif _sq == "short": is_oisq_short = True; dh_boost = BOOST_MULT; print(f"[主力建空] {symbol_item} 壓縮突破噴出(×1.5)")
             except Exception as _sqe:
