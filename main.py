@@ -3639,79 +3639,57 @@ def _fourj_adx(h, l, c, n=14):
 
 
 def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
-    """回傳目前**還在進場窗內**的 4H setup:(direction, level) 或 None。
-    ★只用**已收盤**的4H K(API 的 iloc[-1] 是未完成K,必須丟掉,見 CLAUDE.md 時框對齊陷阱)。"""
+    """回傳目前**有效的突破位階**:(direction, level, ext) 或 None。
+    ext = 突破後到目前為止的結構最高(多)/最低(空),用來算回踩深度。
+
+    ★★2026-08-27 重寫。舊版要求「結構層的回踩**已完成**、且落在最後兩根已收盤結構K內」
+      (f >= n-2),那是錯的:
+        ①回測(與真人)的做法是「突破K收盤 → 然後盯**進場時框**等它回來觸價就進」,
+          不會等那根結構層回踩K收完。等收完,進場窗(回測定義到 f收盤+1根)早就過了。
+        ②那個定義還把窗口壓成只有2根結構K。
+      實測(用當下真實OKX資料掃57幣):舊定義 **0 個**幣有setup;
+      新定義(突破已收盤且尚未失效) 2H結構 **6個(11%)** / 4H結構 3個(5%)。
+      症狀是 [4J儀表] 連續21輪、3.5小時、190幣「有setup0」量出來的。
+    新定義:最近 FOURJ_WAIT 根已收盤結構K內,存在一次「順向實體K收盤突破最近確認樞紐」,
+      且其後沒有任何已收盤結構K反向收破該位階(=尚未失效)。回踩與進場交給 `_check_4j` 在進場TF即時判。
+    ★只用**已收盤**的結構K:`fetch_market_candles` 回傳時已 `iloc[:-1]` 丟掉未完成K,不可再丟。
+    """
     try:
         _ck = f"{okx_swap_symbol}|{struct_bar}"
-        # ★快取TTL要綁結構TF,不能一律900秒(2026-08-27 改成雙階後發現):15m進場每15分鐘評估一次,
-        #   TTL=900秒等於每根15m都重抓一次2H K線 → 每小時多 4×幣數 支API呼叫,~100幣就是400+/小時,
-        #   再加30m階約200+/小時。OKX限流被打到會**靜默影響其他策略**(不會報錯,只是抓不到資料放行)。
-        #   結構K本來2~4小時才換一根,TTL取「結構K長度的一半」就夠新,呼叫量降到1/2~1/4。
         _ttl = 1800 if struct_bar == "2H" else 3600
         _c = _FOURJ_CACHE.get(_ck)
         if _c and time.time() - _c[0] < _ttl:
             return _c[1]
         d = fetch_market_candles(okx_swap_symbol, struct_bar, 300)
         if d is None or d.empty or len(d) < 120:
-            _FOURJ_STAT["nodata"] += 1      # ★結構K抓不到/不足 → 這幣本輪等於沒被判定
+            _FOURJ_STAT["nodata"] += 1
             _FOURJ_CACHE[_ck] = (time.time(), None); return None
-        # ★★2026-08-27 修:這裡原本又寫了一次 d = d.iloc[:-1]。但 `fetch_market_candles` 的
-        #   最後一行就是 `return df.iloc[:-1]`(它自己已經丟掉未完成K),於是**一共丟了兩根**——
-        #   未完成那根 + 最新那根**已收盤**的。setup 要求回踩落在最後兩根結構K內(f >= n-2),
-        #   少一根等於永遠在看 2~4 小時前的舊資料 → 幾乎不可能有 setup 落在窗內。
-        #   症狀:[4J儀表] 連續三輪「評估188 結構K不足0 有setup0」,而 OKX 實資料模擬說
-        #   setup出現率應有 1.11%(188幣約2個)。是加了儀表才量出來的。
-        #   → 不要再丟。fetch_market_candles 回來的 iloc[-1] 已經是**最後一根已收盤**的K。
         hi = d["high"].values.astype(float); lo = d["low"].values.astype(float)
         cl = d["close"].values.astype(float); op = d["open"].values.astype(float)
-        n = len(hi)
-        pc = np.concatenate([[cl[0]], cl[:-1]])
-        tr = np.maximum(hi-lo, np.maximum(np.abs(hi-pc), np.abs(lo-pc)))
-        atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-        adxv = _fourj_adx(hi, lo, cl)
-        pv = FOURJ_PV
+        n = len(hi); pv = FOURJ_PV
         ph = []; pl = []
-        for j in range(pv, n-pv):
+        for j in range(pv, n - pv):
             if (all(hi[j] > hi[j-k] for k in range(1, pv+1)) and
                     all(hi[j] >= hi[j+k] for k in range(1, pv+1))): ph.append(j)
             if (all(lo[j] < lo[j-k] for k in range(1, pv+1)) and
                     all(lo[j] <= lo[j+k] for k in range(1, pv+1))): pl.append(j)
-        # 往回找最近一個「突破→回踩」且**還在進場窗內**的 setup。
-        # 進場窗與回測一致:回踩那根4H收盤後再給1根4H(即回踩根 f,窗到 f+1 這根4H結束)。
-        for i in range(n-2, max(pv, n-2-FOURJ_WAIT*2)-1, -1):
-            a = atr[i]
-            if not (a > 0) or not (adxv[i] >= FOURJ_ADX_MIN): continue
+        for i in range(n-1, max(pv, n-1-FOURJ_WAIT)-1, -1):
             H = [j for j in ph if j <= i-pv]; L = [j for j in pl if j <= i-pv]
             if len(H) < 2 or len(L) < 2: continue
             for d_ in ("long", "short"):
                 if d_ == "long":
                     lvl = float(hi[H[-1]])
-                    if not (cl[i] > lvl + FOURJ_EXT_ATR*a and cl[i] > op[i] and cl[i-1] <= lvl):
-                        continue
+                    if not (cl[i] > lvl and cl[i] > op[i] and cl[i-1] <= lvl): continue
                     if not (hi[H[-1]] > hi[H[-2]] and lo[L[-1]] > lo[L[-2]]): continue
+                    if any(cl[g] < lvl for g in range(i+1, n)): continue      # 已失效
+                    ext = float(hi[i:n].max())
                 else:
                     lvl = float(lo[L[-1]])
-                    if not (cl[i] < lvl - FOURJ_EXT_ATR*a and cl[i] < op[i] and cl[i-1] >= lvl):
-                        continue
+                    if not (cl[i] < lvl and cl[i] < op[i] and cl[i-1] >= lvl): continue
                     if not (lo[L[-1]] < lo[L[-2]] and hi[H[-1]] < hi[H[-2]]): continue
-                f = None
-                for g in range(i+1, min(i+FOURJ_WAIT, n)):
-                    if d_ == "long":
-                        if cl[g] < lvl - FOURJ_BUF_S*atr[g]: break
-                        if lo[g] <= lvl + FOURJ_BUF_S*atr[g] and cl[g] > lvl: f = g; break
-                    else:
-                        if cl[g] > lvl + FOURJ_BUF_S*atr[g]: break
-                        if hi[g] >= lvl - FOURJ_BUF_S*atr[g] and cl[g] < lvl: f = g; break
-                if f is None: continue
-                if f < n-2: continue                       # 進場窗已過(回踩根 + 1根4H)
-                if d_ == "long":
-                    leg = float(hi[i:f+1].max()) - lvl
-                    retr = (float(hi[i:f+1].max()) - cl[f])/leg if leg > 0 else 9.9
-                else:
-                    leg = lvl - float(lo[i:f+1].min())
-                    retr = (cl[f] - float(lo[i:f+1].min()))/leg if leg > 0 else 9.9
-                if retr > FOURJ_RETR_MAX: continue
-                out = (d_, lvl)
+                    if any(cl[g] > lvl for g in range(i+1, n)): continue
+                    ext = float(lo[i:n].min())
+                out = (d_, lvl, ext)
                 _FOURJ_CACHE[_ck] = (time.time(), out)
                 return out
         _FOURJ_CACHE[_ck] = (time.time(), None)
@@ -3722,41 +3700,44 @@ def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
 
 
 def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame, tf_id: str = "1H"):
-    """進場時機:價格觸及該結構TF位階(±0.35x進場TF ATR) 且**順向收盤** → 回 (方向, 位階)。
-    結構TF 由 FOURJ_LADDER[tf_id] 決定(1H進場配4H結構 / 30m配4H / 15m配2H)。"""
+    """進場時機(進場TF即時判):價格**觸及**該位階且**順向收盤**,且回踩深度 <= FOURJ_RETR_MAX。
+    回 (方向, 位階)。★df 來自 fetch_market_candles,其 iloc[-1] 已是最後一根**已收盤**K。"""
     if not FOURJ_ENABLED: return None
     _sb = FOURJ_LADDER.get(tf_id)
     if not _sb: return None
     try:
         _FOURJ_STAT["eval"] += 1
         st = _fourj_setup(okx_swap_symbol, _sb)
-        if st: _FOURJ_STAT["setup"] += 1
         if not st: return None
-        d_, lvl = st
+        _FOURJ_STAT["setup"] += 1
+        d_, lvl, ext = st
         _fk = f"{okx_swap_symbol}|{_sb}|{d_}|{lvl:.10g}"
         _now = time.time()
         for _k in [k for k, v in _FOURJ_FIRED.items() if _now - v > 14*86400]:
-            _FOURJ_FIRED.pop(_k, None)                 # 清14天前的紀錄,避免無限膨脹
-        if _fk in _FOURJ_FIRED: return None            # ★這個 setup 已經進過,不再進
+            _FOURJ_FIRED.pop(_k, None)
+        if _fk in _FOURJ_FIRED: return None            # 這個 setup 已經進過
         hi = df["high"].values; lo = df["low"].values
         cl = df["close"].values; op = df["open"].values
         if len(cl) < 20: return None
-        a1 = float(df["atr"].iloc[-1]) if "atr" in df.columns else float(
-            pd.Series(np.maximum(hi-lo, np.maximum(np.abs(hi-np.concatenate([[cl[0]], cl[:-1]])),
-                      np.abs(lo-np.concatenate([[cl[0]], cl[:-1]]))))).ewm(alpha=1/14,
-                      adjust=False).mean().iloc[-1])
-        if not (a1 > 0): return None
         if d_ == "long":
-            if lo[-1] <= lvl + FOURJ_BUF_E*a1 and cl[-1] > lvl and cl[-1] > op[-1]:
+            _e = max(float(ext), float(hi[-1]))
+            leg = _e - lvl
+            if leg <= 0: return None
+            if (_e - cl[-1]) / leg > FOURJ_RETR_MAX: return None      # 回踩太深
+            if lo[-1] <= lvl and cl[-1] > lvl and cl[-1] > op[-1]:
                 _FOURJ_FIRED[_fk] = _now; _FOURJ_STAT["fire"] += 1
                 return ("long", lvl)
         else:
-            if hi[-1] >= lvl - FOURJ_BUF_E*a1 and cl[-1] < lvl and cl[-1] < op[-1]:
+            _e = min(float(ext), float(lo[-1]))
+            leg = lvl - _e
+            if leg <= 0: return None
+            if (cl[-1] - _e) / leg > FOURJ_RETR_MAX: return None
+            if hi[-1] >= lvl and cl[-1] < lvl and cl[-1] < op[-1]:
                 _FOURJ_FIRED[_fk] = _now; _FOURJ_STAT["fire"] += 1
                 return ("short", lvl)
         return None
-    except Exception as _e:
-        print(f"[4J] {symbol_item} 判斷失敗: {_e}", flush=True)
+    except Exception as _e2:
+        print(f"[4J] {symbol_item} 判斷失敗: {_e2}", flush=True)
         return None
 
 
