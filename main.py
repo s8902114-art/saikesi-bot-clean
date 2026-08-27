@@ -3655,7 +3655,13 @@ def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
         if d is None or d.empty or len(d) < 120:
             _FOURJ_STAT["nodata"] += 1      # ★結構K抓不到/不足 → 這幣本輪等於沒被判定
             _FOURJ_CACHE[_ck] = (time.time(), None); return None
-        d = d.iloc[:-1]                                   # ★丟掉未完成的4H
+        # ★★2026-08-27 修:這裡原本又寫了一次 d = d.iloc[:-1]。但 `fetch_market_candles` 的
+        #   最後一行就是 `return df.iloc[:-1]`(它自己已經丟掉未完成K),於是**一共丟了兩根**——
+        #   未完成那根 + 最新那根**已收盤**的。setup 要求回踩落在最後兩根結構K內(f >= n-2),
+        #   少一根等於永遠在看 2~4 小時前的舊資料 → 幾乎不可能有 setup 落在窗內。
+        #   症狀:[4J儀表] 連續三輪「評估188 結構K不足0 有setup0」,而 OKX 實資料模擬說
+        #   setup出現率應有 1.11%(188幣約2個)。是加了儀表才量出來的。
+        #   → 不要再丟。fetch_market_candles 回來的 iloc[-1] 已經是**最後一根已收盤**的K。
         hi = d["high"].values.astype(float); lo = d["low"].values.astype(float)
         cl = d["close"].values.astype(float); op = d["open"].values.astype(float)
         n = len(hi)
