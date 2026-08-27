@@ -2298,7 +2298,22 @@ def check_trailing_stops_for_real():
     try:
         for _p in ex.fetch_positions():
             if abs(float(_p.get("contracts") or 0)) > 0 and _p.get("side"):
-                _pos_set.add((_p.get("symbol"), _p.get("side")))
+                _sym = _p.get("symbol"); _sd = _p.get("side")
+                _pos_set.add((_sym, _sd))
+                # ★★2026-08-27 致命bug修復:ccxt fetch_positions 回的是**統一格式**('ONE/USDT:USDT'),
+                #   但追蹤池記的 trade["symbol"] 是 execute_okx_trade_pipeline 收到的 **instId**
+                #   ('ONE-USDT-SWAP',來源 OKX_SWAP)。兩者**永遠比不上** →
+                #   `(symbol,direction) in _pos_set` 恆為 False → 每個OKX倉開倉後3輪就被踢出追蹤池 →
+                #   **保本/移動停損/時間停損/TP1成交後移保本 全部從來沒運作過**(不只4J,是所有策略)。
+                #   這是 2026-08-01「持倉存在性改每輪全查」重構引入的(本意是修誤刪,結果引入格式不匹配)。
+                #   症狀在 log 裡自相矛盾:「追蹤池 OKX=1 交易所實際持倉=1 查詢OK=True」下一行卻
+                #   「ONE-USDT-SWAP 倉位已關閉(連3輪查無),移除追蹤」。
+                #   修法:兩種格式都放進集合,下方比對再加 inst_id 備援。
+                try:
+                    _mid = (ex.market(_sym) or {}).get("id")
+                    if _mid: _pos_set.add((_mid, _sd))
+                except Exception:
+                    pass
         _pos_ok = True
     except Exception as _fpe:
         print(f"[Trailing] 全倉查詢失敗(本輪不做移除判定): {_fpe}", flush=True)
@@ -2321,7 +2336,8 @@ def check_trailing_stops_for_real():
             # 確認倉位是否仍存在(用本輪全查結果,不再逐倉打API)
             if not _pos_ok:
                 continue                      # 全查失敗→本輪跳過此倉的管理與移除判定(不誤刪)
-            has_pos = (symbol, direction) in _pos_set
+            has_pos = ((symbol, direction) in _pos_set
+                       or (inst_id, direction) in _pos_set)   # ★兩種格式都比(見上方修復說明)
             if not has_pos:
                 # ★防孤兒倉(2026-06-18→2026-08-01加嚴):連3輪查無才移除。
                 #   舊版連2輪+逐倉查限流瞬斷=大量誤刪→倉位失管跑到80h沒人砍(13天實證)。
