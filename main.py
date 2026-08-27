@@ -3617,6 +3617,11 @@ _FOURJ_CACHE: Dict[str, Any] = {}     # f"{instId}|{structBar}" -> (ts, setup_or
 #   live無去重 n=130 EV+0.241 容錯12.4 最長連虧6 訓練段-0.03(翻負);
 #   live加去重 n=111 EV+0.295 容錯15.2 最長連虧4 訓練段+0.04。→ 必須去重。
 _FOURJ_FIRED: Dict[str, float] = {}   # f"{instId}|{dir}|{level}" -> 觸發時間
+# ★2026-08-27 儀表:用戶質疑「訊號量還是不太正常,況且4j不用數據」→ 不再用推的,直接量。
+#   每輪掃描回報:被評估幾個幣 / 幾個有有效setup / 幾個真的觸發進場。
+#   若「評估數」遠小於幣池 → 是掃描沒跑到,不是策略稀有;
+#   若「有setup」很多但「觸發」很少 → 卡在進場條件或下游閘。
+_FOURJ_STAT: Dict[str, int] = {"eval": 0, "setup": 0, "fire": 0, "nodata": 0}
 
 
 def _fourj_adx(h, l, c, n=14):
@@ -3648,6 +3653,7 @@ def _fourj_setup(okx_swap_symbol: str, struct_bar: str = "4H"):
             return _c[1]
         d = fetch_market_candles(okx_swap_symbol, struct_bar, 300)
         if d is None or d.empty or len(d) < 120:
+            _FOURJ_STAT["nodata"] += 1      # ★結構K抓不到/不足 → 這幣本輪等於沒被判定
             _FOURJ_CACHE[_ck] = (time.time(), None); return None
         d = d.iloc[:-1]                                   # ★丟掉未完成的4H
         hi = d["high"].values.astype(float); lo = d["low"].values.astype(float)
@@ -3716,7 +3722,9 @@ def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame, tf_id: s
     _sb = FOURJ_LADDER.get(tf_id)
     if not _sb: return None
     try:
+        _FOURJ_STAT["eval"] += 1
         st = _fourj_setup(okx_swap_symbol, _sb)
+        if st: _FOURJ_STAT["setup"] += 1
         if not st: return None
         d_, lvl = st
         _fk = f"{okx_swap_symbol}|{_sb}|{d_}|{lvl:.10g}"
@@ -3734,11 +3742,11 @@ def _check_4j(symbol_item: str, okx_swap_symbol: str, df: pd.DataFrame, tf_id: s
         if not (a1 > 0): return None
         if d_ == "long":
             if lo[-1] <= lvl + FOURJ_BUF_E*a1 and cl[-1] > lvl and cl[-1] > op[-1]:
-                _FOURJ_FIRED[_fk] = _now
+                _FOURJ_FIRED[_fk] = _now; _FOURJ_STAT["fire"] += 1
                 return ("long", lvl)
         else:
             if hi[-1] >= lvl - FOURJ_BUF_E*a1 and cl[-1] < lvl and cl[-1] < op[-1]:
-                _FOURJ_FIRED[_fk] = _now
+                _FOURJ_FIRED[_fk] = _now; _FOURJ_STAT["fire"] += 1
                 return ("short", lvl)
         return None
     except Exception as _e:
@@ -7066,14 +7074,27 @@ def main_polling_loop():
             elif time.time() - _movers_last_updated > MOVERS_REFRESH_SEC:
                 refresh_top_movers_only()
 
+            # ★★2026-08-27 致命縮排bug修復:原本 `for symbol_item` 迴圈**沒有包在 `for tf` 裡面**
+            #   (兩個 for 同一層縮排),導致 `for tf` 只印字,真正的掃描只跑**一次**、且用最後一個 tf。
+            #   實際後果(synchronise_and_wait_next_candle 回傳剛收盤的時框):
+            #     :15/:45 → ["15m"]              → 掃 15m ✓
+            #     :30     → ["15m","30m"]        → 只掃 30m,**15m 被跳過**
+            #     :00     → ["15m","30m","1H"]   → 只掃 1H,**15m 與 30m 都被跳過**
+            #   = 15m 與 30m 各損失**一半**的掃描機會。4J 兩階(2H→15m / 4H→30m)剛好全掛在這兩個時框上,
+            #   這是「訊號量不正常地少」的主因之一(用戶質疑「4j不用數據」逼出來的查證)。
             for tf in active_tfs_to_run:
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏳ 核心排程觸發：啟動時框 {tf} 全商品指標矩陣掃描...")
-            for symbol_item in list(SYMBOLS.values()):
-                try:
-                    _bot_ref.scan_and_process_market(symbol_item, tf)
-                    sleep(0.25)
-                except Exception as loop_exception:
-                    print(f"  ❌ 商品 {symbol_item} 於時框 [{tf}] 處理時發生系統例外: {loop_exception}")
+                _FOURJ_STAT.update({"eval": 0, "setup": 0, "fire": 0, "nodata": 0})
+                for symbol_item in list(SYMBOLS.values()):
+                    try:
+                        _bot_ref.scan_and_process_market(symbol_item, tf)
+                        sleep(0.25)
+                    except Exception as loop_exception:
+                        print(f"  ❌ 商品 {symbol_item} 於時框 [{tf}] 處理時發生系統例外: {loop_exception}")
+                if tf in FOURJ_LADDER:
+                    print(f"[4J儀表] {tf}: 幣池{len(SYMBOLS)} 評估{_FOURJ_STAT['eval']} "
+                          f"結構K不足{_FOURJ_STAT['nodata']} 有setup{_FOURJ_STAT['setup']} "
+                          f"觸發{_FOURJ_STAT['fire']}", flush=True)
 
         except Exception as outer_err:
             print(f"[MAIN LOOP] 主循環例外，繼續運行: {outer_err}")
