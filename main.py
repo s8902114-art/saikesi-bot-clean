@@ -559,6 +559,17 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     if "主力建" in s:      bits.append("12h窄幅壓縮 + 帶量突破 + OI升建倉 + 4H順向(主力建倉噴出)")
     if "BPR" in s:         bits.append("BPR失衡區重合回測中軸(固定1.5R)")
     if "吞噬" in s:        bits.append("山寨看跌吞噬 + 放量 + EMA100下跌regime(固定2R)")
+    # ★2026-08-27:4J 上線當天漏了這條 → 第一筆live單(ONE 15m多)的訊號卡只印「多頭趨勢」,
+    #   沒有策略名 → 之後對帳會把它算到別人頭上(CLAUDE.md 第12條踩過的坑:BPR空61筆被標成C3空)。
+    #   帶上階梯(4H→30m / 2H→15m),否則兩階分不開。
+    if "4J" in s:
+        _rg = ""
+        if "(" in s and ")" in s:
+            _seg = s[s.find("4J"):]
+            if "(" in _seg and ")" in _seg:
+                _rg = _seg[_seg.find("(")+1:_seg.find(")")]
+        bits.append(("4J" + (f"({_rg})" if _rg else "")
+                     + ":高時框結構實體突破→回踩該位階守住(TP1 1R半平+保本/TP2 3R)"))
     # ★2026-07-18修:原本對「所有1H空單」無條件加「靠階梯壓力位」→BPR空/MACD空的卡都被標成階梯,
     #   14天61筆BPR空全被誤讀成C3空,歸因差點錯人。階梯字樣只有C3空才真的有這個閘。
     if tf == "1H" and side == "short" and "C3" in s:
