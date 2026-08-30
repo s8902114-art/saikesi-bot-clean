@@ -3481,6 +3481,76 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
 
 
 
+# ── ★V成型吸收做多(15m,2026-08-31上線) ───────────────────────────────────────
+# 用戶定調:「做多不會是在跌的時候進。價格低點墊高的過程叫V,在**吸收的那個V成型時**進場。」
+# 官方原文對得上:「多單止損之後,賣單往下賣但賣不下去,等於被吸收了,然後反轉」= V轉。
+# 規格(腳本 _bt_vlong.py,12期雙驗收):
+#   15m｜ZigZag 擺動 5%/5.5%/6% 任一成立(參數取聯集,不卡死單一值)｜兩個低點間隔 ≤2h~4h
+#   V成型 = 第二個低點 > 第一個低點；吸收 = 合約CVD 第二個低點 < 第一個低點
+#   停損 = 第二個低點(吸收低點)×0.999｜TP 2.5R
+# 驗收:聯集 n=983 EV+0.517 容錯15.5 10/12期正;六個單格容錯17.9~24.6(每格獨立達標)
+#   未測新幣 +0.359｜2022真獨立外樣本 +0.385｜隨機同方向做多基準 -0.077 → **超額 +0.879**
+#   成本0.10/0.15/0.20% → 容錯24.0/23.7/23.3(不敏感)｜頻率≈2筆/天｜持有中位6.2h
+#   重疊率 vs 現役1H MACD多 = **0.0%**(全新獨立訊號源,不需去重)｜強制平倉僅5%
+# ★已測過且**有害**,不要再加:日線EMA200/4H EMA200 regime閘(新幣驗收 +0.359→+0.02~-0.058)、
+#   位置層疊加、加分項越多、麥門切線/分批保本出場(皆不如固定TP)。
+# ★★已知弱點:**22H2深熊(LUNA/FTX)EV -0.583(n=37)** —— 做多在深熊會賠。
+#   不在策略層加regime(實測有害),改依賴既有 DAILY_STOP_ENABLED 每日熔斷。
+#   ★重開/關閉條件:若連續兩個月實單EV<0 或 觸發每日熔斷≥3次 → 關閉並回頭查是否進入深熊。
+VLONG_ENABLED = True    # ★2026-08-31 上線(12期雙驗收全過,詳見上方註解)
+VLONG_SWINGS = (0.05, 0.055, 0.06)   # ZigZag 擺動門檻(任一成立即可)
+VLONG_MAX_GAP = 16                    # 兩個低點最大間隔(根15m) = 4h
+VLONG_TP_R = 2.5
+
+
+def _vlong_zigzag_lows(hi, lo, pct):
+    """ZigZag 低點(以回撤幅度定義,無左右N根確認)。回傳 [(idx, price, 確認idx)]。無未來函數。"""
+    n = len(hi); L = []
+    if n < 3: return L
+    up = True; ex_i = 0; ex_p = hi[0]
+    for i in range(1, n):
+        if up:
+            if hi[i] > ex_p: ex_i, ex_p = i, hi[i]
+            elif ex_p > 0 and (ex_p - lo[i]) / ex_p >= pct:
+                up = False; ex_i, ex_p = i, lo[i]
+        else:
+            if lo[i] < ex_p: ex_i, ex_p = i, lo[i]
+            elif ex_p > 0 and (hi[i] - ex_p) / ex_p >= pct:
+                L.append((ex_i, float(ex_p), i)); up = True; ex_i, ex_p = i, hi[i]
+    return L
+
+
+def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame):
+    """V成型吸收做多。回傳 (是否成立, 原因, 停損價)。df 為已去掉未收盤當根的 15m。"""
+    try:
+        hi = df["high"].values; lo = df["low"].values
+        n = len(hi)
+        if n < 200: return False, "", 0.0
+        cona = CONA_PERP.get(symbol_item)
+        if not cona: return False, "無合約CVD來源", 0.0
+        end_ts = int(time.time() * 1000)
+        start_ts = end_ts - (BAR_SECONDS["15m"] * 300 * 1000)
+        cvd = calculate_cumulative_volume_delta(cona, okx_bar_fmt, start_ts, end_ts)
+        if cvd is None or len(cvd) < 100: return False, "合約CVD數據不足", 0.0
+        cv = cvd.reindex(df.index, method="ffill").values.astype(float)
+        if not np.isfinite(cv[-100:]).all(): return False, "CVD對齊後有缺值", 0.0
+        for pct in VLONG_SWINGS:
+            L = _vlong_zigzag_lows(hi, lo, pct)
+            if len(L) < 2: continue
+            (j1, p1, _c1), (j2, p2, c2) = L[-2], L[-1]
+            if c2 != n - 1: continue                       # ★只在「V剛成型確認」那根進場
+            if j2 - j1 > VLONG_MAX_GAP: continue           # 兩個低點間隔上限
+            if not (p2 > p1): continue                     # ★V成型:低點墊高
+            if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
+            sl = float(p2) * 0.999
+            if sl >= float(df["close"].iloc[-1]): continue
+            return True, f"V成型吸收多(擺動{pct*100:g}%/間隔{j2-j1}根/低點{p1:.6g}→{p2:.6g})", sl
+        return False, "", 0.0
+    except Exception as e:
+        print(f"[V-Long] {symbol_item} 判斷失敗: {e}")
+        return False, "", 0.0
+
+
 MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
 # 舊腳本(_bt_mtf_bias_concept.py / _bt_mtf_gate_on_strats.py) 用 pandas resample 後 reindex(method="ffill"),
 # 而 resample 的索引是K棒的**起始**時間 → 當天的每個小時就已經用到當天日線的最終收盤。
@@ -4833,6 +4903,16 @@ class SykesTradingBot:
         # 回測(全策略×階梯下注)：C×1.5 成長>不過濾基準、MDD還略低，優於硬性過濾(A)。
         # dh_boost 一律先設1.0(每個tf都會經過此行)，只有15m多且CVD確認才放大。
         dh_boost = 1.0
+        # ── ★V成型吸收做多(15m,2026-08-31)：獨立訊號源,不覆寫既有 is_long ──
+        is_vlong = False; _vlong_sl = 0.0; _vlong_r = ""
+        if VLONG_ENABLED and tf_id == "15m":
+            try:
+                is_vlong, _vlong_r, _vlong_sl = _check_vlong(symbol_item, okx_bar_fmt, df)
+                if is_vlong:
+                    print(f"[V-Long] {symbol_item} {_vlong_r} sl={_vlong_sl:.6g}", flush=True)
+            except Exception as _vle:
+                print(f"[V-Long] {symbol_item} 判斷失敗: {_vle}")
+
         if DH_CVD_ENABLED and is_long and tf_id == "15m":
             try:
                 _dh_ok, _dh_r = _dh_cvd_ok(symbol_item, okx_bar_fmt, "15m", "long")
@@ -5260,7 +5340,7 @@ class SykesTradingBot:
                 print(f"[POC-Gate-L] {symbol_item} 失敗(放行): {_pgl}")
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
-        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long
+        combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long or is_vlong
         combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short
 
         if not combined_long and not combined_short:
@@ -5277,6 +5357,7 @@ class SykesTradingBot:
         # 記錄訊號來源（供 Discord 顯示）
         if direction == "long":
             _signal_source = []
+            if is_vlong:         _signal_source.append("V成型吸收多")
             if is_long:          _signal_source.append("C3")
             if is_double_bottom: _signal_source.append("雙底")
             if is_reson_long:    _signal_source.append("雙底+RSI共振")
@@ -5407,7 +5488,10 @@ class SykesTradingBot:
         # 止損距離下限：太近=結構低點無效→倉位被放超大+一根K秒進秒損 → 寧可不下單
         MIN_SL_PCT = 0.006   # 0.6%
         if direction == "long":
-            calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
+            if is_vlong and _vlong_sl > 0:
+                calculated_sl = round(float(_vlong_sl), 8)   # ★V成型:停損=第二個低點(吸收低點)
+            else:
+                calculated_sl = _find_pivot_low(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             risk_pct = abs(current_close - calculated_sl) / current_close
             # 結構低點在現價之上(無效) 或 止損過近(<MIN_SL) → 跳過(不用0.5%硬下=秒進秒損)
             if calculated_sl >= current_close or risk_pct < MIN_SL_PCT:
@@ -5419,8 +5503,11 @@ class SykesTradingBot:
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = current_close - calculated_sl
-            tp1_target = current_close + risk_dist * p["tp1_mult"]
-            tp2_target = current_close + risk_dist * tp2_mult
+            if is_vlong:
+                tp1_target = tp2_target = current_close + risk_dist * VLONG_TP_R   # 2.5R全平,對齊回測
+            else:
+                tp1_target = current_close + risk_dist * p["tp1_mult"]
+                tp2_target = current_close + risk_dist * tp2_mult
         else:
             if is_engulf_short:
                 calculated_sl = round(float(df["high"].values[-4:].max()) + 0.15 * current_atr, 8)   # 吞噬空:近4根高+0.15ATR(對齊回測)
