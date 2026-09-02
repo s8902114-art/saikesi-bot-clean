@@ -3571,14 +3571,14 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             _VLONG_DIAG["無CVD"] += 1; return False, "無合約CVD來源", 0.0
         cv = cvd.values.astype(float)
         ok_mask = np.isfinite(cv)
-        if ok_mask.sum() < 100:
+        if ok_mask.sum() < 60:
             _VLONG_DIAG["CVD不足"] += 1; return False, "合約CVD數據不足", 0.0
-        # ★只在 CVD 有資料的區段內找 V(否則樞紐落在 CVD 涵蓋範圍外 → 取到 NaN)
-        first = int(np.argmax(ok_mask))
-        hi = hi[first:]; lo = lo[first:]; cv = cv[first:]; df = df.iloc[first:]
-        n = len(hi)
-        if n < 60:
-            _VLONG_DIAG["CVD不足"] += 1; return False, "CVD涵蓋區間太短", 0.0
+        # ★2026-09-01 修(用戶回報 ZRO 有吸收卻沒抓到):
+        #   原本把價格截斷到 CVD 的 48 小時範圍才跑 ZigZag → 5% 擺動在 48h 內通常只形成
+        #   **1 個**低點樞紐(不足 2 個),幾乎永遠判不出 V。回測有幾個月歷史故樞紐充足,
+        #   這就是「無V成型 147/150」與 ZRO 漏抓的真正原因 —— 是我的實作,不是策略。
+        #   正解:ZigZag 用**完整價格歷史**(不受 CVD 48h 限制),只要求那兩個樞紐點的 CVD 有值。
+        #   V 成型要求間隔≤4h 且進場在最新根 → 兩個樞紐必然落在最近數小時,一定在 48h 內。
         for pct in VLONG_SWINGS:
             L = _vlong_zigzag_lows(hi, lo, pct)
             if len(L) < 2: continue
@@ -3586,6 +3586,8 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             if c2 != n - 1: continue                       # ★只在「V剛成型確認」那根進場
             if j2 - j1 > VLONG_MAX_GAP: continue           # 兩個低點間隔上限
             if not (p2 > p1): continue                     # ★V成型:低點墊高
+            if not (np.isfinite(cv[j1]) and np.isfinite(cv[j2])):
+                continue                                   # 樞紐落在CVD涵蓋範圍外 → 跳過這個擺動
             if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
