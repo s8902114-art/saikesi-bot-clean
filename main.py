@@ -594,8 +594,16 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     }
 
     reason = _entry_reason(sig.get("source_tag", ""), sig["side"], tf, sig.get("dh_boost", 1.0))
+    # ★2026-09-01 修:順籌碼分數是「**進場當下 1H 的快照**」,不是即時值。
+    #   用戶回報 LA 字卡寫 +8、之後用 `幣` 指令查卻是負的 → 同一個 judge_coin,
+    #   差別只是**算的時間點不同**(字卡=進場當下 / 指令=你查的當下),分數本來就會變。
+    #   先前字卡沒標時間與時框,看起來像兩個系統打架 → 補上快照標記,對帳才不會歸因錯人。
     try:
         _judge_brief = judge_coin(coin_name, sig["side"], brief=True)
+        if _judge_brief:
+            _judge_brief = (f"{_judge_brief}　_(1H·進場當下快照 "
+                            f"{datetime.now(timezone.utc).strftime('%m/%d %H:%M')}UTC"
+                            f";之後用 `{coin_name}` 查為即時值,會不同)_")
     except Exception:
         _judge_brief = None
     embed_payload = {
