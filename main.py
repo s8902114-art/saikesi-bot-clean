@@ -3520,20 +3520,57 @@ def _vlong_zigzag_lows(hi, lo, pct):
     return L
 
 
-def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame):
+_VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0, "觸發": 0}
+
+
+def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
+    """★用 OKX rubik taker-volume(5m,全幣種都有) 聚合成 15m 合約CVD。
+    取代 Coinalyze:CONA_PERP 只有 29 幣、live 掃描池 199 幣 → 85% 的幣拿不到 CVD,
+    所有數據策略在那些幣上靜默 return(這就是「數據單都沒觸發」的根因)。
+    OKX 回傳格式 [ts, sellVol, buyVol];一次約 576 根 5m ≈ 48 小時。
+    ★與回測一致:回測的合約CVD也是用 taker buy/sell 推算,不是 Coinalyze。"""
+    ccy = okx_swap_symbol.split("-")[0]
+    rows = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
+                                  {"ccy": ccy, "instType": "CONTRACTS", "period": "5m"})
+    if not rows or len(rows) < 60:
+        return pd.Series(dtype=float)
+    recs = []
+    for r in rows:
+        try:
+            recs.append((int(r[0]), float(r[2]) - float(r[1])))   # buy - sell
+        except Exception:
+            continue
+    if len(recs) < 60:
+        return pd.Series(dtype=float)
+    ser = pd.Series({pd.to_datetime(t, unit="ms", utc=True): d for t, d in recs}).sort_index()
+    d15 = ser.resample("15min").sum()          # 5m → 15m
+    cvd = d15.cumsum()
+    return cvd.reindex(idx, method="ffill")
+
+
+def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
+                 okx_swap_symbol: str = ""):
     """V成型吸收做多。回傳 (是否成立, 原因, 停損價)。df 為已去掉未收盤當根的 15m。"""
     try:
+        _VLONG_DIAG["呼叫"] += 1
         hi = df["high"].values; lo = df["low"].values
         n = len(hi)
-        if n < 200: return False, "", 0.0
-        cona = CONA_PERP.get(symbol_item)
-        if not cona: return False, "無合約CVD來源", 0.0
-        end_ts = int(time.time() * 1000)
-        start_ts = end_ts - (BAR_SECONDS["15m"] * 300 * 1000)
-        cvd = calculate_cumulative_volume_delta(cona, okx_bar_fmt, start_ts, end_ts)
-        if cvd is None or len(cvd) < 100: return False, "合約CVD數據不足", 0.0
-        cv = cvd.reindex(df.index, method="ffill").values.astype(float)
-        if not np.isfinite(cv[-100:]).all(): return False, "CVD對齊後有缺值", 0.0
+        if n < 200:
+            _VLONG_DIAG["K棒不足"] += 1; return False, "", 0.0
+        cvd = _okx_contract_cvd_15m(okx_swap_symbol or symbol_item.replace("/", "-") + "-SWAP",
+                                    df.index)
+        if cvd is None or len(cvd) == 0:
+            _VLONG_DIAG["無CVD"] += 1; return False, "無合約CVD來源", 0.0
+        cv = cvd.values.astype(float)
+        ok_mask = np.isfinite(cv)
+        if ok_mask.sum() < 100:
+            _VLONG_DIAG["CVD不足"] += 1; return False, "合約CVD數據不足", 0.0
+        # ★只在 CVD 有資料的區段內找 V(否則樞紐落在 CVD 涵蓋範圍外 → 取到 NaN)
+        first = int(np.argmax(ok_mask))
+        hi = hi[first:]; lo = lo[first:]; cv = cv[first:]; df = df.iloc[first:]
+        n = len(hi)
+        if n < 60:
+            _VLONG_DIAG["CVD不足"] += 1; return False, "CVD涵蓋區間太短", 0.0
         for pct in VLONG_SWINGS:
             L = _vlong_zigzag_lows(hi, lo, pct)
             if len(L) < 2: continue
@@ -3544,7 +3581,9 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame):
             if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
+            _VLONG_DIAG["觸發"] += 1
             return True, f"V成型吸收多(擺動{pct*100:g}%/間隔{j2-j1}根/低點{p1:.6g}→{p2:.6g})", sl
+        _VLONG_DIAG["無V成型"] += 1
         return False, "", 0.0
     except Exception as e:
         print(f"[V-Long] {symbol_item} 判斷失敗: {e}")
@@ -4907,7 +4946,10 @@ class SykesTradingBot:
         is_vlong = False; _vlong_sl = 0.0; _vlong_r = ""
         if VLONG_ENABLED and tf_id == "15m":
             try:
-                is_vlong, _vlong_r, _vlong_sl = _check_vlong(symbol_item, okx_bar_fmt, df)
+                is_vlong, _vlong_r, _vlong_sl = _check_vlong(symbol_item, okx_bar_fmt, df,
+                                                             okx_swap_symbol)
+                if _VLONG_DIAG["呼叫"] % 50 == 0:
+                    print(f"[V-Long儀表] {_VLONG_DIAG}", flush=True)
                 if is_vlong:
                     print(f"[V-Long] {symbol_item} {_vlong_r} sl={_vlong_sl:.6g}", flush=True)
             except Exception as _vle:
