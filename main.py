@@ -3556,11 +3556,61 @@ def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
     return cvd.reindex(idx, method="ffill")
 
 
+_VLONG_KL_CACHE: Dict[str, pd.DataFrame] = {}   # inst -> 加深後的15m K線
+_VLONG_DEEP_BUDGET = {"round": 0, "used": 0}   # 每輪最多深抓幾個幣(避免拖慢掃描)
+VLONG_DEEP_BARS = 900          # 目標深度(900根15m ≈ 9.4天)
+VLONG_DEEP_PER_ROUND = 8       # 每輪最多深抓幾個新幣
+
+
+def _vlong_deep_candles(inst_id: str, df_recent: pd.DataFrame) -> pd.DataFrame:
+    """★把 15m K線加深到 ~900 根(用 history-candles 分頁),快取後增量更新。
+    為什麼要這樣:live 只有 fetch_market_candles 的 300 根(75小時),
+    5% 擺動的 ZigZag 在這麼短的窗內樞紐嚴重不足 —— 實測**只保留 23% 的訊號**
+    (同一批資料:完整歷史 22 個訊號 → 只給 300 根窗剩 5 個)。
+    回測驗證的 EV 是在完整歷史上算的,live 抓不到就等於規格沒被執行。
+    ★成本控制:首次每幣分頁抓(每輪最多 VLONG_DEEP_PER_ROUND 個幣),
+      之後只用既有的 df_recent 增量合併,不增加任何請求。"""
+    cur = _VLONG_KL_CACHE.get(inst_id)
+    if cur is None:
+        if _VLONG_DEEP_BUDGET["used"] >= VLONG_DEEP_PER_ROUND:
+            return df_recent                      # 本輪配額用完,先用淺的
+        _VLONG_DEEP_BUDGET["used"] += 1
+        rows = []; after = None
+        for _ in range(max(1, VLONG_DEEP_BARS // 100)):
+            q = {"instId": inst_id, "bar": "15m", "limit": "100"}
+            if after: q["after"] = after
+            d = _fetch_okx_public_data("/api/v5/market/history-candles", q)
+            if not d: break
+            rows += d; after = d[-1][0]
+        if rows:
+            try:
+                k = pd.DataFrame(rows, columns=["ts","open","high","low","close",
+                                                "vol","volCcy","volCcyQuote","confirm"])
+                k = k[k["confirm"] == "1"]
+                idx = pd.to_datetime(k["ts"].astype("int64"), unit="ms", utc=True)
+                cur = pd.DataFrame({c: k[c].astype(float).values
+                                    for c in ("open","high","low","close","vol")}, index=idx)
+                cur = cur.sort_index()
+            except Exception as e:
+                print(f"[V-Long] {inst_id} 深抓解析失敗: {e}"); cur = None
+    if cur is None: return df_recent
+    try:
+        keep = [c for c in ("open","high","low","close","vol") if c in df_recent.columns]
+        merged = pd.concat([cur, df_recent[keep]])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index().tail(VLONG_DEEP_BARS)
+        _VLONG_KL_CACHE[inst_id] = merged
+        return merged
+    except Exception:
+        return df_recent
+
+
 def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                  okx_swap_symbol: str = ""):
     """V成型吸收做多。回傳 (是否成立, 原因, 停損價)。df 為已去掉未收盤當根的 15m。"""
     try:
         _VLONG_DIAG["呼叫"] += 1
+        if okx_swap_symbol:
+            df = _vlong_deep_candles(okx_swap_symbol, df)   # ★加深K線(見上方說明)
         hi = df["high"].values; lo = df["low"].values
         n = len(hi)
         if n < 200:
@@ -4958,8 +5008,10 @@ class SykesTradingBot:
             try:
                 is_vlong, _vlong_r, _vlong_sl = _check_vlong(symbol_item, okx_bar_fmt, df,
                                                              okx_swap_symbol)
+                if _VLONG_DIAG["呼叫"] % 189 == 1:
+                    _VLONG_DEEP_BUDGET["used"] = 0          # 每輪重置深抓配額
                 if _VLONG_DIAG["呼叫"] % 50 == 0:
-                    print(f"[V-Long儀表] {_VLONG_DIAG}", flush=True)
+                    print(f"[V-Long儀表] {_VLONG_DIAG} 深快取{len(_VLONG_KL_CACHE)}幣", flush=True)
                 if is_vlong:
                     print(f"[V-Long] {symbol_item} {_vlong_r} sl={_vlong_sl:.6g}", flush=True)
             except Exception as _vle:
