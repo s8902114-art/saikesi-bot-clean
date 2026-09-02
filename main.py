@@ -7303,6 +7303,17 @@ if __name__ == "__main__":
 
     print("=" * 70)
     print(f" 賽克斯全功能智慧交易中樞核心引擎系統啟動中... ")
+    # ★2026-09-01 一次性連通性檢查:memory 記載「幣安 fapi 在 Railway 雲端IP被地理封鎖」,
+    #   但那是舊紀錄。回測的合約CVD是用**幣安 taker** 推的,live 目前用 OKX rubik 代替,
+    #   實測兩者12h窗方向一致率只有 79%(約1/5時候相反) → 若幣安其實可用,應改回幣安以對齊回測。
+    try:
+        _bt = requests.get("https://fapi.binance.com/fapi/v1/klines",
+                           params={"symbol": "BTCUSDT", "interval": "15m", "limit": 3}, timeout=8)
+        print(f"[連通性] 幣安 fapi klines → HTTP {_bt.status_code} "
+              f"{'✅可用(可改回幣安CVD對齊回測)' if _bt.status_code == 200 else '❌不可用(維持OKX)'} "
+              f"{_bt.text[:120] if _bt.status_code != 200 else ''}", flush=True)
+    except Exception as _be:
+        print(f"[連通性] 幣安 fapi ❌ {type(_be).__name__}: {str(_be)[:120]} → 維持OKX", flush=True)
     print(f" 實盤模式狀態: {'🟢 LIVE 實盤委託對接中' if _LIVE_MODE else '🟡 PAPER 模擬記帳觀察中'}")
     print(f" OKX 環境配置: {'⚠️ 模擬盤 (Sandbox)' if OKX_DEMO else '⚡ 正式實盤節點'}")
     print("=" * 70)
