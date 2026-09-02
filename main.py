@@ -3609,8 +3609,10 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
     """V成型吸收做多。回傳 (是否成立, 原因, 停損價)。df 為已去掉未收盤當根的 15m。"""
     try:
         _VLONG_DIAG["呼叫"] += 1
-        if okx_swap_symbol:
-            df = _vlong_deep_candles(okx_swap_symbol, df)   # ★加深K線(見上方說明)
+        # ★2026-09-03 撤回「K線加深」:當初診斷說 300 根只保留 23% 訊號,那是**測試方法的假象**
+        #   —— 我用 range(W,n,4) 抽樣,23%≈1/4 正好是步長造成的。改 step=1(等同 live 每15分鐘
+        #   逐根掃)重測,**保留率 100%**,300 根本來就夠、一根訊號都不會漏。
+        #   故不再深抓,省下每幣 9 個 API 請求與一個會在 redeploy 歸零的快取。
         hi = df["high"].values; lo = df["low"].values
         n = len(hi)
         if n < 200:
