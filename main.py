@@ -606,9 +606,38 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
                             f";之後用 `{coin_name}` 查為即時值,會不同)_")
     except Exception:
         _judge_brief = None
+    # ★數據面板(用戶2026-09-03:要像數據獵手字卡那樣一排一排攤開,排版整齊)
+    _data_panel = ""
+    try:
+        _v = _VLONG_LAST.get(symbol)
+        if _v:
+            _cd = _v.get("cvd_delta"); _oip = _v.get("oi_pct")
+            _ls = _tk = None
+            try:
+                _ls, _tk = _fetch_ls_taker(symbol, "15m")
+            except Exception:
+                pass
+            _rw = ["", "━━━━━━━━━━━━━━━━━━",
+                   f"`型態　　`V成型吸收 · 低點墊高 **+{_v['up_pct']:.2f}%**",
+                   f"`結構　　`擺動 {_v['swing']:.1f}%　間隔 {_v['gap_bars'] * 15} 分鐘",
+                   f"`低點　　`{_v['low1']:.6g} → **{_v['low2']:.6g}**",
+                   f"`合約CVD`{'　賣壓被吸收 ✅' if (_cd is not None and _cd < 0) else '　—'}"
+                   + (f"（{_cd:+,.0f}）" if _cd is not None else "")]
+            if _oip is not None:
+                _rw.append(f"`持倉1h　`{_oip:+.2f}%　{'增倉 📈' if _oip > 0 else '減倉 📉'}")
+            if _ls:
+                _rw.append(f"`多空比　`多方 {_ls * 100 / (1 + _ls):.0f}%")
+            if _tk:
+                _rw.append(f"`主動買賣`{_tk:.2f}　{'買方主導' if _tk > 1 else '賣方主導'}")
+            _rw.append("━━━━━━━━━━━━━━━━━━")
+            _data_panel = chr(10).join(_rw)
+    except Exception as _dpe:
+        print(f"[V-Long] 數據面板組裝失敗: {_dpe}", flush=True)
     embed_payload = {
         "title": f"{side_emoji} {coin_name} · {tf} {dir_name}",
-        "description": f"**進場原因:** {reason}" + (f"\n**順籌碼:** {_judge_brief}" if _judge_brief else ""),
+        "description": f"**進場原因:** {reason}"
+                       + ((chr(10) + f"**順籌碼:** {_judge_brief}") if _judge_brief else "")
+                       + _data_panel,
         "color": card_color,
         "fields": [
             {"name": "進場", "value": f"**{sig['entry']}**", "inline": True},
@@ -3528,6 +3557,7 @@ def _vlong_zigzag_lows(hi, lo, pct):
     return L
 
 
+_VLONG_LAST: Dict[str, dict] = {}   # symbol -> 最近一次V成型明細(供訊號卡數據面板)
 _VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0, "觸發": 0}
 
 
@@ -3644,6 +3674,19 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
             _VLONG_DIAG["觸發"] += 1
+            try:
+                _oiv = (pd.Series(df["oi"].values.astype(float)).ffill().bfill().values
+                        if "oi" in df.columns else None)
+                _oip = ((_oiv[-1] / _oiv[-5] - 1) * 100
+                        if _oiv is not None and len(_oiv) > 5 and _oiv[-5] > 0 else None)
+                _VLONG_LAST[symbol_item] = {
+                    "swing": pct * 100, "gap_bars": int(j2 - j1),
+                    "low1": float(p1), "low2": float(p2),
+                    "up_pct": (float(p2) / float(p1) - 1) * 100,
+                    "cvd_delta": float(cv[j2]) - float(cv[j1]), "oi_pct": _oip,
+                }
+            except Exception:
+                pass
             return True, f"V成型吸收多(擺動{pct*100:g}%/間隔{j2-j1}根/低點{p1:.6g}→{p2:.6g})", sl
         _VLONG_DIAG["無V成型"] += 1
         return False, "", 0.0
