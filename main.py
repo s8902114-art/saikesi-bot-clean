@@ -6811,20 +6811,46 @@ LIQ_POOL_MIN_VOLCCY  = 1_000_000.0    # ★2026-09-04 **對齊官方實測下限
 #     下調是依據「官方實際在做的標的分布」,不是回測。要驗證需另抓低流動性幣種的歷史資料。
 #   1M → 幣池約238幣(OKX USDT永續共453),與官方掃描池同一量級。★掃描成本上升約50%,注意Railway用量。
 
+def _okx_crypto_symbols() -> set:
+    """★2026-09-04 只留**加密貨幣**永續(用戶:「股票只會在賽克斯,因為沒有數據」)。
+    OKX instruments 的 `instCategory`:1=加密(278) / 3=股票(167,NVDA/TSLA/SNDK/TQQQ) / 4=商品(8,XAU/CL)。
+    我方策略(VLONG/C3/OI壓縮/DH)全部吃 OI、CVD、資費 —— 股票/商品代幣**沒有這些資料**,
+    而且有週末休市與跳空,違反 CLAUDE.md 記的「crypto 24/7 無跳空」前提(我們的停損模型以此為基礎)。
+    門檻降到1M後池內多了33支這類標的,故加此濾網。抓失敗時回空集合=不過濾(保守不誤殺)。"""
+    try:
+        r = requests.get("https://www.okx.com/api/v5/public/instruments",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code != 200: return set()
+        out = set()
+        for x in r.json().get("data", []):
+            iid = x.get("instId", "")
+            if iid.endswith("-USDT-SWAP") and str(x.get("instCategory", "")) == "1":
+                out.add(iid.replace("-USDT-SWAP", ""))
+        print(f"[SYMBOLS] 加密貨幣永續 {len(out)} 支(instCategory=1,已排除股票/商品)", flush=True)
+        return out
+    except Exception as e:
+        print(f"[SYMBOLS] instCategory 抓取失敗({e}),本輪不過濾", flush=True)
+        return set()
+
+
 def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
     """OKX 全部 USDT 永續中,24h成交額 >= 門檻 的 inst_id 列表(免API KEY,一支輕量API)。"""
     if not LIQ_POOL_ENABLED:
         return []
     try:
+        _crypto_mv = _okx_crypto_symbols()
         r = requests.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SWAP"}, timeout=15)
         if r.status_code != 200:
             print(f"[SYMBOLS] 流動性底池 HTTP {r.status_code}", flush=True); return []
         out = []
+        _crypto_only = _okx_crypto_symbols()
         for t in r.json().get("data", []):
             inst = t.get("instId", "")
             if not inst.endswith("-USDT-SWAP"):
                 continue
+            if _crypto_only and inst.replace("-USDT-SWAP","") not in _crypto_only:
+                continue                      # ★只留加密貨幣
             try:
                 # ★2026-09-04 修:OKX 永續的 volCcy24h 單位是**幣的數量**,不是USDT。
                 #   原本直接拿它跟 10M 比 → 這道閘方向是**反的**:偏好便宜幣(幣數多)、排斥貴幣。
@@ -6843,7 +6869,7 @@ def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
         return []
 
 def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOVER_VOLCCY) -> list:
-    """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻)。
+    """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻;★2026-09-04只留加密貨幣)。
     漲幅榜→動量/突破多單廣度;跌幅榜→breakdown空/box 候選。回傳 inst_id 列表。"""
     try:
         r = requests.get("https://www.okx.com/api/v5/market/tickers",
@@ -6855,6 +6881,8 @@ def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOV
             inst = t.get("instId", "")
             if not inst.endswith("-USDT-SWAP"):
                 continue
+            if _crypto_mv and inst.replace("-USDT-SWAP", "") not in _crypto_mv:
+                continue                      # ★2026-09-04 只留加密貨幣(instCategory=1)
             try:
                 last = float(t["last"]); op = float(t["open24h"]); vc = float(t.get("volCcy24h", 0) or 0)
             except (KeyError, ValueError, TypeError):
