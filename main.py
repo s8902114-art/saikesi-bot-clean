@@ -3537,6 +3537,15 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
 VLONG_ENABLED = True    # ★2026-08-31 上線(12期雙驗收全過,詳見上方註解)
 VLONG_SWINGS = (0.05, 0.055, 0.06)   # ZigZag 擺動門檻(任一成立即可)
 VLONG_MAX_GAP = 16                    # 兩個低點最大間隔(根15m) = 4h
+VLONG_MIN_LIQ = 100_000.0             # ★2026-09-04 新增:近96根15m成交額**中位數**下限(USDT)
+#   用戶回報 CIEN(43K/根)、BSB(40K/根) 這種流動性也在下單。實測回測樣本的成交額分布:
+#   p1=77K / p5=200K / p50=3.28M → **CIEN 落在第0.2百分位**,比回測中位低76倍。
+#   分桶EV:<100K n=16(未驗證) / 100-200K +1.190 / 200K-1M +0.684 / 1-5M +0.740 / >5M +0.098。
+#   加 >=100K 閘:保留98%樣本、EV +0.519→+0.515(幾乎零成本),但擋掉完全沒被驗證過的極低流動性。
+#   ★注意 >5M 那桶 EV 只有 +0.098 —— edge 在中小流動性,不是越大越好,故不設上限。
+VLONG_MIN_UP  = 0.02                  # ★2026-09-04 修:低點墊高**至少2%**(對齊回測 _bt_vlong.run(min_up=0.02))
+#   上線時漏了這道閘 → live 只檢查 p2>p1。實測 5 張訊號卡有 **3 張(60%)** 墊高<2%
+#   (CAP 1.34%×2、CIEN 1.61%),都是回測規格會拒絕的單 → live 跑的不是被驗證過的策略。
 VLONG_TP_R = 2.5
 
 
@@ -3668,6 +3677,16 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             if c2 != n - 1: continue                       # ★只在「V剛成型確認」那根進場
             if j2 - j1 > VLONG_MAX_GAP: continue           # 兩個低點間隔上限
             if not (p2 > p1): continue                     # ★V成型:低點墊高
+            if (p2 - p1) / p1 < VLONG_MIN_UP: continue     # ★2026-09-04 補回測的 min_up=2% 門檻
+            try:                                           # ★流動性閘:近96根15m成交額中位數
+                _turn = (df["vol"].values.astype(float) * df["close"].values.astype(float))[-96:]
+                _liq = float(np.median(_turn)) if len(_turn) else 0.0
+            except Exception:
+                _liq = 0.0
+            if _liq < VLONG_MIN_LIQ:
+                print(f"[V-Long] {symbol_item} 流動性不足(15m成交額中位 {_liq:,.0f} < "
+                      f"{VLONG_MIN_LIQ:,.0f})→跳過", flush=True)
+                continue
             if not (np.isfinite(cv[j1]) and np.isfinite(cv[j2])):
                 continue                                   # 樞紐落在CVD涵蓋範圍外 → 跳過這個擺動
             if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
@@ -3692,6 +3711,126 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
         return False, "", 0.0
     except Exception as e:
         print(f"[V-Long] {symbol_item} 判斷失敗: {e}")
+        return False, "", 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# ★LL→LH 反彈斐波吞噬 做空（15m，2026-09-04 上線）
+# 用戶口述結構：「多方是 LH HH，那空方就是 LL LH，空方就是在反彈過程中找機會做空」
+# 12期凍結驗收（只用訓練段4期在36組網格選參數，凍結後才看其他層）：
+#   訓練 n=547 EV+0.401 容錯11.7 正期4/4  ／ 驗證 n=616 EV+0.382 容錯11.1 正期3/3
+#   未測新幣 n=659 EV+0.329 容錯9.5 正期2/2 ／ 2022外樣本 n=1010 EV+0.236 容錯6.8 正期2/3
+#   加每日上限5筆後：n=2549 EV+0.306 容錯8.9 **正期12/12** 新幣+0.303 2022+0.263
+# 打架(ChatGPT+Gemini)四個攻擊點，三個用數據排除、一個成立已修：
+#   ①收盤進 vs 下一根開盤進 = +0.313 vs +0.312（不靠收盤價成交）→ 排除
+#   ②因果稽核:進場根−L2確認根 最小=1（永遠在確認之後）→ 無未來函數
+#   ③右截尾:期末未平倉僅1.66%，排除後 +0.305 → 排除
+#   ④跨幣叢集:同日訊號 max18、最差日−18.8R → **成立**，加每日上限5筆後最差日 −5.3R
+# ★不設時間停損:被砍掉的長單原本 EV+0.65~+0.77（是獲利來源），設1天上限 EV 崩到 +0.040。
+# 成本敏感度:往返0.25% 仍 +0.261（停損中位2.75% 夠寬）。重疊率 vs 現役吞噬空 = 2.0%。
+LLH_SHORT_ENABLED = False   # ★2026-09-04 上線前一刻關閉:逐根重放 live 邏輯後 EV 崩掉8成。
+#   原回測 EV+0.306/容錯8.9/正期12/12 是**枚舉每個L2往後掃**得到的 —— 它會拿「已被更新的舊結構」
+#   進場,live 只看當下最新的低點,做不到。live/回測逐點對拍只重現 52.3%。
+#   改成逐根重放 live 邏輯的回測(_bt_llh_live.py):
+#     全期 n=2466 EV+0.063 容錯1.8 正期9/12 ／ 驗證+0.017 ／ 2022+0.036(正期1/3)
+#     停損中位2.17%(較窄)→ 往返成本0.20% 只剩+0.013、0.25% 轉負 −0.012
+#   ★重開前置條件:①找到 live 可執行、且逐點對拍100%的規格 ②在該規格下容錯≥8 且成本0.25%仍為正
+#   ★教訓:參數/結構驗完之後,**必須先做 live 逐根重放對拍再談上線**,不能只做「訊號數對得上」。
+LLH_SWING       = 0.02      # ZigZag 擺動（2%>3%>4%>5%>6%>8% 單調，2% 最佳）
+LLH_FIB_LO      = 0.55      # 反彈打折帶（0.382~0.5 < 0.5~0.618 < 0.55~0.7 單調）
+LLH_FIB_HI      = 0.70
+LLH_MAX_WAIT    = 576       # 反彈等待上限（根15m）= 6天。6h→192h 單調上升，144h 起容錯>8
+LLH_TP_R        = 2.5
+LLH_COOLDOWN_H  = 384       # 同幣冷卻(小時)=16天。把頻率從 47 筆/天壓到 3.7 筆/天
+LLH_DAILY_CAP   = 5         # ★每日新倉上限(叢集風控)。EV 只掉0.006，最差日 −18.8R→−5.3R
+_LLH_LAST_TS: Dict[str, float] = {}      # symbol -> 上次觸發的 epoch 秒（冷卻用）
+_LLH_DAY = {"day": "", "count": 0}       # 每日新倉計數
+_LLH_DIAG = {"呼叫": 0, "K棒不足": 0, "樞紐不足": 0, "非LL": 0, "反彈過H1": 0,
+             "不在斐波帶": 0, "非吞噬": 0, "冷卻中": 0, "日上限": 0, "觸發": 0}
+
+
+def _zigzag_hl(hi, lo, pct):
+    """ZigZag 高低點（回撤幅度定義，無左右N根確認）。
+    回傳依**確認時間**排序的 [(確認idx, 樞紐idx, 價格, 'H'/'L')]。無未來函數。"""
+    n = len(hi); ev = []
+    if n < 3: return ev
+    up = True; ex_i = 0; ex_p = hi[0]
+    for i in range(1, n):
+        if up:
+            if hi[i] > ex_p: ex_i, ex_p = i, hi[i]
+            elif ex_p > 0 and (ex_p - lo[i]) / ex_p >= pct:
+                ev.append((i, ex_i, float(ex_p), "H")); up = False; ex_i, ex_p = i, lo[i]
+        else:
+            if lo[i] < ex_p: ex_i, ex_p = i, lo[i]
+            elif ex_p > 0 and (hi[i] - ex_p) / ex_p >= pct:
+                ev.append((i, ex_i, float(ex_p), "L")); up = True; ex_i, ex_p = i, hi[i]
+    return ev
+
+
+def _check_llh_short(symbol_item: str, df: pd.DataFrame):
+    """LL→LH 反彈斐波吞噬 做空。回傳 (是否成立, 原因, 停損價)。
+    df = 已去掉未收盤當根的 15m。判定一律在最新已收盤根（n-1）。"""
+    try:
+        _LLH_DIAG["呼叫"] += 1
+        op = df["open"].values; hi = df["high"].values
+        lo = df["low"].values; cl = df["close"].values
+        n = len(cl)
+        if n < 200:
+            _LLH_DIAG["K棒不足"] += 1; return False, "", 0.0
+        i = n - 1                                   # 最新已收盤根
+        # ── ④ 先檢查最便宜的條件:看跌吞噬 ──
+        if not (cl[i] < op[i] and cl[i-1] > op[i-1]
+                and op[i] >= cl[i-1] and cl[i] <= op[i-1]):
+            _LLH_DIAG["非吞噬"] += 1; return False, "", 0.0
+        ev = [e for e in _zigzag_hl(hi, lo, LLH_SWING) if e[0] <= i]   # 只用已確認樞紐
+        if len(ev) < 3:
+            _LLH_DIAG["樞紐不足"] += 1; return False, "", 0.0
+        # 需要序列 ... L1, H1, L2（L2 = 最近一個已確認的**低點**）
+        # ★2026-09-04 對拍修正:原本寫 ev[-1] 必須是 L,但反彈到斐波帶時那個反彈高點
+        #   常常已被確認成新的 H → ev[-1] 變 H,結構判定整個失效。
+        #   live 重放只重現回測訊號的 42.7%,漏斗顯示「非LL」擋掉45%。
+        #   正解:往回找**最後一個 L**當 L2（若之後又出現更低的新 L,自然會換成那個=新的setup）。
+        _li = None
+        for _k in range(len(ev) - 1, 1, -1):
+            if ev[_k][3] == "L": _li = _k; break
+        if _li is None or _li < 2:
+            _LLH_DIAG["非LL"] += 1; return False, "", 0.0
+        cL2, jL2, pL2, _ = ev[_li]
+        cH1, jH1, pH1, tH1 = ev[_li - 1]
+        cL1, jL1, pL1, tL1 = ev[_li - 2]
+        if tH1 != "H" or tL1 != "L":
+            _LLH_DIAG["非LL"] += 1; return False, "", 0.0
+        if not (pL2 < pL1):                          # ★① LL:低點降低
+            _LLH_DIAG["非LL"] += 1; return False, "", 0.0
+        if i - cL2 > LLH_MAX_WAIT:                   # ★② 反彈等待上限 6 天
+            _LLH_DIAG["反彈過H1"] += 1; return False, "", 0.0
+        if float(np.max(hi[cL2 + 1:i + 1])) > pH1:   # 反彈超過前高 → 結構破壞
+            _LLH_DIAG["反彈過H1"] += 1; return False, "", 0.0
+        rng = pH1 - pL2
+        if rng <= 0:
+            _LLH_DIAG["非LL"] += 1; return False, "", 0.0
+        zl = pL2 + rng * LLH_FIB_LO; zh = pL2 + rng * LLH_FIB_HI
+        if not (hi[i] >= zl and lo[i] <= zh):        # ★③ 反彈進入斐波 0.55~0.7
+            _LLH_DIAG["不在斐波帶"] += 1; return False, "", 0.0
+        # ── 冷卻 / 每日上限 ──
+        _now = time.time()
+        if _now - _LLH_LAST_TS.get(symbol_item, 0.0) < LLH_COOLDOWN_H * 3600:
+            _LLH_DIAG["冷卻中"] += 1; return False, "", 0.0
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _LLH_DAY["day"] != _today:
+            _LLH_DAY["day"] = _today; _LLH_DAY["count"] = 0
+        if _LLH_DAY["count"] >= LLH_DAILY_CAP:
+            _LLH_DIAG["日上限"] += 1; return False, "", 0.0
+        sl = float(pH1) * 1.001                      # 停損 = 前一個高點 H1
+        if sl <= float(cl[i]):
+            return False, "", 0.0
+        _LLH_LAST_TS[symbol_item] = _now
+        _LLH_DAY["count"] += 1
+        _LLH_DIAG["觸發"] += 1
+        return True, (f"LL→LH反彈空(低點{pL1:.6g}→{pL2:.6g}/等待{i-cL2}根/"
+                      f"斐波{LLH_FIB_LO:g}~{LLH_FIB_HI:g}/前高{pH1:.6g})"), sl
+    except Exception as e:
+        print(f"[LLH-Short] {symbol_item} 判斷失敗: {e}")
         return False, "", 0.0
 
 
@@ -5071,6 +5210,18 @@ class SykesTradingBot:
             except Exception as _dh_err:
                 print(f"[DH-CVD] {symbol_item} 15m多加碼判斷失敗: {_dh_err}")
 
+        # ── ★LL→LH 反彈斐波吞噬做空(15m,2026-09-04)：獨立訊號源,不覆寫既有 is_short ──
+        is_llh_short = False; _llh_sl = 0.0; _llh_r = ""
+        if LLH_SHORT_ENABLED and tf_id == "15m":
+            try:
+                is_llh_short, _llh_r, _llh_sl = _check_llh_short(symbol_item, df)
+                if _LLH_DIAG["呼叫"] % 50 == 0:
+                    print(f"[LLH-Short儀表] {_LLH_DIAG} 今日{_LLH_DAY['count']}/{LLH_DAILY_CAP}", flush=True)
+                if is_llh_short:
+                    print(f"[LLH-Short] {symbol_item} {_llh_r} sl={_llh_sl:.6g}", flush=True)
+            except Exception as _lle:
+                print(f"[LLH-Short] {symbol_item} 判斷失敗: {_lle}")
+
         # ── 數據獵手做空(15m)：2B+CVD頂背離+OI升6根+ls>=2.5+taker>1.0(WF驗證+0.153)──
         is_dh_short = False; _dh_short_r = ""
         if DH_SHORT_ENABLED and tf_id == "15m":
@@ -5490,7 +5641,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long or is_vlong
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short
 
         if not combined_long and not combined_short:
             return
@@ -5522,6 +5673,7 @@ class SykesTradingBot:
             if is_reson_short:   _signal_source.append("雙頂+RSI共振")
             if is_macd_short:    _signal_source.append("MACD動能")
             if is_dh_short:      _signal_source.append("數據獵手空")
+            if is_llh_short:     _signal_source.append("LL→LH反彈空")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
             if is_oisq_short:    _signal_source.append("主力建空")
@@ -5658,7 +5810,9 @@ class SykesTradingBot:
                 tp1_target = current_close + risk_dist * p["tp1_mult"]
                 tp2_target = current_close + risk_dist * tp2_mult
         else:
-            if is_engulf_short:
+            if is_llh_short and _llh_sl > 0:
+                calculated_sl = round(float(_llh_sl), 8)   # ★LL→LH:停損=前一個高點H1(對齊回測)
+            elif is_engulf_short:
                 calculated_sl = round(float(df["high"].values[-4:].max()) + 0.15 * current_atr, 8)   # 吞噬空:近4根高+0.15ATR(對齊回測)
             else:
                 calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
@@ -5673,8 +5827,12 @@ class SykesTradingBot:
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
-            tp1_target = current_close - risk_dist * p["tp1_mult"]
-            tp2_target = current_close - risk_dist * tp2_mult
+            if is_llh_short and _llh_sl > 0:
+                # ★LL→LH:2.5R 全平,對齊回測(不分批、不設時間停損 —— 被砍掉的長單原本EV+0.65~+0.77)
+                tp1_target = tp2_target = current_close - risk_dist * LLH_TP_R
+            else:
+                tp1_target = current_close - risk_dist * p["tp1_mult"]
+                tp2_target = current_close - risk_dist * tp2_mult
 
         # 箱突破空：止損改用「整個箱頂 bh」(SNR 結構止損),非局部 swing high(_find_pivot_high)。
         # 回測(含費WF):swing high -0.089 → 箱頂止損 +0.137,勝率22%→41%,MDD 99%→48%(配killzone再到26%)。
