@@ -3537,7 +3537,15 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
 VLONG_ENABLED = True    # ★2026-08-31 上線(12期雙驗收全過,詳見上方註解)
 VLONG_SWINGS = (0.05, 0.055, 0.06)   # ZigZag 擺動門檻(任一成立即可)
 VLONG_MAX_GAP = 16                    # 兩個低點最大間隔(根15m) = 4h
-VLONG_MIN_LIQ = 100_000.0             # ★2026-09-04 新增:近96根15m成交額**中位數**下限(USDT)
+VLONG_MIN_LIQ = 0.0                   # ★2026-09-04 當天稍晚**撤回**(用戶:「看他們做的是怎樣 就依照那條件」)
+#   撤回理由:這道閘是**我自己**從回測百分位推的,**不是官方規則**。實查官方行為:
+#   當晚 91 筆數據異動警報裡,噴最兇的 APR(+47.1%)/CHIP(+15.9%)/DGAI(+14.7%) 的 15m 成交額
+#   只有 44K/11K/7K;白總影片示範自己交易的 CAP,15m 成交額也才約 37K → **他們照做**。
+#   而且當晚實測「噴≥5%」的比例在每個流動性桶都是 12~14%(<50K 13% / 50-100K 14% /
+#   100-500K 14% / >500K 12%),**低流動性並沒有比較差**,<50K 那桶勝率反而最高(46%)。
+#   原本裝閘的依據只是「回測 <100K 樣本 n=16 未驗證」——那是「沒測過」,不是「證明差」。
+#   設 0 = 停用;若日後要重開,需先補足低流動性樣本的回測證據,不可再憑百分位拍門檻。
+_VLONG_MIN_LIQ_OLD = 100_000.0        # (舊值留存)
 #   用戶回報 CIEN(43K/根)、BSB(40K/根) 這種流動性也在下單。實測回測樣本的成交額分布:
 #   p1=77K / p5=200K / p50=3.28M → **CIEN 落在第0.2百分位**,比回測中位低76倍。
 #   分桶EV:<100K n=16(未驗證) / 100-200K +1.190 / 200K-1M +0.684 / 1-5M +0.740 / >5M +0.098。
@@ -6804,11 +6812,17 @@ def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
             if not inst.endswith("-USDT-SWAP"):
                 continue
             try:
-                if float(t.get("volCcy24h", 0) or 0) >= min_volccy:
+                # ★2026-09-04 修:OKX 永續的 volCcy24h 單位是**幣的數量**,不是USDT。
+                #   原本直接拿它跟 10M 比 → 這道閘方向是**反的**:偏好便宜幣(幣數多)、排斥貴幣。
+                #   實測:BTC volCcy24h=0.117M(實際9,522M USDT)會被擋;
+                #        BSB volCcy24h=36.1M(實際只有4M USDT)卻通過 → BSB 就是這樣進到掃描池的。
+                #   全市場對照:現行通過168幣,乘上價格後只有82幣 →
+                #        **130幣被錯誤放進來**(有些一天只有0.2M USDT)、**44幣被錯誤擋掉**(含BTC/ETH/ZEC/HYPE)。
+                if float(t.get("volCcy24h", 0) or 0) * float(t.get("last", 0) or 0) >= min_volccy:
                     out.append(inst)
             except (ValueError, TypeError):
                 continue
-        print(f"[SYMBOLS] 流動性底池:{len(out)} 幣(24h成交額≥{min_volccy/1e6:.0f}M)", flush=True)
+        print(f"[SYMBOLS] 流動性底池:{len(out)} 幣(24h成交額≥{min_volccy/1e6:.0f}M USDT)", flush=True)
         return out
     except Exception as e:
         print(f"[SYMBOLS] 流動性底池抓取失敗: {e}", flush=True)
@@ -6831,7 +6845,7 @@ def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOV
                 last = float(t["last"]); op = float(t["open24h"]); vc = float(t.get("volCcy24h", 0) or 0)
             except (KeyError, ValueError, TypeError):
                 continue
-            if op <= 0 or vc < min_volccy:        # 流動性門檻
+            if op <= 0 or vc * last < min_volccy:  # ★2026-09-04 修:volCcy24h是幣數不是USDT,要乘價
                 continue
             movers.append((inst, (last - op) / op))
         if not movers:
