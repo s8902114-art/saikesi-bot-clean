@@ -7125,7 +7125,6 @@ def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
     if not LIQ_POOL_ENABLED:
         return []
     try:
-        _crypto_mv = _okx_crypto_symbols()
         r = requests.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SWAP"}, timeout=15)
         if r.status_code != 200:
@@ -7159,6 +7158,10 @@ def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOV
     """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻;★2026-09-04只留加密貨幣)。
     漲幅榜→動量/突破多單廣度;跌幅榜→breakdown空/box 候選。回傳 inst_id 列表。"""
     try:
+        # ★2026-09-04 修 NameError:原本 _crypto_mv 被寫在 _fetch_okx_liquid_pool 裡(局部變數),
+        #   這裡引用它 → 執行期 `name '_crypto_mv' is not defined`,漲跌幅榜整個掃描來源從 d2c169a 起是死的。
+        #   `ast.parse` 和 _chk_names.py 都抓不到(跨函數作用域,不是「沒定義過這個名字」)。
+        _crypto_mv = _okx_crypto_symbols()
         r = requests.get("https://www.okx.com/api/v5/market/tickers",
                          params={"instType": "SWAP"}, timeout=15)
         if r.status_code != 200:
