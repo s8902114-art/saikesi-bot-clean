@@ -3554,6 +3554,13 @@ _VLONG_MIN_LIQ_OLD = 100_000.0        # (舊值留存)
 VLONG_MIN_UP  = 0.02                  # ★2026-09-04 修:低點墊高**至少2%**(對齊回測 _bt_vlong.run(min_up=0.02))
 #   上線時漏了這道閘 → live 只檢查 p2>p1。實測 5 張訊號卡有 **3 張(60%)** 墊高<2%
 #   (CAP 1.34%×2、CIEN 1.61%),都是回測規格會拒絕的單 → live 跑的不是被驗證過的策略。
+# ★★2026-09-05 反追漲閘(用戶實盤觀察:「要嘛進在很高的位置」;9/4 六筆V成型全停損,
+#   進場位階中位89%、每筆都在該幣已噴+10~47%(24h)之後才進)。
+#   門檻只用**訓練段TR**選、凍結後才看其他層(_bt_vlong_gate_oos.py),四層全部改善:
+#   全期 +0.508/14.5→+0.778/22.3、驗證 22.1→26.0、新幣 9.5→16.2、2022 13.3→18.1;保留樣本51%。
+VLONG_MAX_RUNUP_PCT = 0.0    # 進場前24h(96根15m)漲幅上限%:>此值不進(0=該幣24h必須是淨跌的)
+VLONG_MAX_POS_PCT   = 70.0   # 進場價在前24h區間的百分位上限:>此值=買在上緣,不進
+
 VLONG_TP_R = 2.5
 
 
@@ -3575,7 +3582,8 @@ def _vlong_zigzag_lows(hi, lo, pct):
 
 
 _VLONG_LAST: Dict[str, dict] = {}   # symbol -> 最近一次V成型明細(供訊號卡數據面板)
-_VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0, "觸發": 0}
+_VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0,
+               "追漲擋": 0, "位階擋": 0, "觸發": 0}
 
 
 def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
@@ -3698,6 +3706,38 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             if not (np.isfinite(cv[j1]) and np.isfinite(cv[j2])):
                 continue                                   # 樞紐落在CVD涵蓋範圍外 → 跳過這個擺動
             if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
+            # ★★2026-09-05 反追漲閘(用戶實盤觀察逼出來的:「要嘛進在很高的位置」)──────────────
+            #   9/4 那天 6 筆 V成型全部停損,進場位階中位 **89%**,而且每一筆都是在該幣
+            #   已經噴了 +10~47%(24h) 之後才進 —— 上漲途中本來就一路「低點墊高」,
+            #   V成型條件照樣成立 → 它變成**在拋物線頂部追多**,不是設計中的 V 形反轉。
+            #   我 0904 只測過「進場前24h**跌幅**」那一側(跌>20% EV+0.896 最好),
+            #   **從沒測過漲幅那一側**。補測(_bt_vlong_runup.py, n=982)分桶單調:
+            #     跌>20% +0.896/25.7 | 跌10~20% +0.670 | 漲0~5% +0.418 | 漲5~10% +0.259/7.4
+            #     | **漲10~20% +0.058/容錯1.6/勝31%** | 漲20~40% +0.219 | 漲>40% +0.248
+            #   位階同樣單調:0~50% +0.840/24.0 → 70~85% +0.193/5.5 → >85% +0.215/6.1
+            #   ★門檻**只用訓練段TR選**、凍結後才看其他層(_bt_vlong_gate_oos.py,
+            #     避免 0828「用全期挑配置=驗證段已參與選擇」的錯):TR 選出 漲幅≤0% + 位階≤70%。
+            #   凍結後四層全部改善(閘前→閘後):
+            #     全期 +0.508/14.5 → **+0.778/22.3** | 訓練 +0.625/17.9 → +1.079/30.8
+            #     驗證 +0.769/22.1 → +0.900/26.0 | 新幣 +0.331/9.5 → **+0.567/16.2**
+            #     2022 +0.464/13.3 → +0.635/18.1   保留樣本 51%(頻率約 2筆/天 → 1筆/天)
+            #   ★9/4 那 6 筆(APR+39%/EDGE+47%/ARB+16%/NES+14%/DASH+26%/TRIA+25%)**全部會被擋掉**。
+            _cla = df["close"].values.astype(float)
+            _c96 = _cla[-97] if len(_cla) >= 97 else _cla[0]
+            _chg24 = ((float(_cla[-1]) - float(_c96)) / float(_c96) * 100.0
+                      if float(_c96) > 0 else 0.0)
+            if _chg24 > VLONG_MAX_RUNUP_PCT:
+                _VLONG_DIAG["追漲擋"] += 1
+                print(f"[V-Long] {symbol_item} 進場前24h已漲 {_chg24:+.1f}% "
+                      f"(>{VLONG_MAX_RUNUP_PCT:g}%)→擋(反追漲閘)", flush=True)
+                continue
+            _rl = float(np.min(lo[-97:])); _rh = float(np.max(hi[-97:]))
+            _pos = ((float(df["close"].iloc[-1]) - _rl) / (_rh - _rl) * 100.0) if _rh > _rl else 0.0
+            if _pos > VLONG_MAX_POS_PCT:
+                _VLONG_DIAG["位階擋"] += 1
+                print(f"[V-Long] {symbol_item} 進場位階 {_pos:.0f}% "
+                      f"(>{VLONG_MAX_POS_PCT:g}%,買在區間上緣)→擋", flush=True)
+                continue
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
             _VLONG_DIAG["觸發"] += 1
