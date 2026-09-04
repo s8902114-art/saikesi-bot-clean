@@ -7118,10 +7118,20 @@ def adopt_untracked_okx_positions():
             if ct<=0: continue
             sym=p.get("symbol"); side=p.get("side")
             if not sym or side not in ("long","short"): continue
-            if (sym,side) in tracked: continue
             entry=float(p.get("entryPrice") or 0) or float((p.get("info") or {}).get("avgPx") or 0)
             if entry<=0: continue
             inst_id=(p.get("info") or {}).get("instId") or OKX_SWAP.get(sym, sym)
+            # ★★2026-09-04 修(跨系統識別碼格式不統一,第二現場):
+            #   bot 自己開倉寫進追蹤池的是 **instId**("ARB-USDT-SWAP", 見 1350 行 "symbol": symbol_id),
+            #   但 ccxt fetch_positions() 回的是**統一符號**("ARB/USDT:USDT") → 舊寫法 (sym,side) in tracked
+            #   對 bot 自家倉**恆為 False** → 每次啟動都把自家倉當外來倉「接管」一次。
+            #   後果不只是重複訊息:接管會把 exit_strategy **強制覆寫成 swing_full**(見下方 inferred_es),
+            #   原本設計的固定R + TP1 1.2R出半倉 + TP2 2.5R **被靜默改成整倉讓跑**,
+            #   且 ts_open 重新計時(時間停損歸零)、pyramid_eligible 被關掉。
+            #   證據:2026-09-04 06:04/06:06/06:11 三次重啟,ARB/EDGE/APR/KMNO 每次都被重新接管
+            #   (同期手動倉 ONDO/KITE 被 broker-tag 防呆正確擋下,故此 bug 只影響 bot 自己的倉)。
+            #   同族教訓見 CLAUDE.md「跨系統識別碼要先統一格式」(2026-08-27 追蹤池100%誤刪事故)。
+            if (sym,side) in tracked or (inst_id,side) in tracked: continue
             # ★2026-07-19 手動倉不接管(用戶LINK案例:手動8.4張多單被接管→移動停利貼太近被插針掃出)。
             #   判定:近期該inst同方向「開倉單」(非reduceOnly)是否帶ccxt broker tag(6b9ad766b55dBCDE)=bot下的。
             #   全無bot tag=手動倉→只通知、絕不接管。判定失敗也保守不接管(寧漏勿越權)。
