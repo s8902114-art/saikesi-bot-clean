@@ -3842,6 +3842,264 @@ def _check_llh_short(symbol_item: str, df: pd.DataFrame):
         return False, "", 0.0
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ★S4H 做空(2026-09-04 上線):4h 看跌吞噬 + 趨勢線123 + 斐波反彈打折 + LL 下降結構
+# ──────────────────────────────────────────────────────────────────────────────
+# 【為什麼是這組】用戶要做空。把 4J模式/LL→LH/吸收頂背離/數據警報/現役吞噬空放在
+#   同一批資料、同一出場、同一驗收下比(_bt_short_league.py),只有這組通過全部關卡。
+# 【凍結規格】_bt_s4h_final.py (use_LL=True, use_D2=False) —— 逐項照抄,不准自己補係數:
+#   ① 該根 4h **看跌吞噬**(陰線吞掉前一根陽線實體)
+#   ② 近 6 根(24h)內成立過**趨勢線123**(上升支撐線被實體跌破 → 回調上不去 → 收黑K = 2)
+#   ③ 該根觸及「最近一段已確認下跌腿」的**斐波 0.382~0.618 反彈帶**
+#   ④ **LL**:最近兩個已確認 ZigZag 低點是降低的
+#   進場 = 下一根 4h 開盤(即本根收盤當下);停損 = 最近一個在進場價上方的已確認樞紐高 ×1.001
+#   TP = 2.5R 全平,**不設時間停損**;同幣冷卻 2 根(8h);每日新倉上限 5;
+#   流動性 = 近 24 根 4h 成交額中位 ≥ 400,000 USDT
+# 【驗收數字】n=391 EV+0.361 容錯10.9 勝41% 正期9/12
+#   訓練TR 6.6 / 驗證VE 7.6 / 未測新幣 13.9 / 2022外樣本 12.9 —— 四層全正
+#   成本0.25% → EV+0.334/容錯10.1;期別 block bootstrap 95%CI [+0.078,+0.570](下界>0)
+#   頻率 0.54 筆/天;重疊率 vs 現役 OI壓縮突破空 = 0.5%(非重複下注)
+#   ★bar內順序(打架 ChatGPT #1):4h OHLC 分不出同根先觸SL還是TP,改用 **15m 重建**先後
+#     → EV+0.352 vs 原 +0.361,無實質差異(停損中位 6.27% 夠寬),該反駁排除。
+# 【已知弱點 —— 觀察期要盯,不要假裝沒有】
+#   ①獲利集中:41個月裡獲利最多的 3 個月貢獻 71%;79 幣裡前 10 幣貢獻 71%
+#   ②尚未做:資金費逐筆計入、真實深度/價差滑價、date-cluster bootstrap、組合層總曝險上限
+#   ③「時間平移檢定」第一版我寫錯了(只平移開始檢查SL/TP的時點、沒平移進場價),結論作廢待重做
+# 【★★live 資料深度是硬需求,不是優化】
+#   fetch_market_candles 受 OKX /market/candles 限制,上限 300 根。
+#   實測 _chk_s4h_win300.py(同一批 238 筆回測訊號,把資料截斷成 live 看得到的視窗重算):
+#     300根 → 只重現 **77.7%**(53 筆因 TrendLines(max_age=600) 畫不出線而消失)
+#     500根 → 81.9%   /   **1000根 → 99.2%**
+#   → 必須用 history-candles 分頁把 4H 加深到 ~1000 根,否則等於凍結規格沒被執行。
+#   (同族教訓:CLAUDE.md「生命週期沒複刻」;LL→LH 就是死在 live 重放只剩 52.3%。)
+# ══════════════════════════════════════════════════════════════════════════════
+S4H_SHORT_ENABLED  = True
+S4H_SWING          = 0.04        # ZigZag 擺動
+S4H_FIB_LO         = 0.382
+S4H_FIB_HI         = 0.618
+S4H_FIB_MAXAGE     = 60          # 波段太舊就不畫斐波(根)
+S4H_123_WIN        = 6           # 123 回看窗(根 4h = 24h)
+S4H_TP_R           = 2.5
+S4H_COOLDOWN_BARS  = 2           # 同幣冷卻(根 4h)
+S4H_DAILY_CAP      = 5           # 每日新倉上限(叢集風控)
+S4H_MIN_LIQ        = 400_000.0   # 近24根 4h 成交額中位下限(USDT)
+S4H_TL_PV          = 5           # 趨勢線樞紐左右確認根數
+S4H_TL_TOL         = 0.003
+S4H_TL_TOUCH       = 3           # 官方「三個點確立效果更好」
+S4H_TL_WAIT        = 96
+S4H_TL_MAXAGE      = 600
+S4H_TL_KEEPN       = 6
+S4H_DEEP_BARS      = 1000        # ★見上方:300根只重現77.7%,1000根99.2%
+S4H_DEEP_PER_ROUND = 6           # 每輪最多深抓幾個新幣(控API用量)
+_S4H_KL_CACHE: Dict[str, pd.DataFrame] = {}
+_S4H_DEEP_BUDGET   = {"used": 0}
+_S4H_LAST_BAR: Dict[str, int] = {}          # inst -> 上次觸發的 4h bar epoch(冷卻)
+_S4H_DAY = {"day": "", "count": 0}          # 每日新倉計數
+_S4H_DIAG = {"呼叫":0, "K棒不足":0, "非吞噬":0, "流動性":0, "無123":0, "不在斐波":0,
+             "非LL":0, "冷卻":0, "每日上限":0, "停損無效":0, "成立":0}
+
+
+def _s4h_pivots(hi, lo, pv):
+    """左右各 pv 根確認的樞紐（_lib_trendline.pivots 移植）。回傳 (高,低)，元素 (idx, 價, 可用起點)。"""
+    n = len(hi); H = []; L = []
+    for j in range(pv, n - pv):
+        if hi[j] > hi[j-pv:j].max() and hi[j] >= hi[j+1:j+pv+1].max(): H.append((j, float(hi[j]), j+pv))
+        if lo[j] < lo[j-pv:j].min() and lo[j] <= lo[j+1:j+pv+1].min(): L.append((j, float(lo[j]), j+pv))
+    return H, L
+
+
+class _S4HTrendLines:
+    """趨勢線（_lib_trendline.TrendLines 逐行移植，係數一個都不准改）。
+    up 線 = 連兩個低點(後者較高)=支撐；觸及必須是**分離事件**(先離開 tol 再回來才 +1)。"""
+    def __init__(self, hi, lo, pv, tol, min_touch, max_age, keep_n):
+        self.hi = hi; self.lo = lo; self.pv = pv; self.tol = tol
+        self.min_touch = min_touch; self.max_age = max_age; self.keep_n = keep_n
+        self.H, self.L = _s4h_pivots(hi, lo, pv)
+        self.lines = []; self._ph = 0; self._pl = 0; self._lastH = []; self._lastL = []
+
+    def _add(self, kind, a, b):
+        (i1, p1, _), (i2, p2, _) = a, b
+        if i2 <= i1: return
+        if kind == "up"   and not (p2 > p1): return
+        if kind == "down" and not (p2 < p1): return
+        self.lines.append(dict(kind=kind, i1=i1, p1=p1, i2=i2, p2=p2,
+                               slope=(p2-p1)/(i2-i1), touch=2,
+                               born=max(a[2], b[2]), near=False))
+
+    def value(self, ln, i):
+        return ln["p1"] + ln["slope"] * (i - ln["i1"])
+
+    def update(self, i):
+        while self._ph < len(self.H) and self.H[self._ph][2] <= i:
+            p = self.H[self._ph]
+            for q in self._lastH[-3:]: self._add("down", q, p)   # ★向右尋找:新樞紐只跟更早的連
+            self._lastH.append(p); self._ph += 1
+        while self._pl < len(self.L) and self.L[self._pl][2] <= i:
+            p = self.L[self._pl]
+            for q in self._lastL[-3:]: self._add("up", q, p)
+            self._lastL.append(p); self._pl += 1
+        keep = []
+        for ln in self.lines:
+            if i - ln["born"] > self.max_age: continue
+            v = self.value(ln, i)
+            if v <= 0: continue
+            px = self.lo[i] if ln["kind"] == "up" else self.hi[i]
+            near = abs(px - v) / v <= self.tol
+            if near and not ln["near"]: ln["touch"] += 1
+            ln["near"] = near
+            keep.append(ln)
+        keep.sort(key=lambda x: (-x["touch"], -x["born"]))
+        self.lines = keep[:self.keep_n]
+
+    def active(self, i, kind):
+        out = []
+        for ln in self.lines:
+            if ln["kind"] != kind or ln["touch"] < self.min_touch: continue
+            if i <= ln["i2"]: continue
+            out.append((ln, self.value(ln, i)))
+        return out
+
+
+def _s4h_scan_123_short(hi, lo, cl, op):
+    """_lib_123.scan_123(side='short', entry_at='2') 移植。回傳成立的進場 idx 集合。
+    1 = 上升支撐線被**實體(收盤)**跌破(官方明說不要進在1,可能假跌破)
+    2 = 回調之後不再創新高、且收了黑K → 這才是進場點"""
+    n = len(cl)
+    tl = _S4HTrendLines(hi, lo, S4H_TL_PV, S4H_TL_TOL, S4H_TL_TOUCH, S4H_TL_MAXAGE, S4H_TL_KEEPN)
+    out = set(); st = None
+    for i in range(S4H_TL_PV + 2, n):
+        tl.update(i)
+        if st is None:
+            for ln, v in tl.active(i, "up"):
+                if cl[i] < v and cl[i-1] >= tl.value(ln, i-1):        # 1 成立
+                    a = max(0, i - S4H_TL_PV * 4)
+                    st = dict(i1=i, ref=float(hi[a:i+1].max()))
+                    break
+            continue
+        if i - st["i1"] > S4H_TL_WAIT: st = None; continue
+        if float(hi[i]) > st["ref"]: st = None; continue              # 創新高=假跌破,作廢
+        if cl[i] < op[i] and float(hi[i]) < st["ref"]:                # 2 成立
+            out.add(i); st = None
+    return out
+
+
+def _s4h_fib_hit(hi, lo, ev, i) -> bool:
+    """該根是否觸及「最近一段已確認下跌腿」的 0.382~0.618 反彈帶。
+    ev = _zigzag_hl 的 [(確認idx, 樞紐idx, 價, 'H'/'L')]，依確認時間排序。"""
+    legs = [e for e in ev if e[0] <= i]
+    if len(legs) < 2: return False
+    (c2, j2, p2, t2) = legs[-1]; (c1, j1, p1, t1) = legs[-2]
+    if t1 == t2 or i - c2 > S4H_FIB_MAXAGE: return False
+    if not (t1 == "H" and t2 == "L"): return False        # 必須是下跌腿(高→低)
+    rng = p1 - p2
+    if rng <= 0: return False
+    zl, zh = p2 + rng * S4H_FIB_LO, p2 + rng * S4H_FIB_HI
+    return bool(lo[i] <= zh and hi[i] >= zl)              # ★bool():numpy.bool_ 不是 bool
+
+
+def _s4h_struct_sl(ev, i, e):
+    """停損 = 最近一個在進場價上方(至少 MIN_SL_PCT)的**已確認**樞紐高 ×1.001。"""
+    Hs = [x for x in ev if x[0] <= i and x[3] == "H"]
+    for (c, j, p, t) in reversed(Hs):
+        if p > e * (1 + MIN_SL_PCT): return float(p) * 1.001
+    return None
+
+
+def _s4h_deep_candles(inst_id: str, df_recent: pd.DataFrame) -> pd.DataFrame:
+    """把 4H K線加深到 ~1000 根(history-candles 分頁),首次抓完就快取、之後只增量合併。
+    ★不是優化,是規格能否被執行的前提 —— 見本區塊開頭的 300/500/1000 根重現率實測。"""
+    cur = _S4H_KL_CACHE.get(inst_id)
+    if cur is None:
+        if _S4H_DEEP_BUDGET["used"] >= S4H_DEEP_PER_ROUND:
+            return df_recent                      # 本輪配額用完,先用淺的(條件會自然不成立)
+        _S4H_DEEP_BUDGET["used"] += 1
+        rows = []; after = None
+        for _ in range(max(1, S4H_DEEP_BARS // 100)):
+            q = {"instId": inst_id, "bar": "4H", "limit": "100"}
+            if after: q["after"] = after
+            d = _fetch_okx_public_data("/api/v5/market/history-candles", q)
+            if not d: break
+            rows += d; after = d[-1][0]
+        if rows:
+            try:
+                k = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close",
+                                                "vol", "volCcy", "volCcyQuote", "confirm"])
+                k = k[k["confirm"] == "1"]
+                idx = pd.to_datetime(k["ts"].astype("int64"), unit="ms", utc=True)
+                cur = pd.DataFrame({c: k[c].astype(float).values
+                                    for c in ("open", "high", "low", "close", "vol")}, index=idx)
+                cur = cur.sort_index()
+            except Exception as e:
+                print(f"[S4H] {inst_id} 深抓解析失敗: {e}"); cur = None
+    if cur is None: return df_recent
+    try:
+        keep = [c for c in ("open", "high", "low", "close", "vol") if c in df_recent.columns]
+        merged = pd.concat([cur, df_recent[keep]])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index().tail(S4H_DEEP_BARS)
+        _S4H_KL_CACHE[inst_id] = merged
+        return merged
+    except Exception:
+        return df_recent
+
+
+def _check_s4h_short(symbol_item: str, okx_swap_symbol: str):
+    """S4H 做空。回傳 (是否成立, 原因, 停損價)。**自己抓 4H**,不吃外面傳進來的時框 df。"""
+    if not S4H_SHORT_ENABLED: return False, "", 0.0
+    try:
+        _S4H_DIAG["呼叫"] += 1
+        d4 = fetch_market_candles(okx_swap_symbol, "4H", 300)
+        if d4 is None or d4.empty or len(d4) < 60:
+            _S4H_DIAG["K棒不足"] += 1; return False, "", 0.0
+        df = _s4h_deep_candles(okx_swap_symbol, d4)
+        hi = df["high"].values; lo = df["low"].values
+        cl = df["close"].values; op = df["open"].values; vol = df["vol"].values
+        n = len(cl)
+        if n < 120:
+            _S4H_DIAG["K棒不足"] += 1; return False, "", 0.0
+        i = n - 1                                       # 最新**已收盤** 4h 根
+        # ── ① 看跌吞噬(最便宜的條件先擋,省掉後面的趨勢線計算) ──
+        if not (cl[i] < op[i] and cl[i-1] > op[i-1] and op[i] >= cl[i-1] and cl[i] <= op[i-1]):
+            _S4H_DIAG["非吞噬"] += 1; return False, "", 0.0
+        _sl_i = max(0, i - 23)
+        if float(np.median(vol[_sl_i:i+1] * cl[_sl_i:i+1])) < S4H_MIN_LIQ:
+            _S4H_DIAG["流動性"] += 1; return False, "", 0.0
+        # ── ② 趨勢線 123（近 6 根 = 24h 內成立過） ──
+        z123 = _s4h_scan_123_short(hi, lo, cl, op)
+        if not any(i - S4H_123_WIN <= k <= i for k in z123):
+            _S4H_DIAG["無123"] += 1; return False, "", 0.0
+        ev = _zigzag_hl(hi, lo, S4H_SWING)              # 只含已確認樞紐,無未來函數
+        # ── ③ 斐波反彈打折帶 ──
+        if not _s4h_fib_hit(hi, lo, ev, i):
+            _S4H_DIAG["不在斐波"] += 1; return False, "", 0.0
+        # ── ④ LL:最近兩個已確認低點降低 ──
+        Ls = [e for e in ev if e[0] <= i and e[3] == "L"]
+        if len(Ls) < 2 or not (Ls[-1][2] < Ls[-2][2]):
+            _S4H_DIAG["非LL"] += 1; return False, "", 0.0
+        # ── 冷卻 / 每日上限 ──
+        _bar_ts = int(df.index[i].timestamp())
+        if _bar_ts - _S4H_LAST_BAR.get(okx_swap_symbol, 0) < S4H_COOLDOWN_BARS * 14400:
+            _S4H_DIAG["冷卻"] += 1; return False, "", 0.0
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _S4H_DAY["day"] != _today: _S4H_DAY.update(day=_today, count=0)
+        if _S4H_DAY["count"] >= S4H_DAILY_CAP:
+            _S4H_DIAG["每日上限"] += 1; return False, "", 0.0
+        # ── 停損 = 最近一個在進場價上方的已確認樞紐高 ──
+        e = float(cl[i])                                # 進場≈本根收盤(=下一根4h開盤)
+        sl = _s4h_struct_sl(ev, i, e)
+        if sl is None or sl <= e:
+            _S4H_DIAG["停損無效"] += 1; return False, "", 0.0
+        d = (sl - e) / e
+        if d < MIN_SL_PCT or d > MAX_SL:
+            _S4H_DIAG["停損無效"] += 1; return False, "", 0.0
+        _S4H_LAST_BAR[okx_swap_symbol] = _bar_ts
+        _S4H_DAY["count"] += 1
+        _S4H_DIAG["成立"] += 1
+        return True, f"4h吞噬+趨勢線123+斐波{S4H_FIB_LO}~{S4H_FIB_HI}+LL結構", float(sl)
+    except Exception as ex:
+        print(f"[S4H-Short] {symbol_item} 判斷失敗: {ex}")
+        return False, "", 0.0
+
+
 MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
 # 舊腳本(_bt_mtf_bias_concept.py / _bt_mtf_gate_on_strats.py) 用 pandas resample 後 reindex(method="ffill"),
 # 而 resample 的索引是K棒的**起始**時間 → 當天的每個小時就已經用到當天日線的最終收盤。
@@ -5202,6 +5460,7 @@ class SykesTradingBot:
                                                              okx_swap_symbol)
                 if _VLONG_DIAG["呼叫"] % 189 == 1:
                     _VLONG_DEEP_BUDGET["used"] = 0          # 每輪重置深抓配額
+                    _S4H_DEEP_BUDGET["used"] = 0            # ★S4H 4H深抓配額同步每輪重置
                 if _VLONG_DIAG["呼叫"] % 50 == 0:
                     print(f"[V-Long儀表] {_VLONG_DIAG} 深快取{len(_VLONG_KL_CACHE)}幣", flush=True)
                 if is_vlong:
@@ -5229,6 +5488,21 @@ class SykesTradingBot:
                     print(f"[LLH-Short] {symbol_item} {_llh_r} sl={_llh_sl:.6g}", flush=True)
             except Exception as _lle:
                 print(f"[LLH-Short] {symbol_item} 判斷失敗: {_lle}")
+
+        # ── ★S4H 做空(4h,2026-09-04上線)：獨立訊號源,不覆寫既有 is_short ──
+        #   4H 在 AUTO_TRADE 是 False(僅通知),本策略在下方下單閘用「只有它觸發」的專屬旁路放行,
+        #   不會順帶把其他 4H 訊號一起開成自動下單。
+        is_s4h_short = False; _s4h_sl = 0.0; _s4h_r = ""
+        if S4H_SHORT_ENABLED and tf_id == "4H":
+            try:
+                is_s4h_short, _s4h_r, _s4h_sl = _check_s4h_short(symbol_item, okx_swap_symbol)
+                if _S4H_DIAG["呼叫"] % 50 == 0:
+                    print(f"[S4H-Short儀表] {_S4H_DIAG} 今日{_S4H_DAY['count']}/{S4H_DAILY_CAP} "
+                          f"深快取{len(_S4H_KL_CACHE)}幣", flush=True)
+                if is_s4h_short:
+                    print(f"[S4H-Short] {symbol_item} {_s4h_r} sl={_s4h_sl:.6g}", flush=True)
+            except Exception as _s4e:
+                print(f"[S4H-Short] {symbol_item} 判斷失敗: {_s4e}")
 
         # ── 數據獵手做空(15m)：2B+CVD頂背離+OI升6根+ls>=2.5+taker>1.0(WF驗證+0.153)──
         is_dh_short = False; _dh_short_r = ""
@@ -5649,7 +5923,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long or is_vlong
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short or is_s4h_short
 
         if not combined_long and not combined_short:
             return
@@ -5682,6 +5956,7 @@ class SykesTradingBot:
             if is_macd_short:    _signal_source.append("MACD動能")
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_llh_short:     _signal_source.append("LL→LH反彈空")
+            if is_s4h_short:     _signal_source.append("S4H做空(4h吞噬+123+斐波+LL)")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
             if is_oisq_short:    _signal_source.append("主力建空")
@@ -5706,7 +5981,10 @@ class SykesTradingBot:
         #   箱突破空/15m C3多 → 固定R(切線/移SL未變好)
         exit_strategy = ""
         _strat_ts_h = 0          # ★2026-08-02 策略專屬時間停損(0=用型態預設:讓跑24h/固定R 12h)
-        if is_dh_short:
+        if is_s4h_short:
+            exit_strategy = ""       # S4H:固定 2.5R 全平(TP override 見下方 SL/TP 區塊)
+            _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設,設了 12h 預設就不是同一個規格
+        elif is_dh_short:
             exit_strategy = "line_full"                                  # DH空：整倉切線讓跑(2026-06-13關加碼:
             #   按年顯示加碼只在強熊好(2022),震盪/牛市害它(2024純跑+0.32 vs 加碼-0.02)。切線出場不變,只去加碼。
         elif tf_id == "30m" and direction == "long" and is_long:
@@ -5818,7 +6096,9 @@ class SykesTradingBot:
                 tp1_target = current_close + risk_dist * p["tp1_mult"]
                 tp2_target = current_close + risk_dist * tp2_mult
         else:
-            if is_llh_short and _llh_sl > 0:
+            if is_s4h_short and _s4h_sl > 0:
+                calculated_sl = round(float(_s4h_sl), 8)   # ★S4H:停損=最近一個在進場價上方的已確認樞紐高×1.001(對齊回測 struct_sl)
+            elif is_llh_short and _llh_sl > 0:
                 calculated_sl = round(float(_llh_sl), 8)   # ★LL→LH:停損=前一個高點H1(對齊回測)
             elif is_engulf_short:
                 calculated_sl = round(float(df["high"].values[-4:].max()) + 0.15 * current_atr, 8)   # 吞噬空:近4根高+0.15ATR(對齊回測)
@@ -5835,7 +6115,10 @@ class SykesTradingBot:
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
-            if is_llh_short and _llh_sl > 0:
+            if is_s4h_short and _s4h_sl > 0:
+                # ★S4H:2.5R 全平,對齊回測(不分批、**不設時間停損**)
+                tp1_target = tp2_target = current_close - risk_dist * S4H_TP_R
+            elif is_llh_short and _llh_sl > 0:
                 # ★LL→LH:2.5R 全平,對齊回測(不分批、不設時間停損 —— 被砍掉的長單原本EV+0.65~+0.77)
                 tp1_target = tp2_target = current_close - risk_dist * LLH_TP_R
             else:
@@ -5982,7 +6265,11 @@ class SykesTradingBot:
                      and exit_strategy not in ("line_full", "line_add", "swing_full",
                                                "swing_tp", "swing_tp_1h"))
 
-        if AUTO_TRADE.get(tf_id):
+        # ★S4H 專屬旁路(2026-09-04):4H 在 AUTO_TRADE 是 False(僅通知需手動授權),
+        #   但 S4H 的凍結規格本來就是 4h 進場。這裡**只**在「S4H 是唯一觸發來源」時放行,
+        #   絕不因此把其他 4H 訊號(C3/雙頂/MACD…)一起開成自動下單。
+        _s4h_only = bool(is_s4h_short and _signal_source == ["S4H做空(4h吞噬+123+斐波+LL)"])
+        if AUTO_TRADE.get(tf_id) or _s4h_only:
             try:
                 daily_report.record_entry(symbol_item, tf_id, direction, signal_source_tag or exit_strategy)
             except Exception:
@@ -7371,6 +7658,9 @@ _LETRUN_ES = ("swing_full", "line_full", "line_add", "swing_tp", "swing_tp_1h", 
 def _timestop_hours(trade) -> int:
     """依出場型態決定時間停損時數:讓跑型24h/固定R型12h(cme_gap另有300h,不走此函數)。"""
     _h = int(trade.get("ts_h") or 0)
+    # ★2026-09-04 負值 = 該策略**明確不設**時間停損(S4H 的回測就是不設時停,設了就不是同一個規格)。
+    #   不能用 0 表示,0 在此函數是「用型態預設」,而呼叫端的 `now-ts_open > _tsh*3600` 遇到 0 會**立刻平倉**。
+    if _h < 0: return 10 ** 6
     if _h > 0: return _h                     # 策略專屬(下單時寫入)優先
     return LETRUN_TIMESTOP_H if trade.get("exit_strategy") in _LETRUN_ES else GLOBAL_TIMESTOP_H
 _cme_state: Dict[str, Any] = {}
