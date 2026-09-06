@@ -3518,6 +3518,10 @@ ENGULF_MIN_BODY = 0.70   # ★★★2026-09-06 進場品質閘:吞噬K實體佔�
 # ★已測**不要加**:斐波∩支撐壓力區匯流加權(疊在實體條件上樣本外只 +1.0%,且傷訓練段
 #   +0.4713→+0.2938)——它跟實體佔比抓同一件事,實體更直接,少一個活動零件。
 ENGULF_SHORT_ENABLED = True   # ★2026-09-06 重開(加進場品質閘,證據見上表)
+# ★漏斗儀表(2026-09-06):S4H/V-Long/4J 都有,吞噬空原本沒有。新加的實體閘若擋過頭,
+#   Discord 什麼都不會說(記憶教訓:「訊號默默消失時 log 是唯一現形處」)→ 補上逐層計數。
+_ENGULF_DIAG = {"呼叫":0, "K棒不足":0, "非下跌regime":0, "不在近12根高":0,
+                "非吞噬":0, "量不足":0, "實體不足":0, "成立":0}
 # ── 以下為 2026-09-05 關閉時的原因,保留當歷史:當時只有「無門檻」版,回撤確實不可行 ──
 # 原註:★★★2026-09-05 當天上線後**又關掉**——因為我漏測了最重要的東西:回撤。
 # 用戶:「保住本金為主,我不要因為你這樣導致資金大回撤,尤其都會比你說的回撤還要多,
@@ -3561,24 +3565,32 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """山寨看跌吞噬空(1H):①陰線吞噬前陽線實體 ②量>1.3×近24均量 ③收盤<EMA100(下跌regime) ④在近12根高附近(空頂部)。
     純價量,3個獨立時期樣本外複製超額vs隨機+0.15。注意:df已去掉未收盤當根,[-1]=最新已收盤。"""
     try:
+        _ENGULF_DIAG["呼叫"] += 1
         op = df["open"].values; hi = df["high"].values; cl = df["close"].values
         lo = df["low"].values
         vol = df["vol"].values if "vol" in df.columns else None
-        if vol is None or len(cl) < 130: return False, ""
+        if vol is None or len(cl) < 130:
+            _ENGULF_DIAG["K棒不足"] += 1; return False, ""
         ema100 = pd.Series(cl).ewm(span=100, adjust=False).mean().values
-        if not (cl[-1] < ema100[-1]): return False, ""                              # 下跌regime
-        if not (hi[-1] >= hi[-13:-1].max() * 0.997): return False, ""               # 在近12根高附近(頂)
+        if not (cl[-1] < ema100[-1]):
+            _ENGULF_DIAG["非下跌regime"] += 1; return False, ""                     # 下跌regime
+        if not (hi[-1] >= hi[-13:-1].max() * 0.997):
+            _ENGULF_DIAG["不在近12根高"] += 1; return False, ""                      # 在近12根高附近(頂)
         if not ((cl[-1] < op[-1]) and (cl[-2] > op[-2]) and (op[-1] >= cl[-2]) and (cl[-1] <= op[-2])):
-            return False, ""                                                         # 看跌吞噬(陰吞前陽實體)
+            _ENGULF_DIAG["非吞噬"] += 1; return False, ""                            # 看跌吞噬(陰吞前陽實體)
         va = float(np.mean(vol[-25:-1]))
-        if not (va > 0 and vol[-1] > 1.3 * va): return False, ""                     # 放量
+        if not (va > 0 and vol[-1] > 1.3 * va):
+            _ENGULF_DIAG["量不足"] += 1; return False, ""                            # 放量
         # ★★進場品質閘(2026-09-06):吞噬K的**實體佔全棒幅比例** ≥ ENGULF_MIN_BODY
         #   用戶:「重點就不是改我的風險或熔斷,是你的勝率,進場不對就是輸」——他是對的。
         #   實體大 = 那根陰線是實打實收下來的,不是上下影線一堆的假動作。
         _rng = float(hi[-1]) - float(lo[-1])
-        if _rng <= 0: return False, ""
+        if _rng <= 0:
+            _ENGULF_DIAG["實體不足"] += 1; return False, ""
         _body = abs(float(cl[-1]) - float(op[-1])) / _rng
-        if _body < ENGULF_MIN_BODY: return False, ""
+        if _body < ENGULF_MIN_BODY:
+            _ENGULF_DIAG["實體不足"] += 1; return False, ""
+        _ENGULF_DIAG["成立"] += 1
         return True, f"看跌吞噬+放量+價<EMA100+實體{_body:.0%}"
     except Exception as e:
         print(f"[Engulf-Short] {symbol_item} 失敗: {e}")
@@ -5693,7 +5705,11 @@ class SykesTradingBot:
         is_engulf_short = False
         if ENGULF_SHORT_ENABLED and tf_id == "1H" and symbol_item not in MAJOR_COINS:
             try:
-                is_engulf_short, _ = _check_engulf_short(symbol_item, df)
+                is_engulf_short, _er = _check_engulf_short(symbol_item, df)
+                if _ENGULF_DIAG["呼叫"] % 200 == 0:
+                    print(f"[Engulf-Short儀表] {_ENGULF_DIAG}", flush=True)
+                if is_engulf_short:
+                    print(f"[Engulf-Short] {symbol_item} {_er}", flush=True)
             except Exception as _ese:
                 print(f"[Engulf-Short] {symbol_item} 判斷失敗: {_ese}")
 
