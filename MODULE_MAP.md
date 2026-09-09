@@ -58,6 +58,23 @@ saikesi-bot-clean/
 | **主迴圈** | 2754–2808 | `def main_polling_loop` | |
 | 進入點 | 2816 | `if __name__` | 三執行緒：主迴圈/DC輪詢/Flask |
 
+> ⚠️ **上表行號嚴重過期**（表列到 2816，main.py 實際已 8300+ 行）。抓不到時一律用「定位字串」Grep。
+
+### 2026-09-10 新增：4J減速跌破做空（FOURJD）
+| 區塊 | 定位字串（Grep 用） | 說明 |
+|---|---|---|
+| 常數/開關/診斷 | `FOURJD_SHORT_ENABLED` | 全部門檻常數＋`_FOURJD_DIAG`漏斗＋`_FOURJD_RISK`熔斷狀態 |
+| ADX | `def _fourjd_adx` | ADX(14)。實測給300根1H與完整歷史誤差0.0000 |
+| ★判定核心 | `def _fourjd_signal` | 逐根重放狀態機，只回報最後一根。**每輪整個重建、不跨輪保存**（redeploy不歸零） |
+| 對外入口 | `def _check_fourjd_short` | 自己抓1H+2H(各300根)，不吃外面的df |
+| ★熔斷 | `def _fourjd_record_result` | 連續吃滿停損8筆自動停；呼叫點在 `[Trailing] ... 倉位已關閉` 那段 |
+| 出場模式 | `fourjd_2r` | 整倉TP 2R＋浮盈0.8R保本；OKX/BingX下單管線與保本邏輯共6處分支 |
+
+**驗證腳本**（上層 `trading-backtest/`）：`_chk_4jd_port.py`（移植對拍264/264）、
+`_chk_4jd_exec.py`（exec實跑＋熔斷）、`_chk_4jd_win2.py`（2h視窗深度）、
+`_chk_scope.py`（★作用域檢查器，補 `_chk_names.py` 抓不到的局部變數遮蔽）
+
+
 ---
 
 ## 常見修改 → 看哪裡

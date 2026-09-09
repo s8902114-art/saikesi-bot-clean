@@ -329,6 +329,11 @@ QQE_THRESHOLD = 3
 
 ADX_THR   = 25
 MAX_SL    = 0.12
+# ★2026-09-10 補模組層 MIN_SL_PCT:原本只在 scan_and_process_market 內部有一個**局部變數**
+#   (`MIN_SL_PCT = 0.006` 縮排在函數裡),其他函數引用它會執行期 NameError。
+#   `_chk_names.py` 抓不到這種(它只檢查「名字有沒有在檔案裡定義過」,不檢查作用域)——
+#   跟 2026-09-04 `_crypto_mv` 害漲跌幅榜死一整天是同一個坑。值與 _bt_lib_faithful 一致。
+MIN_SL_PCT = 0.006   # 0.6%:停損太近=結構無效→倉位放超大+一根K秒進秒損
 PIVOT_LEN = 5     # Pivot 結構點左右各需 N 根確認
 FUNDING_LONG_MAX = 0.0001
 FUNDING_SHORT_MIN = -0.0001
@@ -1274,8 +1279,9 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
             _tag = {"line_full": "切線突破", "swing_full": "轉折移SL",
                     "line_add": "切線突破+轉折加碼"}.get(exit_strategy, "切線")
             execution_report.append(f"📈 整倉出場(不掛TP,{_tag};SL兜底)")
-        elif exit_strategy in ("box_trend", "hf_1r"):
-            # ── 整倉單一TP:box_trend=4R讓跑/達1R保本;hf_1r=高頻固定1R全平/達0.5R保本(不讓跑)。
+        elif exit_strategy in ("box_trend", "hf_1r", "fourjd_2r"):
+            # ── 整倉單一TP:box_trend=4R讓跑/達1R保本;hf_1r=高頻固定1R全平/達0.5R保本(不讓跑);
+            #    fourjd_2r=4J減速跌破空 固定2R全平/達0.8R保本。
             #    R掃描甜蜜點4R(EV+0.234/賺賠2.8);讓趨勢跑,crypto切線被反彈洗故不用切線。
             try:
                 tp1_order = ex.create_order(
@@ -1338,7 +1344,7 @@ def execute_okx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: flo
         # 只有成功掛上止損(sl_algo_id)才追蹤；否則倉位狀態不明，不納入。
         if sl_algo_id:
             # 剩餘量：整倉(line_full/swing_full/line_add/box_trend)=全倉；其他=TP1出一半後剩的半倉
-            if exit_strategy in ("line_full", "swing_full", "line_add", "box_trend", "hf_1r"):
+            if exit_strategy in ("line_full", "swing_full", "line_add", "box_trend", "hf_1r", "fourjd_2r"):
                 remaining_amt = str(total_contracts)
             else:
                 remaining_amt = str(tp2_qty if tp2_qty > 0 else total_contracts)
@@ -1621,8 +1627,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         if exit_strategy in ("line_full", "line_add", "swing_full"):
             # 整倉趨勢跟蹤：不掛TP,整倉持有,由check_trailing切線/移SL出場(SL兜底)
             pass
-        elif exit_strategy in ("box_trend", "hf_1r"):
-            # 整倉單一TP:box_trend=4R/達1R保本;hf_1r=高頻固定1R全平/達0.5R保本。TP全倉掛交易所自動成交。
+        elif exit_strategy in ("box_trend", "hf_1r", "fourjd_2r"):
+            # 整倉單一TP:box_trend=4R/達1R保本;hf_1r=1R全平/0.5R保本;fourjd_2r=2R全平/0.8R保本。TP全倉掛交易所自動成交。
             tp1_r = _bingx_request("POST", "/openApi/swap/v2/trade/order", {
                 "symbol": bingx_symbol, "side": exit_side, "positionSide": pos_side,
                 "type": "TAKE_PROFIT_MARKET", "stopPrice": str(round(tp1, 5)),
@@ -1657,7 +1663,7 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         be_price_bingx   = float(entry_price) + fee_buffer_bingx if trade_side == "long" \
                            else float(entry_price) - fee_buffer_bingx
         # 剩餘量：整倉趨勢跟蹤=全倉；其他=半倉(TP1出後剩的)
-        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full","box_trend","hf_1r") else half_qty
+        _rem_qty = round(actual_qty, 4) if exit_strategy in ("line_full","line_add","swing_full","box_trend","hf_1r","fourjd_2r") else half_qty
         # 加碼基礎量(line_add)：未疊CVD加碼的基礎單位
         _base_qty = round(actual_qty / max(position_scale, 1e-9), 4)
         # key 含 exit_strategy + 毫秒:高頻平行倉與讓跑倉不撞號(各跑各的)
@@ -2393,6 +2399,14 @@ def check_trailing_stops_for_real():
                 if _miss < 3:
                     trade["_pos_miss"] = _miss; save_active_trades(); continue
                 print(f"[Trailing] {name} 倉位已關閉(連{_miss}輪查無)，移除追蹤")
+                # ★4J減速跌破空 熔斷計數(CLAUDE.md第11條:觀察條款要寫成代碼)。
+                #   判定精確:TP=2R > 保本觸發0.8R,所以「賺的單必定先經過0.8R」→ tp1_hit=True;
+                #   從未觸發保本就消失 = 只能是吃滿停損(本策略 _strat_ts_h=-1 不設時停)。
+                if trade.get("exit_strategy") == "fourjd_2r":
+                    try:
+                        _fourjd_record_result(not bool(trade.get("tp1_hit")))
+                    except Exception as _fre:
+                        print(f"[4JD] 熔斷計數失敗: {_fre}")
                 active_real_trades.pop(trade_key, None); save_active_trades()
                 continue
             if trade.get("_pos_miss"):
@@ -2600,10 +2614,14 @@ def check_trailing_stops_for_real():
 
             # ── 箱突破空(box_trend)：整倉4R TP掛在交易所,這裡只做「達1R浮盈→移SL保本」(一次)
             #    防假突破拉回。TP(4R)成交由交易所自動平,下輪偵測倉位消失移除。
-            if trade.get("exit_strategy") in ("box_trend", "hf_1r"):
-                _is_hf = trade.get("exit_strategy") == "hf_1r"   # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
-                _be_trig = 0.5 if _is_hf else 1.0
-                _be_active = False if _is_hf else LETRUN_BE_ENABLED  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
+            if trade.get("exit_strategy") in ("box_trend", "hf_1r", "fourjd_2r"):
+                _es_be = trade.get("exit_strategy")
+                _is_hf = _es_be == "hf_1r"      # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
+                _is_fjd = _es_be == "fourjd_2r"  # ★4J減速跌破空:0.8R保本(回測 吃滿停損51.9%→30.5%,容錯12.5→13.8)
+                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else 1.0)
+                # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
+                # ★fourjd_2r 的保本是**回測規格的一部分**(逐根重跑驗過,不是MFE事後估算),不受 LETRUN_BE_ENABLED 影響
+                _be_active = True if _is_fjd else (False if _is_hf else LETRUN_BE_ENABLED)
                 if _be_active and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
@@ -2878,7 +2896,7 @@ def check_trailing_stops_for_real():
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
             # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
-            if _es in ("box_trend", "hf_1r"):
+            if _es in ("box_trend", "hf_1r", "fourjd_2r"):
                 _is_hf = _es == "hf_1r"             # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
                 _be_trig = 0.5 if _is_hf else 1.0
                 _be_active = False if _is_hf else LETRUN_BE_ENABLED  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
@@ -4282,6 +4300,217 @@ def _check_s4h_short(symbol_item: str, okx_swap_symbol: str):
     except Exception as ex:
         print(f"[S4H-Short] {symbol_item} 判斷失敗: {ex}")
         return False, "", 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ★★4J減速跌破做空 (FOURJD, 2026-09-10 上線) —— 位階2h / 判定與進場1H
+# ══════════════════════════════════════════════════════════════════════════════
+# 來源:逐張看 4J 直播畫格(`_vid/ajffl_Oh8N4` 等)讀出來的,不是逐字稿推論。
+#   s025/s156 兩條到同一條壓力的路徑圖 → 軸1「怎麼到位階的」:一口氣衝到(加速) vs 爬樓梯(減速)
+#   s034 他自己 12.189% 吃滿停損那筆 →「前面是從低點一路往上幹,**就算看到影線也不太能去做空**」
+#   s142「9月1號…這裡吞沒K嘛,下跌,放空,這裡也成功」(那次是減速上來 → 成功)
+#   s141「這裡如果沒有做到空也沒關係,因為**這裡的低點是被跌破的**」→ 右側扳機
+#   WatI7fVRovw 04:21/05:36 他的即時決策:「我在觀察他這裡的低點有沒有被跌破」→「低點是沒有(破)」→ 不做空
+#   用戶看輸單圖指出「**你輸的那些大多是盤整**」→ 實測 ADX<15 那桶是唯一負的(EV−0.084/吃滿44.4%)
+# ── 驗收(全部逐根 live 邏輯,含費0.1%往返) ─────────────────────────────────────
+#   ★★滾動前推(**參數挑選本身也納入檢驗**:每段只用它之前的資料挑參數,再跑下一段):
+#     樣本外 n=107 EV+0.554 容錯23.9 贏41.1%/保本35.5%/吃滿23.4% 正期7/8
+#     bootstrap 95%CI [+0.326,+0.790];參數收斂穩定(9次選擇:2h pv6 8/9、TP2.0 9/9、
+#     保本0.8 8/9、量≥2.0 8/9、ADX閘 8/9)——ADX 是被演算法自己選中的,不是事後加的。
+#   逐根重放對拍 100%(678/678,多出0);live視窗深度:2h只給120根仍100%、1H給300根ADX誤差0.0000
+#   bar內順序(15m重跑出場路徑):結論不同僅0.3%,EV差+0.006 → 1H OHLC 假設無害
+#   成本+0.25% 仍 EV+0.264;與現役1H吞噬空重疊率 1.4%(非重複下注);頻率≈1.3筆/天
+#   打架(ChatGPT)五條反駁:③樣本獨立性(改每日投組+移動區塊bootstrap 下界仍+0.137)、
+#     ④事實問題(23Q4其實 n=0,訓練段實際只有3期)、⑤執行模型(15m已驗)→ 已查;
+#     ①多重比較 ②外樣本已看過 → 由滾動前推正面回應。
+# ── 已知弱點(不粉飾) ──────────────────────────────────────────────────────────
+#   訓練段(23Q4~24Q3)永遠是最弱的一層;24Q1 一直是負的;2022熊市最肥、近期較普通。
+FOURJD_SHORT_ENABLED = True
+FOURJD_PVH        = 6        # 2h 樞紐左右確認根數(滾動前推 8/9 次選中)
+FOURJD_ZW         = 0.004    # 位階帶寬:樞紐高下方 0.4% 為區間帶
+FOURJD_TOL        = 0.006    # 觸及容差
+FOURJD_MAXWAIT    = 200      # 位階誕生後 200 根 1H 內沒被觸及就丟棄
+FOURJD_CW         = 36       # 觸及位階後,盤整窗上限 36 根 1H
+FOURJD_EFF_MAX    = 0.15     # 減速:觸及前最後24根的路徑效率(淨位移/路徑長)上限
+FOURJD_RISE_MAX   = 0.5      # 減速:那24根的漲幅上限(%)
+FOURJD_STEPS_MIN  = 11       # 減速:那24根裡的下跌根數下限(爬樓梯)
+FOURJD_TOUCH_MIN  = 2        # ★位階要真的成立:盤整期間觸及位階次數(官方「兩次成立」)
+FOURJD_VOLX_MIN   = 2.0      # 進場K成交量 / 近96根中位量
+FOURJD_ADX_MIN    = 15.0     # ★用戶看圖抓到的:ADX<15(盤整)那桶是唯一負的
+FOURJD_TP_R       = 2.0      # 停利 2R 全平(用戶要求至少2R)
+FOURJD_BE_R       = 0.8      # 浮盈 0.8R → 停損移到進場價(吃滿停損 51.9%→30.5%)
+FOURJD_BUF        = 0.0015   # 停損 buffer
+FOURJD_MIN_LIQ    = 100_000.0  # 近96根成交額中位
+FOURJD_COOLDOWN_BARS = 6     # 同幣冷卻 6 根 1H
+FOURJD_LOOKBACK   = 210      # 需要的 1H 根數下限(減速24+盤整36+ADX暖機+流動性96)
+# ★熔斷(CLAUDE.md 第11條:觀察條款必須寫成代碼,不能只寫註解 —— BPR 就是栽在這)
+FOURJD_MAX_CONSEC_SL = 8     # 回測最長連續吃滿停損 = 4 筆;連續 8 筆吃滿 → 自動停用等人工複查
+_FOURJD_DIAG = {"呼叫": 0, "K棒不足": 0, "無位階": 0, "未觸及": 0, "非跌破": 0,
+                "減速不合": 0, "觸及不足": 0, "量不足": 0, "ADX盤整": 0,
+                "流動性": 0, "冷卻": 0, "停損無效": 0, "熔斷": 0, "成立": 0}
+_FOURJD_LAST_BAR: Dict[str, int] = {}
+_FOURJD_RISK = {"consec_sl": 0, "halted": False}
+
+
+def _fourjd_adx(h, l, c, n: int = 14):
+    """ADX(14)。EWM alpha=1/14;實測給 300 根 1H 與完整歷史誤差 0.0000、門檻不翻轉。"""
+    up = pd.Series(h).diff(); dn = -pd.Series(l).diff()
+    pdm = np.where((up > dn) & (up > 0), up, 0.0)
+    ndm = np.where((dn > up) & (dn > 0), dn, 0.0)
+    tr = pd.concat([pd.Series(h - l),
+                    (pd.Series(h) - pd.Series(c).shift()).abs(),
+                    (pd.Series(l) - pd.Series(c).shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    pdi = 100 * pd.Series(pdm).ewm(alpha=1 / n, adjust=False).mean() / atr.replace(0, np.nan)
+    ndi = 100 * pd.Series(ndm).ewm(alpha=1 / n, adjust=False).mean() / atr.replace(0, np.nan)
+    dx = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, np.nan)
+    return dx.ewm(alpha=1 / n, adjust=False).mean().values
+
+
+def _fourjd_signal(d1: pd.DataFrame, d2: pd.DataFrame):
+    """逐根重放狀態機,只回報「最後一根 1H 是否觸發」。
+    ★不跨輪保存狀態:每次用當下視窗整個重建 —— 已實測截成 live 視窗重算 266/266=100%,
+      這樣重啟/redeploy 都不會遺失狀態(對比 _oi_history 每次部署歸零的坑)。
+    回傳 (成立?, 原因字串, 停損價) 或 (False, 診斷鍵, 0.0)。"""
+    hi = d1["high"].values; lo = d1["low"].values
+    cl = d1["close"].values; vol = d1["vol"].values
+    n = len(cl)
+    if n < FOURJD_LOOKBACK:
+        return False, "K棒不足", 0.0
+    H = d2["high"].values; m = len(H)
+    if m < FOURJD_PVH * 2 + 4:
+        return False, "K棒不足", 0.0
+    # 2h→1H 對齊:每根 1H 對到「最後一根**已收盤**的 2h」(用收盤時間比,不用 ffill)
+    k = np.searchsorted((d2.index + pd.Timedelta("2h")).values,
+                        (d1.index + pd.Timedelta("1h")).values, side="right") - 1
+    AD = _fourjd_adx(hi, lo, cl)
+    med = pd.Series(vol * cl).rolling(96).median().values
+    vmed = pd.Series(vol).rolling(96).median().shift(1).values
+    tgt = n - 1                                   # 只關心最後一根(已收盤)
+    act: Dict[int, dict] = {}; seen = set(); last_fire = -10 ** 9
+    fail = "未觸及"
+    # ★★視窗起點之前就**已確認**的 2h 樞紐,也必須納入 —— 否則 live 只掃 kk-2..kk 三根,
+    #   會永久漏掉「視窗開始前確認的位階」。移植對拍實測:不補這段 248/264(漏16筆),補了 264/264。
+    #   born 用該樞紐**真正的確認時刻**換算成相對 1H 索引(可為負=視窗外),MAXWAIT 過期才不失真。
+    _i0 = FOURJD_PVH * 2
+    _kk0 = int(k[_i0]) if _i0 < len(k) else -1
+    if _kk0 >= 0:
+        _t0 = d1.index[0]
+        for j in range(FOURJD_PVH, min(_kk0 - FOURJD_PVH + 1, m - FOURJD_PVH)):
+            if j in seen: continue
+            if not (H[j] >= H[j - FOURJD_PVH:j].max() and H[j] >= H[j + 1:j + FOURJD_PVH + 1].max()):
+                continue
+            seen.add(j); top = float(H[j])
+            _conf = d2.index[j + FOURJD_PVH] + pd.Timedelta("2h")   # 該樞紐被確認的時刻
+            _born = int((_conf - _t0).total_seconds() // 3600)      # 可為負(視窗外確認)
+            act[j] = {"top": top, "bot": top * (1 - FOURJD_ZW), "born": _born, "t": None}
+    for i in range(FOURJD_PVH * 2, n - 1 + 1):
+        kk = int(k[i]) if i < len(k) else -1
+        if kk < 0: continue
+        # 新確認的 2h 樞紐高(j 要到 j+PVH 那根收盤才看得見 → 無未來函數)
+        for q in range(max(FOURJD_PVH, kk - 2), kk + 1):
+            j = q - FOURJD_PVH
+            if j - FOURJD_PVH < 0 or j + FOURJD_PVH >= m or j in seen: continue
+            if not (H[j] >= H[j - FOURJD_PVH:j].max() and H[j] >= H[j + 1:j + FOURJD_PVH + 1].max()):
+                continue
+            seen.add(j); top = float(H[j])
+            act[j] = {"top": top, "bot": top * (1 - FOURJD_ZW), "born": i, "t": None}
+        for j1 in list(act.keys()):
+            st = act[j1]
+            if i - st["born"] > FOURJD_MAXWAIT and st["t"] is None:
+                del act[j1]; continue
+            if st["t"] is None:
+                if float(hi[i]) >= st["bot"] * (1 - FOURJD_TOL): st["t"] = i
+                else: continue
+            t = st["t"]
+            if i - t > FOURJD_CW: del act[j1]; continue
+            clo = float(np.min(lo[t:i])) if i > t else float(lo[t])
+            # 扳機:收盤跌破盤整區低點(前一根還沒破)
+            if not ((i > t + 3) and float(cl[i]) < clo and float(cl[i - 1]) >= clo):
+                continue
+            a = max(0, t - 24); seg = cl[a:t + 1]
+            path = float(np.sum(np.abs(np.diff(seg)))); net = float(seg[-1] - seg[0])
+            eff = net / path if path > 0 else float("nan")
+            rise = ((float(seg[-1]) - float(seg[0])) / float(seg[0]) * 100
+                    if float(seg[0]) > 0 else float("nan"))
+            steps = int(np.sum(np.diff(seg) < 0))
+            ntouch = int(np.sum(hi[t:i + 1] >= st["bot"]))
+            vx = (float(vol[i]) / float(vmed[i])) if (vmed[i] == vmed[i] and vmed[i] > 0) else 0.0
+            adxv = float(AD[i]) if AD[i] == AD[i] else 0.0
+            zhi = float(np.max(hi[t:i + 1]))
+            del act[j1]
+            if i != tgt:                       # 不是最後一根:只吃掉冷卻位,不回報
+                if not (eff == eff and rise == rise): continue
+                if (eff < FOURJD_EFF_MAX and rise < FOURJD_RISE_MAX
+                        and steps >= FOURJD_STEPS_MIN and ntouch >= FOURJD_TOUCH_MIN
+                        and vx >= FOURJD_VOLX_MIN and adxv >= FOURJD_ADX_MIN
+                        and i - last_fire >= FOURJD_COOLDOWN_BARS
+                        and med[i] == med[i] and med[i] >= FOURJD_MIN_LIQ):
+                    last_fire = i
+                continue
+            # ── 最後一根:逐層檢查 ──
+            # ★★同一根 K 可能有**多個位階**同時觸發扳機(移植對拍實測:AXSUSDT 那根有兩個,
+            #   字典順序先撞到的那個減速不合、第二個才是成立的)。所以不合格一律 continue
+            #   去看下一個位階,**不准提前 return** —— 回測版用的就是 continue。
+            #   寫成 return 會漏掉 16/264 筆(93.9%),這是我自己引入、回測沒有的結構。
+            if not (eff == eff and rise == rise): fail = "減速不合"; continue
+            if not (eff < FOURJD_EFF_MAX and rise < FOURJD_RISE_MAX
+                    and steps >= FOURJD_STEPS_MIN):
+                fail = "減速不合"; continue
+            if ntouch < FOURJD_TOUCH_MIN: fail = "觸及不足"; continue
+            if vx < FOURJD_VOLX_MIN: fail = "量不足"; continue
+            if adxv < FOURJD_ADX_MIN: fail = "ADX盤整"; continue
+            if not (med[i] == med[i] and med[i] >= FOURJD_MIN_LIQ):
+                fail = "流動性"; continue
+            if i - last_fire < FOURJD_COOLDOWN_BARS: fail = "冷卻"; continue
+            e = float(cl[i]); sl = zhi * (1 + FOURJD_BUF)
+            if sl <= e: fail = "停損無效"; continue
+            dd = (sl - e) / e
+            if dd < MIN_SL_PCT or dd > MAX_SL: fail = "停損無效"; continue
+            return True, (f"2h位階減速跌破|效率{eff:.2f} 24根漲{rise:+.2f}% 回檔{steps}根 "
+                          f"觸及{ntouch}次 量{vx:.1f}x ADX{adxv:.0f}"), float(sl)
+        if i == tgt: break
+    return False, fail, 0.0
+
+
+def _check_fourjd_short(symbol_item: str, okx_swap_symbol: str):
+    """4J減速跌破做空。回傳 (是否成立, 原因, 停損價)。★自己抓 1H+2H,不吃外面傳進來的 df。"""
+    if not FOURJD_SHORT_ENABLED: return False, "", 0.0
+    if _FOURJD_RISK["halted"]:
+        _FOURJD_DIAG["熔斷"] += 1; return False, "", 0.0
+    try:
+        _FOURJD_DIAG["呼叫"] += 1
+        d1 = fetch_market_candles(okx_swap_symbol, "1H", 300)
+        if d1 is None or d1.empty or len(d1) < FOURJD_LOOKBACK:
+            _FOURJD_DIAG["K棒不足"] += 1; return False, "", 0.0
+        d2 = fetch_market_candles(okx_swap_symbol, "2H", 300)
+        if d2 is None or d2.empty or len(d2) < FOURJD_PVH * 2 + 4:
+            _FOURJD_DIAG["K棒不足"] += 1; return False, "", 0.0
+        ok, why, sl = _fourjd_signal(d1, d2)
+        if not ok:
+            _FOURJD_DIAG[why if why in _FOURJD_DIAG else "無位階"] += 1
+            return False, "", 0.0
+        _bar_ts = int(d1.index[-1].timestamp())
+        if _bar_ts - _FOURJD_LAST_BAR.get(okx_swap_symbol, 0) < FOURJD_COOLDOWN_BARS * 3600:
+            _FOURJD_DIAG["冷卻"] += 1; return False, "", 0.0
+        _FOURJD_LAST_BAR[okx_swap_symbol] = _bar_ts
+        _FOURJD_DIAG["成立"] += 1
+        return True, why, float(sl)
+    except Exception as ex:
+        print(f"[4JD-Short] {symbol_item} 判斷失敗: {ex}")
+        return False, "", 0.0
+
+
+def _fourjd_record_result(is_full_stop: bool):
+    """★熔斷計數:連續吃滿停損達 FOURJD_MAX_CONSEC_SL → 自動停用(寫成代碼,不是註解)。"""
+    if is_full_stop:
+        _FOURJD_RISK["consec_sl"] += 1
+        if _FOURJD_RISK["consec_sl"] >= FOURJD_MAX_CONSEC_SL and not _FOURJD_RISK["halted"]:
+            _FOURJD_RISK["halted"] = True
+            dc_log(f"🛑 **4J減速跌破空 自動熔斷**:連續吃滿停損 {_FOURJD_RISK['consec_sl']} 筆"
+                   f"(回測最長 4 筆,門檻 {FOURJD_MAX_CONSEC_SL})。已停止開新倉,需人工複查後重開。")
+    else:
+        _FOURJD_RISK["consec_sl"] = 0
 
 
 MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
@@ -5688,6 +5917,22 @@ class SykesTradingBot:
             except Exception as _s4e:
                 print(f"[S4H-Short] {symbol_item} 判斷失敗: {_s4e}")
 
+        # ── ★4J減速跌破做空(1H,2026-09-10上線)：位階2h/判定與進場1H,獨立訊號源 ──
+        #   自己抓 1H+2H(不吃外面的 df),整段狀態機每輪重建(不跨輪保存,redeploy不會歸零)。
+        #   移植對拍 264/264 一致、停損價0不一致、4032根負樣本0假陽性(_chk_4jd_port.py)。
+        is_fourjd_short = False; _fjd_sl = 0.0; _fjd_r = ""
+        if FOURJD_SHORT_ENABLED and tf_id == "1H":
+            try:
+                is_fourjd_short, _fjd_r, _fjd_sl = _check_fourjd_short(symbol_item, okx_swap_symbol)
+                if _FOURJD_DIAG["呼叫"] % 200 == 0:
+                    print(f"[4JD-Short儀表] {_FOURJD_DIAG} 連虧{_FOURJD_RISK['consec_sl']}"
+                          f"/{FOURJD_MAX_CONSEC_SL}{' 🛑已熔斷' if _FOURJD_RISK['halted'] else ''}",
+                          flush=True)
+                if is_fourjd_short:
+                    print(f"[4JD-Short] {symbol_item} {_fjd_r} sl={_fjd_sl:.6g}", flush=True)
+            except Exception as _fje:
+                print(f"[4JD-Short] {symbol_item} 判斷失敗: {_fje}")
+
         # ── 數據獵手做空(15m)：2B+CVD頂背離+OI升6根+ls>=2.5+taker>1.0(WF驗證+0.153)──
         is_dh_short = False; _dh_short_r = ""
         if DH_SHORT_ENABLED and tf_id == "15m":
@@ -6111,7 +6356,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long or is_vlong
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short or is_s4h_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short or is_s4h_short or is_fourjd_short
 
         if not combined_long and not combined_short:
             return
@@ -6145,6 +6390,7 @@ class SykesTradingBot:
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_llh_short:     _signal_source.append("LL→LH反彈空")
             if is_s4h_short:     _signal_source.append("S4H做空(4h吞噬+123+斐波+LL)")
+            if is_fourjd_short:  _signal_source.append("4J減速跌破空(2h位階+1H減速+跌破盤整低)")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
             if is_oisq_short:    _signal_source.append("主力建空")
@@ -6169,7 +6415,12 @@ class SykesTradingBot:
         #   箱突破空/15m C3多 → 固定R(切線/移SL未變好)
         exit_strategy = ""
         _strat_ts_h = 0          # ★2026-08-02 策略專屬時間停損(0=用型態預設:讓跑24h/固定R 12h)
-        if is_s4h_short:
+        if is_fourjd_short:
+            # ★4J減速跌破空:整倉 TP 2R + 浮盈0.8R移保本(見 execute_*_pipeline 的 fourjd_2r 分支)。
+            #   回測:無保本 吃滿停損51.9% → 0.8R保本 30.5%,容錯 12.5→13.8。
+            exit_strategy = "fourjd_2r"
+            _strat_ts_h = -1         # ★不設時間停損:回測沒設(進場後最多走400根)
+        elif is_s4h_short:
             exit_strategy = ""       # S4H:固定 2.5R 全平(TP override 見下方 SL/TP 區塊)
             _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設,設了 12h 預設就不是同一個規格
         elif is_engulf_short:
@@ -6290,7 +6541,9 @@ class SykesTradingBot:
                 tp1_target = current_close + risk_dist * p["tp1_mult"]
                 tp2_target = current_close + risk_dist * tp2_mult
         else:
-            if is_s4h_short and _s4h_sl > 0:
+            if is_fourjd_short and _fjd_sl > 0:
+                calculated_sl = round(float(_fjd_sl), 8)   # ★4J減速跌破:停損=盤整區最高點×1.0015(對齊回測,移植對拍0不一致)
+            elif is_s4h_short and _s4h_sl > 0:
                 calculated_sl = round(float(_s4h_sl), 8)   # ★S4H:停損=最近一個在進場價上方的已確認樞紐高×1.001(對齊回測 struct_sl)
             elif is_llh_short and _llh_sl > 0:
                 calculated_sl = round(float(_llh_sl), 8)   # ★LL→LH:停損=前一個高點H1(對齊回測)
@@ -6309,7 +6562,10 @@ class SykesTradingBot:
             is_swing   = self._get_4h_swing_flag(okx_swap_symbol, df, tf_id)
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
-            if is_s4h_short and _s4h_sl > 0:
+            if is_fourjd_short and _fjd_sl > 0:
+                # ★4J減速跌破:2R 全平,對齊回測(用戶要求至少2R;滾動前推 TP2.0 選中 9/9)
+                tp1_target = tp2_target = current_close - risk_dist * FOURJD_TP_R
+            elif is_s4h_short and _s4h_sl > 0:
                 # ★S4H:2.5R 全平,對齊回測(不分批、**不設時間停損**)
                 tp1_target = tp2_target = current_close - risk_dist * S4H_TP_R
             elif is_llh_short and _llh_sl > 0:
