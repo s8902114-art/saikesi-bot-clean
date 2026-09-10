@@ -7647,11 +7647,98 @@ OI_MOVERS_N = 20                # OI增幅前N名加入掃描
 OI_MOVERS_WINDOW_H = 12         # 對齊_check_oi_squeeze的12h壓縮窗
 _oi_history: Dict[str, list] = {}   # instId -> [(ts, oiUsd), ...] 只留約OI_MOVERS_WINDOW_H+1小時,記憶體內即可(不需存檔)
 
+OI_BOOT_MIN_USD  = 1_000_000.0  # 只補 oiUsd≥此值的合約(實測 460→216支);與底池流動性門檻同級
+OI_BOOT_SLEEP    = 0.25         # 每支之間節流(實測單支約0.32s → 合計約1.7次/秒,不去撞 rubik 限流)
+OI_BOOT_MAX_MISS = 10           # 累計失敗達此數就整個放棄(寧可退回逐小時累積,也不要害 ls/taker 熔斷)
+_OI_BOOT = {"started": False, "done": False, "n": 0, "ts": 0.0}
+
+def _oi_bootstrap_history(window_h: int = OI_MOVERS_WINDOW_H) -> None:
+    """★2026-09-10:啟動時把 _oi_history 一次補回 window_h 小時,治「每次 redeploy 都啞12小時」。
+    病因:_oi_history 是純記憶體,而餵它的 refresh_top_movers_only 每小時才跑一次
+      → 要 12 個點(12小時)才算得出增幅 → 每推一次 code,OI增長榜就死12小時。
+      (寫檔救不了:`railway volume list` = No volumes,redeploy 就是全新容器。)
+    解法:OKX rubik `/rubik/stat/contracts/open-interest-history`(instId版,period=1H)
+      實測回 100 筆 = 99 小時,遠超需要的 12h。
+    ★單位對帳(實測,不是推測):該端點欄位 [3] 就是 oiUsd,與 /public/open-interest 的 oiUsd
+      同單位同量級(BTC 2,118,019,488 vs 2,117,618,198,差 0.02% 只是幾秒時間差)
+      → 可以直接填進 _oi_history,不需換算。
+    ★在背景 daemon thread 跑(實測 0.32 秒/支 × 約460支 ≈ 150秒),完全不擋主流程與掃描。
+    """
+    if _OI_BOOT["started"]: return
+    _OI_BOOT["started"] = True
+    def _run():
+        t0 = time.time(); filled = 0; miss = 0
+        # ★★用戶指正(2026-09-10):「你之前就有停打導致都沒訊號過」——
+        #   `_fetch_ls_taker` 的 rubik 熔斷(連續失敗8次→停打30分)害過 DH空/維加斯/逆勢多整段噤聲。
+        #   所以這裡監看的是**受害者的狀態**,不是我自己的失敗數:
+        #   ①開跑前:ls/taker 已在熔斷 → 直接不跑,別火上加油
+        #   ②跑的過程:只要 ls/taker 的失敗計數開始上升 → 立刻中止,把 rubik 額度讓回去
+        if time.time() < _LS_FAIL.get("skip_until", 0):
+            print("[OI-Boot] ls/taker 正在熔斷中,本次不補歷史(避免加重限流)", flush=True)
+            _OI_BOOT["done"] = True; return
+        _ls_base = _LS_FAIL.get("streak", 0)
+        try:
+            r = requests.get("https://www.okx.com/api/v5/public/open-interest",
+                             params={"instType": "SWAP"}, timeout=15)
+            # ★只補 oiUsd≥1M 的(實測 460支→216支,69秒)。理由有二:
+            #   ①OI 低於 1M 的幣本來就不該進掃描池(VLONG 教訓:CIEN 43K/根落在回測第0.2百分位)
+            #   ②少打一半 API = 少一半撞 OKX rubik 限流的機會(見下方節流說明)
+            insts = [x.get("instId", "") for x in r.json().get("data", [])
+                     if x.get("instId", "").endswith("-USDT-SWAP")
+                     and float(x.get("oiUsd") or 0) >= OI_BOOT_MIN_USD]
+        except Exception as e:
+            print(f"[OI-Boot] 取合約列表失敗,放棄補歷史(退回逐小時累積): {e}", flush=True)
+            _OI_BOOT["done"] = True; return
+        cutoff_ms = (time.time() - (window_h + 1) * 3600) * 1000
+        for inst in insts:
+            # ★受害者監看:ls/taker 一開始失敗就讓路(它的訊號比 OI 增長榜重要得多)
+            if (_LS_FAIL.get("streak", 0) > _ls_base + 1
+                    or time.time() < _LS_FAIL.get("skip_until", 0)):
+                print(f"[OI-Boot] ⚠️ 偵測到 ls/taker 開始失敗(streak={_LS_FAIL.get('streak')}),"
+                      f"立刻中止補歷史把 rubik 額度讓回去(已填 {filled} 幣)", flush=True)
+                break
+            try:
+                d = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/open-interest-history",
+                                           {"instId": inst, "period": "1H"})
+                # ★★節流:_fetch_ls_taker 有自己的熔斷(rubik 連續失敗8次→停打30分,
+                #   DH空/維加斯/逆勢多全部噤聲)。本函數若把 IP 打到限流就會連累它,
+                #   所以刻意壓到約 1.7 次/秒,而且失敗時退讓更久、連續失敗就整個放棄。
+                if not d:
+                    miss += 1
+                    if miss >= OI_BOOT_MAX_MISS:
+                        print(f"[OI-Boot] ⚠️ 連續/累計失敗 {miss} 次(可能限流),放棄補歷史保護 ls/taker",
+                              flush=True)
+                        break
+                    time.sleep(1.5); continue
+                miss = 0
+                pts = []
+                for row in d:                       # [ts, oi, oiCcy, oiUsd],新→舊
+                    try:
+                        ts_ms = float(row[0]); v = float(row[3])
+                    except (ValueError, TypeError, IndexError):
+                        continue
+                    if ts_ms < cutoff_ms or v <= 0: continue
+                    pts.append((ts_ms / 1000.0, v))
+                if len(pts) >= 2:
+                    pts.sort(key=lambda x: x[0])    # 轉成舊→新(與逐小時 append 的順序一致)
+                    _oi_history[inst] = pts
+                    filled += 1
+                time.sleep(OI_BOOT_SLEEP)
+            except Exception:
+                time.sleep(OI_BOOT_SLEEP); continue
+        _OI_BOOT.update(done=True, n=filled, ts=time.time())
+        print(f"[OI-Boot] ✅ 已補回 {filled}/{len(insts)} 幣的 {window_h}h OI 歷史,"
+              f"耗時 {time.time()-t0:.0f}s → OI增長榜不必再等12小時", flush=True)
+    Thread(target=_run, name="oi-bootstrap", daemon=True).start()
+    print(f"[OI-Boot] 背景補 {window_h}h OI 歷史中(約150秒,不擋掃描)...", flush=True)
+
+
 def _fetch_okx_oi_movers(top_n: int = OI_MOVERS_N, window_h: int = OI_MOVERS_WINDOW_H) -> list:
     """OKX全市場USDT永續OI批量查詢(一次API涵蓋~400個合約,跟漲跌幅榜同等級便宜),
     用內建歷史(_oi_history)算過去window_h小時OI%增幅,回傳增幅最大的top_n個inst_id。
     第一次呼叫(歷史不足window_h)回傳[](還沒有基準點可比,下一輪才有資料)。"""
     global _oi_history
+    _oi_bootstrap_history(window_h)   # ★內部有旗標,只會真的跑一次;背景補歷史不擋這裡
     try:
         r = requests.get("https://www.okx.com/api/v5/public/open-interest",
                          params={"instType": "SWAP"}, timeout=15)
@@ -7689,7 +7776,9 @@ def _fetch_okx_oi_movers(top_n: int = OI_MOVERS_N, window_h: int = OI_MOVERS_WIN
             pct = (latest_v - oldest_v) / oldest_v
             gains.append((inst, pct))
         if not gains:
-            print(f"[SYMBOLS] OI榜:歷史累積中(需{window_h}h),本輪暫無結果", flush=True)
+            _bs = ("補歷史尚未跑完(背景約150秒)" if not _OI_BOOT["done"]
+                   else f"補歷史已完成但只填到{_OI_BOOT['n']}幣,仍在逐小時累積")
+            print(f"[SYMBOLS] OI榜:無結果 —— {_bs}(需{window_h}h,追蹤{len(_oi_history)}幣)", flush=True)
             return []
         gains.sort(key=lambda x: x[1], reverse=True)
         top = [g[0] for g in gains[:top_n]]
