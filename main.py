@@ -6302,15 +6302,28 @@ class SykesTradingBot:
         # ★2026-06-15 空單regime閘(實盤診斷:6/7-13空169筆-29;6/8空51筆0%勝-17.8;但6/10跌日空76%勝+11.7)。
         #   crypto空=regime依賴(只在下跌賺,上漲日狂賠)。用「價在4H EMA50之下」=靈敏(單日下殺即跌破,抓6/10;
         #   持續上漲時價在EMA50上,擋6/8)。比EMA200斜率快=不會太晚、又不擋掉單日下殺的好空。非DH積極空單適用。
-        if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or is_engulf_short or (is_short and tf_id == "1H")):
+        # ★★2026-09-11 把**吞噬空**從本閘移除(其餘策略不動)。證據 `_chk_engulf_regime4h.py`:
+        #   同一批 live 觸發規格的訊號(n=376),本閘擋掉 80 筆(21.3%),而**被擋掉的反而是好單**——
+        #     無閘 n=376 EV+0.515 容錯17.2 總+193R
+        #     有閘 n=296 EV+0.468 容錯15.7 總+138R   ← 總R少28%
+        #     被擋的80筆 EV+0.688 容錯22.9 勝57% 正期6/6
+        #   四層裡三層變差(訓練16.3→9.9 / 驗證14.1→12.6 / 新幣12.0→9.9)。
+        #   想得通:吞噬空要的是「破前12根高之後的看跌吞噬」=**相對高位**,4H還在EMA50上正是這種位置;
+        #   它自己已經有 close<EMA100 這個回測驗過的 regime 條件,再疊慢速4H EMA50 是重複且有害。
+        #   ★本閘是 2026-06-15 憑**實盤169筆全部空單合計**的診斷加的,不是吞噬空專屬回測;
+        #     而我 0906 重做吞噬空(實體≥0.70)時漏了 grep main.py 核對防呆閘(CLAUDE.md 心法2),
+        #     導致 live 跑的規格 ≠ 我驗過的規格。用戶 2026-09-11 問「今天都沒什麼單」才翻出來。
+        #   ★弱點誠實記錄:被擋那80筆在訓練段/驗證段各自 n<25,單獨不算鐵證;
+        #     依據是主表四層對照(376 vs 296,樣本足)。
+        if (is_box_short or is_vegas_short or is_macd_short or is_oisq_short or (is_short and tf_id == "1H")):
             try:
                 _d4s = fetch_market_candles(okx_swap_symbol, "4H")
                 if not _d4s.empty and len(_d4s) > 60:
                     _e50s = _d4s["close"].ewm(span=50, adjust=False).mean()
                     _4h_dn = float(_d4s["close"].iloc[-1]) < float(_e50s.iloc[-1])   # 價在4H EMA50之下=下行
                     if not _4h_dn:
-                        print(f"[空regime閘] {symbol_item} 4H在EMA50之上(非下行)→擋積極空單")
-                        is_box_short = is_vegas_short = is_macd_short = is_oisq_short = is_engulf_short = False
+                        print(f"[空regime閘] {symbol_item} 4H在EMA50之上(非下行)→擋積極空單(吞噬空已豁免)")
+                        is_box_short = is_vegas_short = is_macd_short = is_oisq_short = False
                         if tf_id == "1H": is_short = False
             except Exception as _r4e:
                 print(f"[空regime閘] {symbol_item} 失敗(放行): {_r4e}")
