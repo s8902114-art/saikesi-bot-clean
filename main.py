@@ -2348,11 +2348,12 @@ def check_trailing_stops_for_real():
     #   OKX倉位端點限流(10次/2秒)→瞬斷回空→連2輪即誤判「倉位已關閉」把還開著的倉踢出追蹤池
     #   →trail/保本/時間停損全部失效(13天實證:31筆持倉>24h但時停只觸發2次、保本0次)。
     #   全查=1次API,既省限流又避免誤刪;查詢失敗時本輪完全不做移除判定(_pos_ok=False)。
-    _pos_set = set(); _pos_ok = False
+    _pos_set = set(); _pos_ok = False; _pos_n = 0   # ★_pos_n=真實倉數(每倉會放2個entry進_pos_set)
     try:
         for _p in ex.fetch_positions():
             if abs(float(_p.get("contracts") or 0)) > 0 and _p.get("side"):
                 _sym = _p.get("symbol"); _sd = _p.get("side")
+                _pos_n += 1
                 _pos_set.add((_sym, _sd))
                 # ★★2026-08-27 致命bug修復:ccxt fetch_positions 回的是**統一格式**('ONE/USDT:USDT'),
                 #   但追蹤池記的 trade["symbol"] 是 execute_okx_trade_pipeline 收到的 **instId**
@@ -2372,7 +2373,10 @@ def check_trailing_stops_for_real():
     except Exception as _fpe:
         print(f"[Trailing] 全倉查詢失敗(本輪不做移除判定): {_fpe}", flush=True)
     _okx_n = sum(1 for t in active_real_trades.values() if t.get("exchange") == "okx")
-    print(f"[Trailing] 追蹤池 OKX={_okx_n} 交易所實際持倉={len(_pos_set)} 查詢OK={_pos_ok}", flush=True)
+    # ★2026-09-10:原本印 len(_pos_set),但每個倉會放 2 個 entry(symbol+instId 兩種格式,見上方
+    #   0827 修復說明)→ 5個倉印成10,害我自己誤判「9個倉沒被追蹤」。改印真實倉數。
+    #   ★另注意:這裡的「實際持倉」含**手動單**,追蹤池只收 bot 單,兩者本來就不會相等。
+    print(f"[Trailing] 追蹤池 OKX={_okx_n} 交易所實際持倉={_pos_n}(含手動單) 查詢OK={_pos_ok}", flush=True)
 
     for trade_key in list(active_real_trades.keys()):
         trade     = active_real_trades[trade_key]
