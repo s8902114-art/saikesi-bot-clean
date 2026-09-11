@@ -3586,6 +3586,13 @@ _ENGULF_DIAG = {"呼叫":0, "K棒不足":0, "非下跌regime":0, "不在近12根
 # (3.38張/天)=手續費主要來源。/打架(GPT)也點名:「執行單純所以live不衰減」的豁免理由不成立(吞噬依賴收盤確認,
 # 最怕收盤延遲/跳空),應是首批停用而非例外。★但它live真R+0.130確實≈回測+0.106(唯一不衰減的策略),
 # 重開條件:前5支驗證完(live勝率回到45-50%)後,單獨放它回來再觀察20筆。原註:# 山寨看跌吞噬空(1H,2026-06-24 WF):放量吞噬+價<EMA100下跌regime。★2026-07-01忠實複刻重測(真main.py邏輯/7個不重疊期間23Q4~25H2/n=550):EV+0.176,7/7期全正,PF1.29,轉正式(拿掉觀察標籤)。限非主流山寨,純價量不碰OI/CVD,固定2R,SL近高。
+ENGULF_MIN_LIQ = 100_000.0   # ★2026-09-11 近96根1H USDT成交額中位下限 —— **補回 0906 回測規格裡本來就有、live 漏抄的閘**
+# 證據(_sim_engulf_exits.py + 濾網拆解,2026 live幣池重放 A窗05-01~09-11 / B窗01-10~03-10,固定2R):
+#   無此閘(=live) n=436 EV−0.049 / 有此閘 n=227 EV+0.081(A+0.038 B+0.159)
+#   **被擋掉的 n=209 EV−0.190 CI[−0.362,−0.005]**,兩窗皆負。
+#   ★先前用 vol×close 算會得到「兩窗方向相反」—— vol 是合約張數,那是單位錯。一律用 volCcyQuote。
+#   ★誠實記錄:補閘後剩下的 +0.081 CI 仍跨0;幣安老幣同邏輯 5~9月為 −0.094。此閘只證明「擋掉的是爛單」,
+#     不證明「剩下的在2026有edge」。
 def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
     """山寨看跌吞噬空(1H):①陰線吞噬前陽線實體 ②量>1.3×近24均量 ③收盤<EMA100(下跌regime) ④在近12根高附近(空頂部)。
     純價量,3個獨立時期樣本外複製超額vs隨機+0.15。注意:df已去掉未收盤當根,[-1]=最新已收盤。"""
@@ -3606,6 +3613,10 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
         va = float(np.mean(vol[-25:-1]))
         if not (va > 0 and vol[-1] > 1.3 * va):
             _ENGULF_DIAG["量不足"] += 1; return False, ""                            # 放量
+        # ★流動性閘(USDT尺度,補回回測規格):近96根已收盤1H的 USDT 成交額中位 ≥ ENGULF_MIN_LIQ
+        if "volCcyQuote" in df.columns:
+            if float(np.median(df["volCcyQuote"].values[-96:])) < ENGULF_MIN_LIQ:
+                _ENGULF_DIAG["流動性"] = _ENGULF_DIAG.get("流動性", 0) + 1; return False, ""
         # ★★進場品質閘(2026-09-06):吞噬K的**實體佔全棒幅比例** ≥ ENGULF_MIN_BODY
         #   用戶:「重點就不是改我的風險或熔斷,是你的勝率,進場不對就是輸」——他是對的。
         #   實體大 = 那根陰線是實打實收下來的,不是上下影線一堆的假動作。
