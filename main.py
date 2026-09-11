@@ -563,14 +563,23 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     if "維加斯大通道空" in s: bits.append("回測維加斯大通道被擋 + 1H空方共振 + CVD↓ + 散戶爆多(fade)")
     if "主力建" in s:      bits.append("12h窄幅壓縮 + 帶量突破 + OI升建倉 + 4H順向(主力建倉噴出)")
     if "BPR" in s:         bits.append("BPR失衡區重合回測中軸(固定1.5R)")
-    if "吞噬" in s:        bits.append("山寨看跌吞噬 + 放量 + EMA100下跌regime(固定2R)")
+    # ★2026-09-11 修策略名誤標(對帳時抓到):
+    #   ①S4H 的來源標籤「S4H做空(4h吞噬+…)」含「吞噬」→ 被印成吞噬空(XPL 4H 那張卡)
+    #   ②4JD 的「4J減速跌破空」含「4J」→ 被印成 4J結構回踩
+    #   ③VLONG「V成型吸收多」/ LL→LH 沒有對應 → 卡片只印「多頭趨勢」,08-31起12筆VLONG全被歸成「未知」
+    #   一律改成比對**完整標籤前綴**,不再用會互相包含的短字。
+    if "吞噬空" in s:      bits.append("山寨看跌吞噬 + 放量 + EMA100下跌regime + 流動性≥10萬U")
+    if "S4H做空" in s:     bits.append("S4H:4h看跌吞噬 + 趨勢線123 + 斐波0.382~0.618 + LL(固定2.5R)")
+    if "4J減速跌破空" in s: bits.append("4J減速跌破:2h位階 + 1H減速磨上去 + 跌破盤整低(2R + 0.8R保本)")
+    if "V成型吸收多" in s:  bits.append("V成型吸收:低點墊高 + 合約CVD低點降低(2.5R)")
+    if "LL→LH反彈空" in s:  bits.append("LL→LH 反彈斐波吞噬空")
     # ★2026-08-27:4J 上線當天漏了這條 → 第一筆live單(ONE 15m多)的訊號卡只印「多頭趨勢」,
     #   沒有策略名 → 之後對帳會把它算到別人頭上(CLAUDE.md 第12條踩過的坑:BPR空61筆被標成C3空)。
     #   帶上階梯(4H→30m / 2H→15m),否則兩階分不開。
-    if "4J" in s:
+    if "4J結構回踩" in s:
         _rg = ""
         if "(" in s and ")" in s:
-            _seg = s[s.find("4J"):]
+            _seg = s[s.find("4J結構回踩"):]
             if "(" in _seg and ")" in _seg:
                 _rg = _seg[_seg.find("(")+1:_seg.find(")")]
         bits.append(("4J" + (f"({_rg})" if _rg else "")
@@ -7821,6 +7830,16 @@ def _fetch_okx_oi_movers(top_n: int = OI_MOVERS_N, window_h: int = OI_MOVERS_WIN
                    else f"補歷史已完成但只填到{_OI_BOOT['n']}幣,仍在逐小時累積")
             print(f"[SYMBOLS] OI榜:無結果 —— {_bs}(需{window_h}h,追蹤{len(_oi_history)}幣)", flush=True)
             return []
+        # ★2026-09-11 補「只留加密貨幣」濾網(底池/漲跌幅榜 09-04 就有,這個來源漏了)。
+        #   實際事故:SNXX(instCategory=3 股票代幣)經 OI增長榜進池,吞噬空在 09-11 14:09 真的開了空單。
+        #   以前每次 redeploy OI榜要空轉12h才有結果所以少見;5039d43 啟動補歷史後立刻生效,漏洞被放大。
+        #   抓失敗回空集合 = 不過濾(與另外兩個來源一致)。
+        _crypto_oi = _okx_crypto_symbols()
+        if _crypto_oi:
+            _n0 = len(gains)
+            gains = [g for g in gains if g[0].replace("-USDT-SWAP", "") in _crypto_oi]
+            if len(gains) < _n0:
+                print(f"[SYMBOLS] OI增長榜:排除 {_n0 - len(gains)} 支非加密(股票/商品)", flush=True)
         gains.sort(key=lambda x: x[1], reverse=True)
         top = [g[0] for g in gains[:top_n]]
         print(f"[SYMBOLS] OKX OI增長榜:前{len(top)}名(window={window_h}h,追蹤{len(_oi_history)}幣)", flush=True)
