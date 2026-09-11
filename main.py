@@ -712,7 +712,10 @@ def fetch_market_candles(inst_id: str, timeframe_bar: str, fetch_limit: int = WA
 
     sorted_candles = sorted(raw_candles, key=lambda x: int(x[0]))
     df = pd.DataFrame(sorted_candles, columns=["ts", "open", "high", "low", "close", "vol", "volCcy", "volCcyQuote", "confirm"])
-    for col in ["open", "high", "low", "close", "vol"]:
+    # ★2026-09-11 加 volCcyQuote(=USDT成交額)。OKX 的 "vol" 是**合約張數**,不是幣數;
+    #   張數×收盤價 ≠ 成交額,誤差倍數=合約面值ctVal(BTC 0.01→高估100倍、WLFI 10→低估10倍、PEPE 1e7)。
+    #   S4H/4JD 的流動性閘原本用 vol×close,尺度跟回測(幣安 vol=幣數)對不上。
+    for col in ["open", "high", "low", "close", "vol", "volCcyQuote"]:
         df[col] = df[col].astype(float)
     df["ts"] = pd.to_datetime(df["ts"].astype(np.int64), unit="ms", utc=True)
     df.set_index("ts", inplace=True)
@@ -4233,13 +4236,13 @@ def _s4h_deep_candles(inst_id: str, df_recent: pd.DataFrame) -> pd.DataFrame:
                 k = k[k["confirm"] == "1"]
                 idx = pd.to_datetime(k["ts"].astype("int64"), unit="ms", utc=True)
                 cur = pd.DataFrame({c: k[c].astype(float).values
-                                    for c in ("open", "high", "low", "close", "vol")}, index=idx)
+                                    for c in ("open", "high", "low", "close", "vol", "volCcyQuote")}, index=idx)
                 cur = cur.sort_index()
             except Exception as e:
                 print(f"[S4H] {inst_id} 深抓解析失敗: {e}"); cur = None
     if cur is None: return df_recent
     try:
-        keep = [c for c in ("open", "high", "low", "close", "vol") if c in df_recent.columns]
+        keep = [c for c in ("open", "high", "low", "close", "vol", "volCcyQuote") if c in df_recent.columns]
         merged = pd.concat([cur, df_recent[keep]])
         merged = merged[~merged.index.duplicated(keep="last")].sort_index().tail(S4H_DEEP_BARS)
         _S4H_KL_CACHE[inst_id] = merged
@@ -4267,7 +4270,12 @@ def _check_s4h_short(symbol_item: str, okx_swap_symbol: str):
         if not (cl[i] < op[i] and cl[i-1] > op[i-1] and op[i] >= cl[i-1] and cl[i] <= op[i-1]):
             _S4H_DIAG["非吞噬"] += 1; return False, "", 0.0
         _sl_i = max(0, i - 23)
-        if float(np.median(vol[_sl_i:i+1] * cl[_sl_i:i+1])) < S4H_MIN_LIQ:
+        # ★2026-09-11 改用 volCcyQuote(USDT成交額)。原本 vol×close 的 vol 是 OKX **合約張數**,
+        #   尺度隨合約面值錯 0.01~1e7 倍,跟回測(幣安 vol=幣數)對不上。
+        #   重放 2026-05~09 live幣池(_replay_win_ct.py):張數版 n=78 EV+0.058 → USDT版 n=121 EV+0.148;
+        #   被舊閘誤放的11筆 EV−0.705、被誤擋的54筆 EV+0.101。1~3月窗兩版相當(+0.81/+0.79)。
+        _turn = (df["volCcyQuote"].values if "volCcyQuote" in df.columns else vol * cl)
+        if float(np.median(_turn[_sl_i:i+1])) < S4H_MIN_LIQ:
             _S4H_DIAG["流動性"] += 1; return False, "", 0.0
         # ── ② 趨勢線 123（近 6 根 = 24h 內成立過） ──
         z123 = _s4h_scan_123_short(hi, lo, cl, op)
@@ -4388,7 +4396,12 @@ def _fourjd_signal(d1: pd.DataFrame, d2: pd.DataFrame):
     k = np.searchsorted((d2.index + pd.Timedelta("2h")).values,
                         (d1.index + pd.Timedelta("1h")).values, side="right") - 1
     AD = _fourjd_adx(hi, lo, cl)
-    med = pd.Series(vol * cl).rolling(96).median().values
+    # ★2026-09-11 成交額改用 volCcyQuote(USDT)。vol 是 OKX 合約張數,vol×close 尺度隨合約面值錯 0.01~1e7 倍。
+    #   ★誠實記錄:這刀對 4JD 不是純改善 —— 重放 2026-05~09 張數版 n=61 EV−0.029 → USDT版 n=89 EV−0.144
+    #   (多出的34筆 −0.270);1~3月窗 n=20 +0.870 → n=29 +0.762(多出的9筆 +0.535)。兩窗方向相反。
+    #   仍改的理由:回測驗證的門檻是 USDT 尺度,張數版是**從沒被驗證過的規格**。
+    _turn = d1["volCcyQuote"].values if "volCcyQuote" in d1.columns else vol * cl
+    med = pd.Series(_turn).rolling(96).median().values
     vmed = pd.Series(vol).rolling(96).median().shift(1).values
     tgt = n - 1                                   # 只關心最後一根(已收盤)
     act: Dict[int, dict] = {}; seen = set(); last_fire = -10 ** 9
