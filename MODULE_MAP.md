@@ -70,6 +70,32 @@ saikesi-bot-clean/
 | ★熔斷 | `def _fourjd_record_result` | 連續吃滿停損8筆自動停；呼叫點在 `[Trailing] ... 倉位已關閉` 那段 |
 | 出場模式 | `fourjd_2r` | 整倉TP 2R＋浮盈0.8R保本；OKX/BingX下單管線與保本邏輯共6處分支 |
 
+### ★突破回踩做空 BOR（2026-09-13，4h 判定與進場）
+
+| 元件 | 定位字串（Grep） | 重點 |
+|---|---|---|
+| 常數區 | `BOR_SHORT_ENABLED` | LOOK96/SKIP8/WAIT24/TOL0.4%/GIVE1%/TP **1.0R**/冷卻4根4h/每日上限5 |
+| ★停損距上限 | `BOR_MAX_SL_PCT` | **8%**。live 的 `MAX_SL=12%` 會放行回測沒測過的 8~12%，所以策略自己設 |
+| ★判定核心 | `def _bo_retest_signal` | 逐根重放狀態機 IDLE→BROKE→RETEST→進場；手抄自 `_bt_bo_retest.signals`（short/engulf/retest_low） |
+| 對外入口 | `def _check_bor_short` | 自己抓 4H 300 根，不吃外面的 df；只在最新**已收盤**根成立時進場 |
+| 熔斷 | `def _bor_record_result` | 連續 20 筆吃滿停損自動停（回測最長 14）；呼叫點在 `[BOR] ... 出場判定` |
+| 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
+| ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
+| 出場模式 | `bor_1r` | 不在任何出場族 tuple → 行為等同 `""`（TP1=TP2 同價＝等效全平），與 S4H 同 |
+| 回測腳本 | `_bt_bo_retest.py` | 12期四層；對拍 `_chk_bo_port.py`（80檔/200訊號/**0 不一致**） |
+
+**熔斷判準（2026-09-13，兩條路都走不通後才定的）**：
+- ❌ 4JD 的 `tp1_hit=False ⇒ 吃滿停損`：它成立是因為 4JD 有 0.8R 保本、賺的單必定先經過。
+  BOR 沒有保本且 TP1=TP2 都在 1R，倉位一次全平後剩餘量歸零、移保本那段 `if new_algo_id:`
+  不會成立 → **賺錢出場也會是 `tp1_hit=False`**，照抄會把贏單算成連虧。
+- ❌ 查 `orders-algo-pending` 看停損單還在不在：倉位關閉時系統本來就會撤停損殘單
+  （`_cancel_okx_algo_order` 共 14 處呼叫，2440/2465/2477 就在移除追蹤那一帶），
+  「不在 pending」無法區分是被觸發還是被自己撤掉。
+- ✅ **幾何判準**：BOR 只做空，TP 在進場價下方 1R、SL 在上方 1R，對稱夾住進場價
+  → 倉位消失時 `現價 ≥ 進場價 ⇒ 停損側`、`< 進場價 ⇒ 獲利側`。
+  誤判邊界：關倉後到抓價之間（數秒）價格剛好穿越進場價；抓價失敗**一律不計數**
+  （寧可漏算也不要誤觸熔斷）。每次判定都印 `[BOR] ... 出場判定 現價 vs 進場` 供事後對帳。
+
 **驗證腳本**（上層 `trading-backtest/`）：`_chk_4jd_port.py`（移植對拍264/264）、
 `_chk_4jd_exec.py`（exec實跑＋熔斷）、`_chk_4jd_win2.py`（2h視窗深度）、
 `_chk_scope.py`（★作用域檢查器，補 `_chk_names.py` 抓不到的局部變數遮蔽）

@@ -570,6 +570,7 @@ def _entry_reason(source_tag: str, side: str, tf: str, dh_boost: float) -> str:
     #   一律改成比對**完整標籤前綴**,不再用會互相包含的短字。
     if "吞噬空" in s:      bits.append("山寨看跌吞噬 + 放量 + EMA100下跌regime + 流動性≥10萬U")
     if "S4H做空" in s:     bits.append("S4H:4h看跌吞噬 + 趨勢線123 + 斐波0.382~0.618 + LL(固定2.5R)")
+    if "突破回踩空" in s:   bits.append("突破回踩:4h收盤跌破前低 → 反彈回測前低(壓力支撐互換) → 看跌吞噬才進(固定1R)")
     if "4J減速跌破空" in s: bits.append("4J減速跌破:2h位階 + 1H減速磨上去 + 跌破盤整低(2R + 0.8R保本)")
     if "V成型吸收多" in s:  bits.append("V成型吸收:低點墊高 + 合約CVD低點降低(2.5R)")
     if "LL→LH反彈空" in s:  bits.append("LL→LH 反彈斐波吞噬空")
@@ -2423,6 +2424,29 @@ def check_trailing_stops_for_real():
                         _fourjd_record_result(not bool(trade.get("tp1_hit")))
                     except Exception as _fre:
                         print(f"[4JD] 熔斷計數失敗: {_fre}")
+                elif trade.get("exit_strategy") == "bor_1r":
+                    # ★突破回踩空 熔斷計數(2026-09-13)。
+                    # ★★不能照抄 4JD 的 tp1_hit 判準:BOR **沒有保本**且 TP1=TP2 都在 1R,
+                    #   倉位一次全平後剩餘量歸零 → 上面「TP1成交→移保本」那段的 `if new_algo_id:`
+                    #   不會成立 → **賺錢出場也是 tp1_hit=False**,照抄會把贏單算成連續吃滿停損。
+                    # ★也不能用 algo pending 判「停損單還在不在」:倉位關閉時系統本來就會撤停損殘單
+                    #   (本檔 _cancel_okx_algo_order 共14處呼叫,2440/2465/2477 就在這一帶),
+                    #   「不在 pending」無法區分是被觸發還是被我們自己撤掉。
+                    # ★用幾何判準:BOR 只做空,TP 在進場價**下方** 1R、SL 在**上方** 1R,
+                    #   兩者對稱夾住進場價 → 現價 ≥ 進場價 ⇒ 停損側出場;現價 < 進場價 ⇒ 獲利側出場。
+                    # ★誤判邊界:倉位關閉後到抓價之間(數秒)價格剛好穿越進場價會判錯;
+                    #   抓價失敗一律**不計數**(寧可漏算也不要誤觸熔斷)。判定值印進 log 供事後對帳。
+                    try:
+                        _bor_ep = float(trade.get("entry_price") or 0)
+                        _bor_cp = float(ex.fetch_ticker(symbol).get("last") or 0)
+                        if _bor_ep > 0 and _bor_cp > 0:
+                            _bor_is_sl = bool(_bor_cp >= _bor_ep)
+                            print(f"[BOR] {name} 出場判定 現價{_bor_cp:.6g} vs 進場{_bor_ep:.6g}"
+                                  f" → {'吃滿停損' if _bor_is_sl else '獲利出場'}"
+                                  f" (連虧{_BOR_RISK['consec_sl']}/{BOR_MAX_CONSEC_SL})", flush=True)
+                            _bor_record_result(_bor_is_sl)
+                    except Exception as _bre:
+                        print(f"[BOR] 熔斷計數失敗(本筆不計數): {_bre}")
                 active_real_trades.pop(trade_key, None); save_active_trades()
                 continue
             if trade.get("_pos_miss"):
@@ -4550,6 +4574,142 @@ def _fourjd_record_result(is_full_stop: bool):
         _FOURJD_RISK["consec_sl"] = 0
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ★★突破回踩做空 (BOR = Breakout-Retest, 2026-09-13 上線) —— 4h 判定與進場
+# ══════════════════════════════════════════════════════════════════════════════
+# 來源:用戶 2026-09-13 定調「追價不是不行 但不能追在進了就等停損那種／
+#   **進單要嘛支撐進要嘛突破回測進**」。V成型做多已經是「支撐進」(停損=第二個低點=支撐),
+#   「跌破前低 → 反彈回測前低(支撐壓力互換) → 才進」在系統裡完全沒有。
+# 規格對齊已固化的官方/講者規格,沒有自己發明的係數:
+#   4J「實體K突破針尖後等回踩支撐或壓力」→ 跌破用**收盤**不是影線;
+#   0831「停損=回踩前的前一個低點」(做空鏡像=反彈段最高點);
+#   0830 bug③「突破偵測要用**前一根**算的位階」→ 前低用 i-LOOK-SKIP : i-SKIP 算。
+# ── 驗收(12期四層,逐根重放,含費0.1%往返,腳本 _bt_bo_retest.py) ──────────────────
+#   ★凍結流程(0828教訓:用全期挑會挑錯):只用訓練段(23Q4~24Q3)**勝率**選 TP
+#     (用戶第一訴求是勝率)→ 選到 TP1.0R(訓練勝58%),凍結後樣本外
+#     **驗證+0.142 / 新幣+0.196 / 2022+0.232 三層全正**。
+#     (改用訓練段EV選會選到TP3.0R → 驗證段−0.005 掛掉,那才是選樣偏差)
+#   合計 n=724 勝**61%** EV+0.191 容錯9.6 中位**+0.96R** 吃滿停損39% 正期9/11 頻率≈3.5筆/週
+#   block bootstrap(按天) 95%CI [+0.076,+0.300] P(EV>0)=99.9%
+#   去尾1%平均+0.196(**不是樂透結構**)、前5大單只佔總R 4%、打亂順序3000次 MDD中位10.0%/p95 14.9%
+#   成本敏感度:往返再+0.20% 仍 EV+0.144(停損距中位4.23%,不是薄停損)
+#   時框階梯(單調,對上手冊「支撐壓力型時框越大越好」):15m+0.017 / 1h+0.011 / 2h+0.017 / **4h+0.220**
+#   live視窗深度:截成300根4h重算 **161/161 = 100%** 重現(門檻100%)
+#   重疊率 vs 1H吞噬空 **1.9%**(非重複下注);回測84幣 / live掃79幣 = 涵蓋率約100%
+# ── 已知弱點(不粉飾) ──────────────────────────────────────────────────────────
+#   22H2熊 EV−0.092(n=77,真弱期);24Q1 −0.191(n=12,低於自訂 n<20 線=只算線索);最長連虧 14 筆。
+#   ★做多側**同等力度測過全負**(TP1.0/1.5/2.5 × tol/wait/look/give 共7配置,
+#     EV−0.058~−0.140、2022層每格都負) → 本策略**只做空**,不硬掛負EV做多湊「多空都要有」。
+#   ★「回踩深度≥N%」當進場閘**不加**:勝率52→56% 但 block bootstrap CI 每檔都含0
+#     (下界−0.007~−0.030),且頻率 3.5→1.6 筆/週 = 拿頻率換帳面勝率。
+BOR_SHORT_ENABLED = True
+BOR_LOOK        = 96      # 前低回看根數(4h)
+BOR_SKIP        = 8       # 前低排除最近幾根(確保「前低」是真的舊結構,不是剛形成的)
+BOR_WAIT        = 24      # 跌破後等回測的上限根數,超過就作廢
+BOR_TOL         = 0.004   # 回測觸及容差(反彈高點碰到 前低×(1-tol) 即算觸及)
+BOR_GIVE        = 0.01    # 反彈收盤超過 前低×(1+give) = 跌破失敗,放棄這個結構
+BOR_SL_BUF      = 0.001   # 停損 buffer
+BOR_MAX_SL_PCT  = 8.0     # ★停損距上限:回測樣本最大 7.99%,而 live 的 MAX_SL=12% 會放行
+                          #   我**沒測過**的 8~12% 區間 → 策略自己設 8%(否則凍結規格沒被執行)
+BOR_TP_R        = 1.0     # TP 1R 全平(訓練段勝率選出來的;2.5R/3R 的EV更高但勝率掉到38/34%、中位−1.02R)
+BOR_COOLDOWN_BARS = 4     # 同幣冷卻 4 根 4h(對齊回測 driver 的 COOLDOWN["4h"]=4)
+BOR_DAILY_CAP   = 5       # 每日新倉上限(叢集風控:回測一天最多13筆、≥5筆的有43天)
+# ★熔斷(CLAUDE.md 第11條:觀察條款必須寫成代碼 —— BPR 就是栽在只寫註解)
+BOR_MAX_CONSEC_SL = 20    # 回測最長連虧 14 筆 → 連續 20 筆吃滿停損自動停用等人工複查
+_BOR_DIAG = {"呼叫":0, "K棒不足":0, "無訊號":0, "停損無效":0, "停損過寬":0,
+             "冷卻":0, "每日上限":0, "熔斷":0, "成立":0}
+_BOR_LAST_BAR: Dict[str, int] = {}
+_BOR_DAY = {"day": "", "count": 0}
+_BOR_RISK = {"consec_sl": 0, "halted": False}
+
+
+def _bo_retest_signal(df: pd.DataFrame):
+    """★逐根重放狀態機(手抄自回測 `_bt_bo_retest.signals`,side=short/trig=engulf/sl_mode=retest_low)。
+    回傳 [(i, 進場價, 停損價, 前低PH, 反彈高度%)]。
+    df 必須是**已收盤**的 4h —— `fetch_market_candles` 結尾是 `iloc[:-1]`,已去掉未完成那根。
+    ★對拍:`_chk_bo_port.py` 拿這支跟回測 lib 在同一批 pkl 上逐根比對(S4H 標準:0 不一致才准推)。
+    狀態機:IDLE --收盤跌破前低--> BROKE --反彈觸及前低--> RETEST --看跌吞噬--> 進場
+    """
+    hi = df["high"].values.astype(float); lo = df["low"].values.astype(float)
+    op = df["open"].values.astype(float); cl = df["close"].values.astype(float)
+    n = len(cl); out = []
+    st = "IDLE"; PH = 0.0; t0 = -1; r_i = -1; done = None; done_i = -10 ** 9
+    for i in range(BOR_LOOK + BOR_SKIP + 2, n):
+        lvl = float(np.min(lo[i - BOR_LOOK - BOR_SKIP:i - BOR_SKIP]))   # ★用前一根為止的資料算
+        if st == "IDLE":
+            # ★同一個跌破只做一次;done 只保留 BOR_WAIT*4 根就淘汰 ——
+            #   不淘汰會讓「回測全窗」與「live 最近300根」的狀態不同(實測會漏 1/94 筆訊號)
+            if done is not None and i - done_i <= BOR_WAIT * 4 and lvl >= done * 0.995:
+                continue
+            if cl[i] < lvl:
+                st = "BROKE"; PH = lvl; t0 = i; r_i = -1
+            continue
+        if i - t0 > BOR_WAIT:
+            st = "IDLE"; done = PH; done_i = i; continue      # 等不到回測 → 作廢
+        if st == "BROKE":
+            if hi[i] >= PH * (1 - BOR_TOL):
+                st = "RETEST"; r_i = i                        # ★記回測起始根,停損從這裡起算
+            continue
+        if cl[i] > PH * (1 + BOR_GIVE):
+            st = "IDLE"; done = PH; done_i = i; continue      # 反彈太high=跌破失敗
+        if not (cl[i] < op[i] and cl[i] < lo[i - 1] and op[i] >= cl[i - 1]):
+            continue                                          # 等看跌吞噬
+        e = float(cl[i]); rhi = float(np.max(hi[r_i:i + 1]))
+        sl = rhi * (1 + BOR_SL_BUF)                           # 停損=回測段最高點
+        st = "IDLE"; done = PH; done_i = i
+        if sl > e and (sl - e) / e * 100 <= BOR_MAX_SL_PCT:
+            out.append((i, e, sl, PH, (rhi - PH) / PH * 100))
+    return out
+
+
+def _check_bor_short(symbol_item: str, okx_swap_symbol: str):
+    """突破回踩做空。回傳 (是否成立, 原因, 停損價)。★自己抓 4H,不吃外面傳進來的 df。"""
+    if not BOR_SHORT_ENABLED: return False, "", 0.0
+    if _BOR_RISK["halted"]:
+        _BOR_DIAG["熔斷"] += 1; return False, "", 0.0
+    try:
+        _BOR_DIAG["呼叫"] += 1
+        df = fetch_market_candles(okx_swap_symbol, "4H", 300)
+        if df is None or df.empty or len(df) < BOR_LOOK + BOR_SKIP + BOR_WAIT + 4:
+            _BOR_DIAG["K棒不足"] += 1; return False, "", 0.0
+        n = len(df)
+        cur = [s for s in _bo_retest_signal(df) if s[0] == n - 1]   # ★只在最新已收盤根成立時進場
+        if not cur:
+            _BOR_DIAG["無訊號"] += 1; return False, "", 0.0
+        i, e, sl, PH, deep = cur[0]
+        d = (sl - e) / e
+        if d < MIN_SL_PCT:
+            _BOR_DIAG["停損無效"] += 1; return False, "", 0.0
+        if d * 100 > BOR_MAX_SL_PCT or d > MAX_SL:
+            _BOR_DIAG["停損過寬"] += 1; return False, "", 0.0
+        _bar_ts = int(df.index[i].timestamp())
+        if _bar_ts - _BOR_LAST_BAR.get(okx_swap_symbol, 0) < BOR_COOLDOWN_BARS * 14400:
+            _BOR_DIAG["冷卻"] += 1; return False, "", 0.0
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if _BOR_DAY["day"] != _today: _BOR_DAY.update(day=_today, count=0)
+        if _BOR_DAY["count"] >= BOR_DAILY_CAP:
+            _BOR_DIAG["每日上限"] += 1; return False, "", 0.0
+        _BOR_LAST_BAR[okx_swap_symbol] = _bar_ts
+        _BOR_DAY["count"] += 1
+        _BOR_DIAG["成立"] += 1
+        return True, f"突破回踩空(跌破前低{PH:.6g}→反彈回測+{deep:.2f}%→看跌吞噬)", float(sl)
+    except Exception as ex:
+        print(f"[BOR-Short] {symbol_item} 判斷失敗: {ex}")
+        return False, "", 0.0
+
+
+def _bor_record_result(is_full_stop: bool):
+    """★熔斷計數:連續吃滿停損達 BOR_MAX_CONSEC_SL → 自動停用(寫成代碼,不是註解)。"""
+    if is_full_stop:
+        _BOR_RISK["consec_sl"] += 1
+        if _BOR_RISK["consec_sl"] >= BOR_MAX_CONSEC_SL and not _BOR_RISK["halted"]:
+            _BOR_RISK["halted"] = True
+            dc_log(f"🛑 **突破回踩空 自動熔斷**:連續吃滿停損 {_BOR_RISK['consec_sl']} 筆"
+                   f"(回測最長 14 筆,門檻 {BOR_MAX_CONSEC_SL})。已停止開新倉,需人工複查後重開。")
+    else:
+        _BOR_RISK["consec_sl"] = 0
+
+
 MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
 # 舊腳本(_bt_mtf_bias_concept.py / _bt_mtf_gate_on_strats.py) 用 pandas resample 後 reindex(method="ffill"),
 # 而 resample 的索引是K棒的**起始**時間 → 當天的每個小時就已經用到當天日線的最終收盤。
@@ -5954,6 +6114,22 @@ class SykesTradingBot:
             except Exception as _s4e:
                 print(f"[S4H-Short] {symbol_item} 判斷失敗: {_s4e}")
 
+        # ── ★突破回踩做空(4h,2026-09-13上線)：獨立訊號源,不覆寫既有 is_short ──
+        #   跟 S4H 一樣是 4h 進場,而 4H 的 AUTO_TRADE 是 False(僅通知)→
+        #   靠下方 `_bor_only` 專屬旁路放行,不會順帶把其他 4H 訊號開成自動下單。
+        is_bor_short = False; _bor_sl = 0.0; _bor_r = ""
+        if BOR_SHORT_ENABLED and tf_id == "4H":
+            try:
+                is_bor_short, _bor_r, _bor_sl = _check_bor_short(symbol_item, okx_swap_symbol)
+                if _BOR_DIAG["呼叫"] % 50 == 0:
+                    print(f"[BOR-Short儀表] {_BOR_DIAG} 今日{_BOR_DAY['count']}/{BOR_DAILY_CAP} "
+                          f"連虧{_BOR_RISK['consec_sl']}/{BOR_MAX_CONSEC_SL}"
+                          f"{' 🛑已熔斷' if _BOR_RISK['halted'] else ''}", flush=True)
+                if is_bor_short:
+                    print(f"[BOR-Short] {symbol_item} {_bor_r} sl={_bor_sl:.6g}", flush=True)
+            except Exception as _boe:
+                print(f"[BOR-Short] {symbol_item} 判斷失敗: {_boe}")
+
         # ── ★4J減速跌破做空(1H,2026-09-10上線)：位階2h/判定與進場1H,獨立訊號源 ──
         #   自己抓 1H+2H(不吃外面的 df),整段狀態機每輪重建(不跨輪保存,redeploy不會歸零)。
         #   移植對拍 264/264 一致、停損價0不一致、4032根負樣本0假陽性(_chk_4jd_port.py)。
@@ -6406,7 +6582,7 @@ class SykesTradingBot:
 
         # 合併：C3 或 雙底 或 共振 或 MACD 任一成立即可觸發
         combined_long  = is_long  or is_double_bottom or is_reson_long  or is_macd_long or is_oisq_long or is_conv_long or is_bpr_long or is_4j_long or is_vlong
-        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short or is_s4h_short or is_fourjd_short
+        combined_short = is_short or is_double_top   or is_reson_short or is_macd_short or is_dh_short or is_box_short or is_vegas_short or is_oisq_short or is_engulf_short or is_bpr_short or is_4j_short or is_llh_short or is_s4h_short or is_fourjd_short or is_bor_short
 
         if not combined_long and not combined_short:
             return
@@ -6440,6 +6616,7 @@ class SykesTradingBot:
             if is_dh_short:      _signal_source.append("數據獵手空")
             if is_llh_short:     _signal_source.append("LL→LH反彈空")
             if is_s4h_short:     _signal_source.append("S4H做空(4h吞噬+123+斐波+LL)")
+            if is_bor_short:     _signal_source.append("突破回踩空(4h跌破前低+回測+吞噬)")
             if is_fourjd_short:  _signal_source.append("4J減速跌破空(2h位階+1H減速+跌破盤整低)")
             if is_box_short:     _signal_source.append("箱突破空")
             if is_vegas_short:   _signal_source.append("維加斯大通道空")
@@ -6470,6 +6647,13 @@ class SykesTradingBot:
             #   回測:無保本 吃滿停損51.9% → 0.8R保本 30.5%,容錯 12.5→13.8。
             exit_strategy = "fourjd_2r"
             _strat_ts_h = -1         # ★不設時間停損:回測沒設(進場後最多走400根)
+        elif is_bor_short:
+            # ★BOR:固定 1R 全平(TP override 見下方 SL/TP 區塊)。
+            #   標記 "bor_1r" **不在**任何出場族 tuple 裡(box_trend/hf_1r/fourjd_2r/line_*/swing_*)
+            #   → 出場行為等同 ""(分批 TP1/TP2,但兩段同價 = 等效全平),與 S4H 一致;
+            #   取這個名字只為了倉位消失時能識別是哪個策略(熔斷計數要用)。
+            exit_strategy = "bor_1r"
+            _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設
         elif is_s4h_short:
             exit_strategy = ""       # S4H:固定 2.5R 全平(TP override 見下方 SL/TP 區塊)
             _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設,設了 12h 預設就不是同一個規格
@@ -6593,6 +6777,8 @@ class SykesTradingBot:
         else:
             if is_fourjd_short and _fjd_sl > 0:
                 calculated_sl = round(float(_fjd_sl), 8)   # ★4J減速跌破:停損=盤整區最高點×1.0015(對齊回測,移植對拍0不一致)
+            elif is_bor_short and _bor_sl > 0:
+                calculated_sl = round(float(_bor_sl), 8)   # ★BOR:停損=回測段最高點×1.001(對齊回測 sl_mode="retest_low" 的做空鏡像)
             elif is_s4h_short and _s4h_sl > 0:
                 calculated_sl = round(float(_s4h_sl), 8)   # ★S4H:停損=最近一個在進場價上方的已確認樞紐高×1.001(對齊回測 struct_sl)
             elif is_llh_short and _llh_sl > 0:
@@ -6615,6 +6801,9 @@ class SykesTradingBot:
             if is_fourjd_short and _fjd_sl > 0:
                 # ★4J減速跌破:2R 全平,對齊回測(用戶要求至少2R;滾動前推 TP2.0 選中 9/9)
                 tp1_target = tp2_target = current_close - risk_dist * FOURJD_TP_R
+            elif is_bor_short and _bor_sl > 0:
+                # ★BOR:1R 全平,對齊回測(不分批、**不設時間停損**)
+                tp1_target = tp2_target = current_close - risk_dist * BOR_TP_R
             elif is_s4h_short and _s4h_sl > 0:
                 # ★S4H:2.5R 全平,對齊回測(不分批、**不設時間停損**)
                 tp1_target = tp2_target = current_close - risk_dist * S4H_TP_R
@@ -6769,7 +6958,10 @@ class SykesTradingBot:
         #   但 S4H 的凍結規格本來就是 4h 進場。這裡**只**在「S4H 是唯一觸發來源」時放行,
         #   絕不因此把其他 4H 訊號(C3/雙頂/MACD…)一起開成自動下單。
         _s4h_only = bool(is_s4h_short and _signal_source == ["S4H做空(4h吞噬+123+斐波+LL)"])
-        if AUTO_TRADE.get(tf_id) or _s4h_only:
+        # ★BOR 專屬旁路(2026-09-13):同 S4H —— 4H 在 AUTO_TRADE 是 False,但 BOR 的凍結規格
+        #   本來就是 4h 進場。只在「BOR 是唯一觸發來源」時放行。
+        _bor_only = bool(is_bor_short and _signal_source == ["突破回踩空(4h跌破前低+回測+吞噬)"])
+        if AUTO_TRADE.get(tf_id) or _s4h_only or _bor_only:
             try:
                 daily_report.record_entry(symbol_item, tf_id, direction, signal_source_tag or exit_strategy)
             except Exception:
