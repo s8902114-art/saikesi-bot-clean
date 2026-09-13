@@ -154,6 +154,27 @@ OKX_DEMO = False  # 是否啟用 OKX 模擬盤交易環境
 BINGX_API_KEY    = os.environ.get("BINGX_API_KEY", "")
 BINGX_SECRET_KEY = os.environ.get("BINGX_SECRET_KEY", "")
 BINGX_BASE       = "https://open-api.bingx.com"
+# ★2026-09-14 OKX 與 BingX 同一個幣名字不同 → 原本直接 "MON/USDT"→"MON-USDT" 找不到就判「BingX不支援」靜默跳過。
+#   用戶指正「bingx有mon好嗎」:BingX 叫 MONAD-USDT。對照 OKX 464 個 USDT 永續 vs BingX 1216 合約,
+#   名字不同的候選 16 個,**用兩邊即時價格驗證**(比值 1.000±0.1% 才算同一個幣):
+#   ✅同幣同價位 6 個(下表);❌不同幣 5 個(LIGHT≠LIGHTER、MET≠METIS、NET≠NETNET、PENG≠PENGU、RAM≠RAMSES,絕不能對應)。
+#   ⚠️ 1000BONK/1000PEPE/1000SHIB/10000SATS 價格單位差 1000~10000 倍,下單價/停損/追蹤都要換算,**刻意不放**(另案);
+#   XAU→XAUT 是商品,幣池已排除。只收「價格單位相同」的,因為倉位追蹤用 OKX 報價(trade["symbol"])算停損。
+BINGX_SYMBOL_ALIAS = {"MON": "MONAD", "AEON": "AEONBSC", "EDGE": "EDGEX", "GRAM": "GRAMTON",
+                      "NEIRO": "NEIROCTO", "TRUMP": "TRUMPSOL"}
+BINGX_SYMBOL_ALIAS_REV = {v: k for k, v in BINGX_SYMBOL_ALIAS.items()}
+
+
+def _to_bingx_symbol(symbol_id: str) -> str:
+    """OKX/ccxt 幣名(MON/USDT) → BingX 合約名(MONAD-USDT)"""
+    base, _, quote = symbol_id.replace("-", "/").partition("/")
+    return f"{BINGX_SYMBOL_ALIAS.get(base, base)}-{quote or 'USDT'}"
+
+
+def _from_bingx_symbol(bx_sym: str) -> str:
+    """BingX 合約名(MONAD-USDT) → OKX/ccxt 幣名(MON/USDT),接管判斷要跟追蹤池同一格式"""
+    base, _, quote = bx_sym.partition("-")
+    return f"{BINGX_SYMBOL_ALIAS_REV.get(base, base)}/{quote or 'USDT'}"
 
 # 交易所路由開關（Discord 指令 /exchange okx|bingx on|off）
 
@@ -1434,8 +1455,8 @@ def execute_bingx_trade_pipeline(symbol_id: str, trade_side: str, entry_price: f
         dc_log("⚠️ BingX API Key 未設定，跳過 BingX 下單")
         return
     try:
-        # 轉換幣種格式：BTC/USDT → BTC-USDT
-        bingx_symbol = symbol_id.replace("/", "-")
+        # 轉換幣種格式：BTC/USDT → BTC-USDT(★名字不同的幣走 BINGX_SYMBOL_ALIAS,如 MON→MONAD)
+        bingx_symbol = _to_bingx_symbol(symbol_id)
 
         # 取得帳戶餘額
         headers = {"X-BX-APIKEY": BINGX_API_KEY}
@@ -8327,7 +8348,7 @@ def adopt_untracked_bingx_positions():
                 skipped_mode += 1; continue
             bx_sym = p.get("symbol", "")
             if not bx_sym: continue
-            ccxt_sym = bx_sym.replace("-", "/")
+            ccxt_sym = _from_bingx_symbol(bx_sym)   # ★MONAD-USDT→MON/USDT,否則 bot 自己開的倉會被當成「未追蹤」
             if (ccxt_sym, direction) in tracked: continue
             entry = float(p.get("avgPrice") or p.get("entryPrice") or 0)
             if entry <= 0: continue
