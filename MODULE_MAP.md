@@ -82,7 +82,7 @@ saikesi-bot-clean/
 | 熔斷 | `def _bor_record_result` | 連續 20 筆吃滿停損自動停（回測最長 14）；呼叫點在 `[BOR] ... 出場判定` |
 | 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
 | ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
-| 出場模式 | `bor_1r` | 不在任何出場族 tuple → 行為等同 `""`（TP1=TP2 同價＝等效全平），與 S4H 同 |
+| 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 同理改 `s4h_fixed` |
 | 回測腳本 | `_bt_bo_retest.py` | 12期四層；對拍 `_chk_bo_port.py`（80檔/200訊號/**0 不一致**） |
 
 **熔斷判準（2026-09-13，兩條路都走不通後才定的）**：
