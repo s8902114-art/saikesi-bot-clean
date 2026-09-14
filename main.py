@@ -4802,7 +4802,23 @@ BOR_SUP_K       = 3
 BOR_SUP_TOUCH   = 2
 BOR_SUP_LOOK    = 600
 _BOR_DIAG = {"呼叫":0, "K棒不足":0, "無訊號":0, "停損無效":0, "停損過寬":0,
-             "冷卻":0, "每日上限":0, "貼支撐":0, "熔斷":0, "成立":0}
+             "冷卻":0, "每日上限":0, "貼支撐":0, "上影擋":0, "熔斷":0, "成立":0}
+# ★2026-09-15 吞噬K上影線閘:扳機那根 4h 看跌吞噬的上影線 ≥ 全幅 20% → 不空
+#   選法 = 滾動前推(_night_wf.py,家族與門檻都在迴圈內挑):只用 2026 以前全部資料挑出這條,
+#   2026 真樣本外(從沒參與挑選)n=924:留下594筆 勝53% +0.037R / 擋掉330筆 勝46% −0.119R
+#     63幣池 留+0.053 擋−0.156、live幣池 留+0.024 擋−0.090(兩池各自成立)
+#     留下−擋掉 差 +0.153 95%CI[−0.009,+0.314] P(>0)=96.5%;BTC多頭/空頭時各留63/64%
+#   12期(挑選時看過):驗+0.14→+0.26 新+0.18→+0.27 22+0.23→+0.27
+#   live 真實單(沒參與挑選):已停損 6 筆 BOR 有 5 筆會被擋(AEON .24/ZAMA .51/DOS .25/HYPE .43/VIRTUAL .23),BICO .19 差一點
+#   ★已知弱點:前推逐段挑出的閘不穩定(1/7塊),採用依據是「最終版在2026兩池都成立」,不是前推整體通過。
+BOR_UPWICK_GATE = True
+BOR_UPWICK_MAX  = 0.20
+
+
+def _gate_upper_wick(o, h, l, c):
+    """上影線佔全幅比例(0~1);全幅為0回0。"""
+    rg = float(h) - float(l)
+    return float((float(h) - max(float(o), float(c))) / rg) if rg > 0 else 0.0
 
 
 def _support_below_R(hi, lo, i, entry, sl, k=3, tol=0.01, L=600, min_touch=2):
@@ -4909,6 +4925,12 @@ def _check_bor_short(symbol_item: str, okx_swap_symbol: str):
             if _sr == _sr and _sr < BOR_SUP_MIN_R:
                 _BOR_DIAG["貼支撐"] += 1
                 print(f"[BOR-Short] {symbol_item} 擋:下方 {_sr:.2f}R 就有支撐區(觸{_sn}次,回看{min(_j, BOR_SUP_LOOK)}根)", flush=True)
+                return False, "", 0.0
+        if BOR_UPWICK_GATE:                              # ★2026-09-15 吞噬K上影線閘(說明見常數區)
+            _uw = _gate_upper_wick(df["open"].values[i], df["high"].values[i], df["low"].values[i], df["close"].values[i])
+            if _uw >= BOR_UPWICK_MAX:
+                _BOR_DIAG["上影擋"] += 1
+                print(f"[BOR-Short] {symbol_item} 擋:吞噬K上影線佔{_uw:.2f}(≥{BOR_UPWICK_MAX})", flush=True)
                 return False, "", 0.0
         _BOR_DAY["count"] += 1
         _BOR_DIAG["成立"] += 1
