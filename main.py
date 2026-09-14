@@ -295,7 +295,11 @@ OKX_SWAP: Dict[str, str] = {v: k for k, v in SYMBOLS.items()}
 
 # 動態幣種列表狀態
 _SYMBOLS_FALLBACK: Dict[str, str] = dict(SYMBOLS)   # 硬編碼備援
-_SYMBOLS_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbols_cache.json")
+# ★2026-09-15 快取改存 Railway volume(/data):程式目錄每次 redeploy 被清成 repo 版(5月的 47 幣舊檔),
+#   剛好又碰上 CoinGecko 429 → 整個掃描池卡在 47 幣(原本 165)。repo 那份只在 volume 沒檔時當初始值讀。
+_SYMBOLS_CACHE_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "symbols_cache.json")
+_SYMBOLS_CACHE_FILE = os.path.join(os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__))),
+                                   "symbols_cache.json")
 _symbols_last_updated: float = 0.0   # UNIX timestamp，0 = 從未更新(CoinGecko市值前100,慢變動,維持24h週期)
 _top100_base_symbols: Dict[str, str] = {}  # ★2026-07-07:市值前100的純淨底池(不含漲跌幅榜疊加),
                                             # 讓輕量刷新能「整批換掉」漲跌幅榜疊加部分而非只增不減(防清單無限膨脹)
@@ -8307,20 +8311,24 @@ def build_dynamic_symbols() -> bool:
     # 1. 載入快取（若此次啟動尚未載入）
     if _symbols_last_updated == 0.0:
         try:
-            if os.path.exists(_SYMBOLS_CACHE_FILE):
-                cached = json.load(open(_SYMBOLS_CACHE_FILE, encoding="utf-8"))
+            _cf = _SYMBOLS_CACHE_FILE if os.path.exists(_SYMBOLS_CACHE_FILE) else _SYMBOLS_CACHE_REPO
+            if os.path.exists(_cf):
+                cached = json.load(open(_cf, encoding="utf-8"))
                 SYMBOLS = cached["symbols"]
                 OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
                 _symbols_last_updated = cached.get("updated", 1.0)
-                print(f"[SYMBOLS] 快取載入：{len(SYMBOLS)} 個幣種", flush=True)
+                print(f"[SYMBOLS] 快取載入：{len(SYMBOLS)} 個幣種({_cf})", flush=True)
         except Exception as e:
             print(f"[SYMBOLS] 快取讀取失敗: {e}", flush=True)
 
     print("[SYMBOLS] 向 CoinGecko 抓取市值前100...", flush=True)
     top100 = _fetch_coingecko_top100()
-    if not top100:
-        print("[SYMBOLS] ⚠️ CoinGecko 失敗，維持現有列表", flush=True)
-        return False
+    _cg_failed = not top100
+    if _cg_failed:
+        # ★2026-09-15 原本直接 return False「維持現有列表」→ 啟動時現有列表=舊快取 47 幣,整天卡住。
+        #   改成照樣用 OKX 自己的流動性底池 + 漲跌幅榜組池(底池本身 160+ 幣,已涵蓋大部分市值前100),1 小時後再試 CoinGecko。
+        print("[SYMBOLS] ⚠️ CoinGecko 失敗 → 改用 OKX 流動性底池+漲跌幅榜組池,1小時後重試 CoinGecko", flush=True)
+        top100 = []
 
     print("[SYMBOLS] 向 OKX 確認永續合約...", flush=True)
     okx_swaps = _fetch_okx_swap_set()
@@ -8367,7 +8375,7 @@ def build_dynamic_symbols() -> bool:
 
     SYMBOLS = new_symbols
     OKX_SWAP = {v: k for k, v in SYMBOLS.items()}
-    _symbols_last_updated = time.time()
+    _symbols_last_updated = time.time() - (86400 - 3600 if _cg_failed else 0)   # CoinGecko 失敗 → 1 小時後重試全量
 
     # 儲存快取
     try:
