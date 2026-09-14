@@ -482,7 +482,9 @@ _TRADES_FILE = os.path.join(_PERSIST_DIR, "active_trades.json")
 _RISK_STATE_FILE = os.path.join(_PERSIST_DIR, "strategy_risk_state.json")   # BOR/4JD 熔斷計數(redeploy 不歸零)
 # ★「交易所掛好 SL/TP 就不碰」的出場型:BOR 固定1R、S4H 固定2.5R、接管時認不出原策略的倉(adopt_hold)。
 #   不移保本、不移SL、不加碼;只在倉位消失時移除追蹤(BOR 另做熔斷計數)。
-_HANDS_OFF_ES = ("bor_1r", "s4h_fixed", "adopt_hold")
+#   ★2026-09-15 S4H 移出(用戶:「保住本金為主」)→ 改走 box_trend/fourjd_2r 那段「只做一次保本」,浮盈 S4H_BE_R 移保本。
+#   BOR 維持不保本(用戶:「停利1R的就不用保本了」)。
+_HANDS_OFF_ES = ("bor_1r", "adopt_hold")
 
 
 def save_risk_state():
@@ -2713,14 +2715,15 @@ def check_trailing_stops_for_real():
 
             # ── 箱突破空(box_trend)：整倉4R TP掛在交易所,這裡只做「達1R浮盈→移SL保本」(一次)
             #    防假突破拉回。TP(4R)成交由交易所自動平,下輪偵測倉位消失移除。
-            if trade.get("exit_strategy") in ("box_trend", "hf_1r", "fourjd_2r"):
+            if trade.get("exit_strategy") in ("box_trend", "hf_1r", "fourjd_2r", "s4h_fixed"):
                 _es_be = trade.get("exit_strategy")
                 _is_hf = _es_be == "hf_1r"      # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
                 _is_fjd = _es_be == "fourjd_2r"  # ★4J減速跌破空:0.8R保本(回測 吃滿停損51.9%→30.5%,容錯12.5→13.8)
-                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else 1.0)
+                _is_s4h = _es_be == "s4h_fixed"  # ★2026-09-15 S4H:1.5R保本(用戶「保住本金為主」,見 S4H_BE_R)
+                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else (S4H_BE_R if _is_s4h else 1.0))
                 # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
                 # ★fourjd_2r 的保本是**回測規格的一部分**(逐根重跑驗過,不是MFE事後估算),不受 LETRUN_BE_ENABLED 影響
-                _be_active = True if _is_fjd else (False if _is_hf else LETRUN_BE_ENABLED)
+                _be_active = True if (_is_fjd or _is_s4h) else (False if _is_hf else LETRUN_BE_ENABLED)
                 if _be_active and not trade.get("tp1_hit"):       # 借 tp1_hit 當「已保本」旗標
                     try:
                         cur = float(ex.fetch_ticker(symbol).get("last") or 0)
@@ -2747,7 +2750,7 @@ def check_trailing_stops_for_real():
                                 if nid:
                                     trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
                                     trade["tp1_hit"] = True
-                                    dc_log(f"🔒 {name} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else '箱突破空達1R')},止損移保本 {be_price}")
+                                    dc_log(f"🔒 {name} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else ('S4H達' + str(S4H_BE_R) + 'R' if _is_s4h else '箱突破空達1R'))},止損移保本 {be_price}")
                                 else:
                                     try:
                                         try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
@@ -2994,16 +2997,17 @@ def check_trailing_stops_for_real():
 
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
-            if _es in _HANDS_OFF_ES:      # ★2026-09-14 BOR/S4H/認不出的接管倉:交易所SL/TP已掛,不保本不移SL(對齊OKX)
+            if _es in _HANDS_OFF_ES:      # ★2026-09-14 BOR/認不出的接管倉:交易所SL/TP已掛,不保本不移SL(對齊OKX);S4H 09-15 起改走保本段
                 continue
             # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
-            if _es in ("box_trend", "hf_1r", "fourjd_2r"):
+            if _es in ("box_trend", "hf_1r", "fourjd_2r", "s4h_fixed"):
                 _is_hf = _es == "hf_1r"             # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
                 _is_fjd = _es == "fourjd_2r"
-                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else 1.0)
+                _is_s4h = _es == "s4h_fixed"        # ★2026-09-15 S4H 1.5R保本(對齊OKX)
+                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else (S4H_BE_R if _is_s4h else 1.0))
                 # ★2026-09-14 修:BingX 的 4JD 原本走 LETRUN_BE_ENABLED(=False)→**從不移保本**,
                 #   但 0.8R 保本是 4JD 回測規格本體(OKX 端已是 _be_active=True),兩所對齊。
-                _be_active = True if _is_fjd else (False if _is_hf else LETRUN_BE_ENABLED)  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
+                _be_active = True if (_is_fjd or _is_s4h) else (False if _is_hf else LETRUN_BE_ENABLED)  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
                 if _be_active and not trade.get("tp1_hit"):
                     try:
                         cur=_px_for_bingx(ex, trade)
@@ -3015,7 +3019,7 @@ def check_trailing_stops_for_real():
                                 if nid is not None:
                                     trade["sl_order_id"]=nid; trade["current_sl"]=be_price
                                     trade["tp1_hit"]=True
-                                    dc_log(f"🔒 BingX {bingx_symbol} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else '箱突破空達1R')},止損移保本 {be_price}")
+                                    dc_log(f"🔒 BingX {bingx_symbol} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else ('S4H達' + str(S4H_BE_R) + 'R' if _is_s4h else '箱突破空達1R'))},止損移保本 {be_price}")
                     except Exception as _bbe:
                         print(f"[BingX BoxTrend] {trade_key} 保本失敗: {_bbe}")
                 continue
@@ -4197,6 +4201,11 @@ S4H_FIB_HI         = 0.618
 S4H_FIB_MAXAGE     = 60          # 波段太舊就不畫斐波(根)
 S4H_123_WIN        = 6           # 123 回看窗(根 4h = 24h)
 S4H_TP_R           = 2.5
+S4H_BE_R           = 1.5         # ★2026-09-15 用戶「保住本金為主」:浮盈 1.5R → 停損移保本(含費),TP 仍 2.5R 全平
+#   同一批 627 筆逐根重跑(_bt_be_bor_s4h.py,先停損→再停利→最後才移保本):
+#     不保本 吃滿停損61% 每筆+0.272R 總+170R / ★1.5R保本 吃滿停損**50%** 每筆+0.277R 總+174R
+#     1.0R保本 42% +0.230 +144R / 0.8R保本 38% +0.197 +124R
+#   1.5R = 虧到本金的單少1/6、總R不掉;2026 live幣池 +0.41→+0.46。
 S4H_COOLDOWN_BARS  = 2           # 同幣冷卻(根 4h)
 S4H_DAILY_CAP      = 5           # 每日新倉上限(叢集風控)
 S4H_MIN_LIQ        = 400_000.0   # 近24根 4h 成交額中位下限(USDT)
@@ -8602,7 +8611,7 @@ def adopt_untracked_okx_positions():
                 "bot_verified":True,   # ★2026-08-03 已用broker tag驗證=bot自己開的倉,才准被時間停損碰
             }
             adopted+=1
-            _es_txt = {"swing_full": "swing_full 轉折移SL", "bor_1r": "BOR 固定1R(不動)", "s4h_fixed": "S4H 固定2.5R(不動)",
+            _es_txt = {"swing_full": "swing_full 轉折移SL", "bor_1r": "BOR 固定1R(不動)", "s4h_fixed": "S4H 2.5R+1.5R保本",
                        "fourjd_2r": "4JD 2R+0.8R保本", "box_trend": "箱突破 4R", "swing_tp": "TP1半倉+剩半轉折移SL",
                        "": "固定R TP1/TP2", "cme_gap": "CME缺口 2R+300h超時",
                        "adopt_hold": "認不出原策略→交易所SL/TP不動"}.get(inferred_es, inferred_es)

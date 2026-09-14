@@ -92,7 +92,7 @@ saikesi-bot-clean/
 | 共同 | — | 被擋也佔冷卻/每日上限(對齊回測事後過濾)；選法與五段/前推/打架結果見 main.py 常數區註解 |
 | 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
 | ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
-| 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 同理改 `s4h_fixed` |
+| 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 改 `s4h_fixed`，★09-15 起**移出** `_HANDS_OFF_ES`、改走 box_trend/fourjd_2r 那段只做一次保本（`S4H_BE_R`=1.5R，用戶「保住本金為主」）；BOR 維持不保本（用戶「停利1R的就不用保本」） |
 | 回測腳本 | `_bt_bo_retest.py` | 12期四層；對拍 `_chk_bo_port.py`（80檔/200訊號/**0 不一致**） |
 
 **熔斷判準（2026-09-13，兩條路都走不通後才定的）**：
