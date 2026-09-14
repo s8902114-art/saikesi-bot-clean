@@ -82,6 +82,11 @@ saikesi-bot-clean/
 | ★上影線閘(09-15) | `BOR_UPWICK_GATE` / `def _gate_upper_wick` | 扳機吞噬K上影線 ≥ 全幅 **20% 不空**；在貼支撐閘之後、被擋也佔冷卻；log `[BOR-Short] X 擋:吞噬K上影線佔…`、儀表 `上影擋`；對拍 1642/1642；證據(2026兩池/CI/live 6停損擋5)寫在常數旁 |
 | 熔斷 | `def _bor_record_result` | 連續 20 筆吃滿停損自動停（回測最長 14）；呼叫點在 `[BOR] ... 出場判定` |
 
+| 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
+| ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
+| 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 改 `s4h_fixed`，★09-15 起**移出** `_HANDS_OFF_ES`、改走 box_trend/fourjd_2r 那段只做一次保本（`S4H_BE_R`=1.5R，用戶「保住本金為主」）；BOR 維持不保本（用戶「停利1R的就不用保本」） |
+| 回測腳本 | `_bt_bo_retest.py` | 12期四層；對拍 `_chk_bo_port.py`（80檔/200訊號/**0 不一致**） |
+
 ### ★進場品質閘（2026-09-15，S4H / 4JD）
 | 功能 | 位置 | 說明 |
 |---|---|---|
@@ -90,10 +95,6 @@ saikesi-bot-clean/
 | 4JD 位置閘 | `FOURJD_POS_GATE` | 最近30根已收盤4H區間位置<15% → 不空；儀表 `位置擋` |
 | 4JD BTC閘 | `FOURJD_BTC_GATE` | BTC 永續近96根15m漲>+1% → 不空；抓不到放行；儀表 `BTC漲擋` |
 | 共同 | — | 被擋也佔冷卻/每日上限(對齊回測事後過濾)；選法與五段/前推/打架結果見 main.py 常數區註解 |
-| 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
-| ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
-| 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 改 `s4h_fixed`，★09-15 起**移出** `_HANDS_OFF_ES`、改走 box_trend/fourjd_2r 那段只做一次保本（`S4H_BE_R`=1.5R，用戶「保住本金為主」）；BOR 維持不保本（用戶「停利1R的就不用保本」） |
-| 回測腳本 | `_bt_bo_retest.py` | 12期四層；對拍 `_chk_bo_port.py`（80檔/200訊號/**0 不一致**） |
 
 **熔斷判準（2026-09-13，兩條路都走不通後才定的）**：
 - ❌ 4JD 的 `tp1_hit=False ⇒ 吃滿停損`：它成立是因為 4JD 有 0.8R 保本、賺的單必定先經過。
@@ -142,6 +143,6 @@ saikesi-bot-clean/
 |---|---|---|
 | 存檔目錄 | `_PERSIST_DIR` | Railway volume `/data`（沒掛就退回程式目錄）；啟動 log `[Persist] 存檔目錄 …` |
 | 熔斷計數落地 | `save_risk_state` / `load_risk_state` | BOR/4JD `consec_sl`/`halted`，redeploy 不歸零 |
-| 不碰型出場 | `_HANDS_OFF_ES` | `bor_1r`/`s4h_fixed`/`adopt_hold`：OKX 與 BingX 追蹤迴圈都直接 continue |
+| 不碰型出場 | `_HANDS_OFF_ES` | `bor_1r`/`adopt_hold`：OKX 與 BingX 追蹤迴圈都直接 continue（S4H 09-15 移出，改 1.5R 保本） |
 | 接管出場推斷 | `def _infer_adopted_exit` | 看交易所 reduceOnly TP 限價單：同價兩張 R≈1→BOR、≈2.5→S4H、CME幣≈2→cme_gap；單張全倉 R≈2 空→4JD；半倉→swing_tp；無TP→swing_full；停損已在獲利側或對不上→adopt_hold |
 | 吞噬空出場 | 山寨覆寫處 `and not is_engulf_short` | 不再被改成 swing_tp，回到驗過的 swing_full |
