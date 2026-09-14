@@ -81,7 +81,6 @@ saikesi-bot-clean/
 | ★貼支撐閘(09-14) | `BOR_SUP_GATE` / `def _support_below_R` | 下方最近支撐區(k3樞紐、±1%合併、≥2觸、回看600根)離進場 **<0.25R 不空**；深度用 `_s4h_deep_candles`（與 S4H 共用快取，沒抓到退回300根）；**被擋也佔冷卻**（對齊回測）；log `[BOR-Short] X 擋:下方 …R 就有支撐區`、儀表 `貼支撐` 計數；對拍 `_chk_bor_sup_port.py` 724/724 |
 | ★上影線閘(09-15) | `BOR_UPWICK_GATE` / `def _gate_upper_wick` | 扳機吞噬K上影線 ≥ 全幅 **20% 不空**；在貼支撐閘之後、被擋也佔冷卻；log `[BOR-Short] X 擋:吞噬K上影線佔…`、儀表 `上影擋`；對拍 1642/1642；證據(2026兩池/CI/live 6停損擋5)寫在常數旁 |
 | 熔斷 | `def _bor_record_result` | 連續 20 筆吃滿停損自動停（回測最長 14）；呼叫點在 `[BOR] ... 出場判定` |
-
 | 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
 | ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
 | 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 改 `s4h_fixed`，★09-15 起**移出** `_HANDS_OFF_ES`、改走 box_trend/fourjd_2r 那段只做一次保本（`S4H_BE_R`=1.5R，用戶「保住本金為主」）；BOR 維持不保本（用戶「停利1R的就不用保本」） |
