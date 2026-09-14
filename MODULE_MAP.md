@@ -79,7 +79,17 @@ saikesi-bot-clean/
 | ★判定核心 | `def _bo_retest_signal` | 逐根重放狀態機 IDLE→BROKE→RETEST→進場；手抄自 `_bt_bo_retest.signals`（short/engulf/retest_low） |
 | 對外入口 | `def _check_bor_short` | 自己抓 4H 300 根，不吃外面的 df；只在最新**已收盤**根成立時進場 |
 | ★貼支撐閘(09-14) | `BOR_SUP_GATE` / `def _support_below_R` | 下方最近支撐區(k3樞紐、±1%合併、≥2觸、回看600根)離進場 **<0.25R 不空**；深度用 `_s4h_deep_candles`（與 S4H 共用快取，沒抓到退回300根）；**被擋也佔冷卻**（對齊回測）；log `[BOR-Short] X 擋:下方 …R 就有支撐區`、儀表 `貼支撐` 計數；對拍 `_chk_bor_sup_port.py` 724/724 |
+| ★上影線閘(09-15) | `BOR_UPWICK_GATE` / `def _gate_upper_wick` | 扳機吞噬K上影線 ≥ 全幅 **20% 不空**；在貼支撐閘之後、被擋也佔冷卻；log `[BOR-Short] X 擋:吞噬K上影線佔…`、儀表 `上影擋`；對拍 1642/1642；證據(2026兩池/CI/live 6停損擋5)寫在常數旁 |
 | 熔斷 | `def _bor_record_result` | 連續 20 筆吃滿停損自動停（回測最長 14）；呼叫點在 `[BOR] ... 出場判定` |
+
+### ★進場品質閘（2026-09-15，S4H / 4JD）
+| 功能 | 位置 | 說明 |
+|---|---|---|
+| 共用函式 | `def _gate_count_As` / `_gate_rise_leg` / `_gate_range_pos_short` / `_btc_24h_change` | 在 `_S4H_DIAG` 下方；對拍 `_chk_night_gates_port.py`(S4H 627/4JD 533/BTC 533 筆 0 不一致)、實跑 `_chk_night_gates_live.py` |
+| S4H 急漲閘 | `S4H_SPIKE_GATE` | 決策時點前48根已收盤1H的上漲段:拉回≥3%次數≤1 且漲幅≥12% → 不空(用戶「急漲不空第一個頭」)；另抓 1H 300根並截到4H收盤時點；儀表 `急漲擋` |
+| 4JD 位置閘 | `FOURJD_POS_GATE` | 最近30根已收盤4H區間位置<15% → 不空；儀表 `位置擋` |
+| 4JD BTC閘 | `FOURJD_BTC_GATE` | BTC 永續近96根15m漲>+1% → 不空；抓不到放行；儀表 `BTC漲擋` |
+| 共同 | — | 被擋也佔冷卻/每日上限(對齊回測事後過濾)；選法與五段/前推/打架結果見 main.py 常數區註解 |
 | 掃描掛載 | `BOR-Short儀表` | `tf_id == "4H"`，比照 S4H |
 | ★專屬旁路 | `_bor_only` | 4H 的 `AUTO_TRADE` 是 False，只在「BOR 是唯一觸發來源」時放行自動下單 |
 | 出場模式 | `bor_1r` | ★09-14 起在 `_HANDS_OFF_ES`：交易所掛 TP1=TP2 同價(1R)+SL 後 bot 不保本不移SL（原本走預設分支會 1R 移保本+pivot 移SL）；S4H 同理改 `s4h_fixed` |
