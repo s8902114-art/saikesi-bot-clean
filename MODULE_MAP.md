@@ -125,3 +125,13 @@ saikesi-bot-clean/
 `AUTO_TRADE / _PAUSED / _LIVE_MODE / CVD_ENABLED / MARGIN_MODE / RISK_PCT / pending_orders / active_real_trades`
 是 **module-level 可變全域**，被 `poll_dc_commands` 用 `global` 改寫。若搬到別的檔案，`global X` 會改不到原本那份 → Discord 指令默默失效、實盤狀態錯亂。
 要拆這些需改成 **state 物件**（重構，非搬移），風險高，未做。目前只抽出零 global 依賴的純函數（indicators.py）。
+
+
+### ★倉位追蹤持久化與接管出場（2026-09-14）
+| 功能 | 位置 | 說明 |
+|---|---|---|
+| 存檔目錄 | `_PERSIST_DIR` | Railway volume `/data`（沒掛就退回程式目錄）；啟動 log `[Persist] 存檔目錄 …` |
+| 熔斷計數落地 | `save_risk_state` / `load_risk_state` | BOR/4JD `consec_sl`/`halted`，redeploy 不歸零 |
+| 不碰型出場 | `_HANDS_OFF_ES` | `bor_1r`/`s4h_fixed`/`adopt_hold`：OKX 與 BingX 追蹤迴圈都直接 continue |
+| 接管出場推斷 | `def _infer_adopted_exit` | 看交易所 reduceOnly TP 限價單：同價兩張 R≈1→BOR、≈2.5→S4H、CME幣≈2→cme_gap；單張全倉 R≈2 空→4JD；半倉→swing_tp；無TP→swing_full；停損已在獲利側或對不上→adopt_hold |
+| 吞噬空出場 | 山寨覆寫處 `and not is_engulf_short` | 不再被改成 swing_tp，回到驗過的 swing_full |

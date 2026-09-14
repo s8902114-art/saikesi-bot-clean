@@ -473,7 +473,38 @@ active_real_trades: Dict[str, Dict[str, Any]] = {}
 # Railway 每次 redeploy 會重啟程式，純記憶體的 active_real_trades 會清空，
 # 導致已開倉的保本/移動止損追蹤停擺。存成 json，啟動時讀回。
 # 注意：BingX 的 headers 含 API 金鑰，不落地；讀回時用全域 key 重建。
-_TRADES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "active_trades.json")
+# ★★2026-09-14 修:容器檔案系統**每次 redeploy 都清空**(Railway 原本沒掛 volume),存在程式目錄的
+#   active_trades.json 跟著消失 → 每次部署所有持倉被當「未追蹤」重新接管、出場一律被改成 swing_full
+#   (0904/0911 都記過、一直沒修;09-14 BOR 的 BCH/SKY/AEON/CC/BICO 全被改寫)。
+#   → 改存到 Railway volume(掛在 /data);本機/沒掛時退回程式目錄。PERSIST_DIR 環境變數可覆寫。
+_PERSIST_DIR = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__)))
+_TRADES_FILE = os.path.join(_PERSIST_DIR, "active_trades.json")
+_RISK_STATE_FILE = os.path.join(_PERSIST_DIR, "strategy_risk_state.json")   # BOR/4JD 熔斷計數(redeploy 不歸零)
+# ★「交易所掛好 SL/TP 就不碰」的出場型:BOR 固定1R、S4H 固定2.5R、接管時認不出原策略的倉(adopt_hold)。
+#   不移保本、不移SL、不加碼;只在倉位消失時移除追蹤(BOR 另做熔斷計數)。
+_HANDS_OFF_ES = ("bor_1r", "s4h_fixed", "adopt_hold")
+
+
+def save_risk_state():
+    """熔斷計數落地(CLAUDE.md 第11條:觀察條款寫成代碼;redeploy 歸零 = 熔斷形同虛設)"""
+    try:
+        with open(_RISK_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"bor": globals().get("_BOR_RISK"), "fourjd": globals().get("_FOURJD_RISK")}, f)
+    except Exception as e:
+        print(f"[Persist] 存檔熔斷計數失敗: {e}")
+
+
+def load_risk_state():
+    try:
+        if not os.path.exists(_RISK_STATE_FILE): return
+        with open(_RISK_STATE_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        for key, g in (("bor", "_BOR_RISK"), ("fourjd", "_FOURJD_RISK")):
+            if isinstance(d.get(key), dict) and isinstance(globals().get(g), dict):
+                globals()[g].update({k: d[key][k] for k in ("consec_sl", "halted") if k in d[key]})
+        print(f"[Persist] 熔斷計數已讀回 BOR={globals().get('_BOR_RISK')} 4JD={globals().get('_FOURJD_RISK')}", flush=True)
+    except Exception as e:
+        print(f"[Persist] 讀回熔斷計數失敗: {e}")
 
 def save_active_trades():
     """將 active_real_trades 存成 json（排除 headers 等不可序列化/敏感欄位）"""
@@ -2587,6 +2618,13 @@ def check_trailing_stops_for_real():
                 except Exception as _bee:
                     print(f"[EarlyBE] {name} 保本判斷失敗: {_bee}", flush=True)
 
+            # ── ★2026-09-14 「交易所掛好就不碰」型:BOR(固定1R)/S4H(固定2.5R)/認不出策略的接管倉 ──
+            #   原本走到最下方預設固定R分支 → 浮盈 be_trigger(4H_short=1.0R)移保本、之後還 pivot 移SL
+            #   → S4H 的回測規格「固定2.5R全平、不保本、不移SL」live 從沒被執行過;BOR 同理。
+            #   SL/TP 都已掛在交易所,這裡只負責上方的「倉位消失→移除追蹤(+BOR熔斷計數)」。
+            if trade.get("exit_strategy") in _HANDS_OFF_ES:
+                continue
+
             # ── 整倉麥門切線(line_full)：DH空 / 30m C3多 ─────────────────────
             # 不掛TP,整倉沿切線跑,「實體收盤突破切線」→市價平全倉;SL已掛硬底兜底。
             # 不走 TP1/保本邏輯(整倉跟趨勢,WF:DH+0.629/30m+0.582,去top3仍正)。
@@ -2709,7 +2747,7 @@ def check_trailing_stops_for_real():
                                 if nid:
                                     trade["sl_algo_id"] = nid; trade["current_sl"] = be_price
                                     trade["tp1_hit"] = True
-                                    dc_log(f"🔒 {name} {'高頻達0.5R' if _is_hf else '箱突破空達1R'},止損移保本 {be_price}")
+                                    dc_log(f"🔒 {name} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else '箱突破空達1R')},止損移保本 {be_price}")
                                 else:
                                     try:
                                         try: _osl = ex.price_to_precision(symbol, trade["current_sl"])
@@ -2956,11 +2994,16 @@ def check_trailing_stops_for_real():
 
             # ── BingX 趨勢跟蹤出場(與OKX對齊;切線/移SL/加碼,用OKX公開K偵測轉折)──────
             _es = trade.get("exit_strategy", "")
+            if _es in _HANDS_OFF_ES:      # ★2026-09-14 BOR/S4H/認不出的接管倉:交易所SL/TP已掛,不保本不移SL(對齊OKX)
+                continue
             # 箱突破空:整倉4R TP掛在交易所,這裡只做達1R保本(一次)。TP成交自動平。
             if _es in ("box_trend", "hf_1r", "fourjd_2r"):
                 _is_hf = _es == "hf_1r"             # 高頻固定1R:0.5R保本;TP@1R掛交易所自動全平
-                _be_trig = 0.5 if _is_hf else 1.0
-                _be_active = False if _is_hf else LETRUN_BE_ENABLED  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
+                _is_fjd = _es == "fourjd_2r"
+                _be_trig = 0.5 if _is_hf else (FOURJD_BE_R if _is_fjd else 1.0)
+                # ★2026-09-14 修:BingX 的 4JD 原本走 LETRUN_BE_ENABLED(=False)→**從不移保本**,
+                #   但 0.8R 保本是 4JD 回測規格本體(OKX 端已是 _be_active=True),兩所對齊。
+                _be_active = True if _is_fjd else (False if _is_hf else LETRUN_BE_ENABLED)  # ★hf_1r拿掉保本(2026-06-18):純固定1R,TP@1R/SL@-1R掛交易所,勝率~57%(去BE驗證更高)
                 if _be_active and not trade.get("tp1_hit"):
                     try:
                         cur=_px_for_bingx(ex, trade)
@@ -2972,7 +3015,7 @@ def check_trailing_stops_for_real():
                                 if nid is not None:
                                     trade["sl_order_id"]=nid; trade["current_sl"]=be_price
                                     trade["tp1_hit"]=True
-                                    dc_log(f"🔒 BingX {bingx_symbol} {'高頻達0.5R' if _is_hf else '箱突破空達1R'},止損移保本 {be_price}")
+                                    dc_log(f"🔒 BingX {bingx_symbol} {'高頻達0.5R' if _is_hf else ('4J減速跌破空達' + str(FOURJD_BE_R) + 'R' if _is_fjd else '箱突破空達1R')},止損移保本 {be_price}")
                     except Exception as _bbe:
                         print(f"[BingX BoxTrend] {trade_key} 保本失敗: {_bbe}")
                 continue
@@ -4593,6 +4636,7 @@ def _fourjd_record_result(is_full_stop: bool):
                    f"(回測最長 4 筆,門檻 {FOURJD_MAX_CONSEC_SL})。已停止開新倉,需人工複查後重開。")
     else:
         _FOURJD_RISK["consec_sl"] = 0
+    save_risk_state()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4780,6 +4824,7 @@ def _bor_record_result(is_full_stop: bool):
                    f"(回測最長 14 筆,門檻 {BOR_MAX_CONSEC_SL})。已停止開新倉,需人工複查後重開。")
     else:
         _BOR_RISK["consec_sl"] = 0
+    save_risk_state()
 
 
 MTF_BIAS_GATE_ENABLED = True   # ★⚠️2026-08-26 重大訂正:本閘 2026-08-05 上線時的回測依據有**未來函數**。
@@ -6727,7 +6772,9 @@ class SykesTradingBot:
             exit_strategy = "bor_1r"
             _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設
         elif is_s4h_short:
-            exit_strategy = ""       # S4H:固定 2.5R 全平(TP override 見下方 SL/TP 區塊)
+            exit_strategy = "s4h_fixed"   # S4H:固定 2.5R 全平(TP override 見下方 SL/TP 區塊)
+            # ★2026-09-14 原本是 "" → 追蹤迴圈走預設固定R分支,浮盈 1R(4H_short be_trigger)就移保本
+            #   再 pivot 移SL,回測規格「固定2.5R全平」live 沒被執行。改專屬標記,交易所掛好就不碰(_HANDS_OFF_ES)。
             _strat_ts_h = -1         # ★不設時間停損 —— 回測就是不設,設了 12h 預設就不是同一個規格
         elif is_engulf_short:
             # ★2026-09-05 吞噬空重開,出場從固定2R改成 swing_full(整倉讓跑,不掛TP)。
@@ -6980,7 +7027,9 @@ class SykesTradingBot:
 
         # ★山寨讓跑改半倉2.5R落袋(2026-06-15,COAI教訓:山寨噴到頂用swing_full一路抱會吐回)。
         #   市值幣維持讓跑(不會這樣噴崩);山寨(非MAJOR)讓跑類→swing_tp 半倉2.5R落袋+BE+剩半trail。多空通用。
-        if symbol_item not in MAJOR_COINS and exit_strategy in ("swing_full", "line_full"):
+        # ★2026-09-14 吞噬空豁免:它的出場規格就是 swing_full(0905 逐根重放 live 既有 _swing_trail_update_sl 驗收),
+        #   而吞噬空**只做山寨** → 這段覆寫等於把驗過的規格整個換成 半倉TP+1.5R保本+剩半trail(0911 對帳抓到)。
+        if symbol_item not in MAJOR_COINS and exit_strategy in ("swing_full", "line_full") and not is_engulf_short:
             exit_strategy = "swing_tp"
             _rd = abs(current_close - calculated_sl)
             if direction == "long":
@@ -8255,6 +8304,68 @@ def _okx_fetch_algo_sl(inst_id: str):
     return None,None
 
 
+def _infer_adopted_exit(ex, sym, side, entry, sl_trig, ct):
+    """★2026-09-14 接管倉出場推斷:用交易所上仍掛著的 TP 限價單(reduceOnly)推回原策略出場規格。
+    回傳 (exit_strategy, tp1_order_id, remaining_amount, 理由) 或 None(查單失敗→呼叫端退回舊行為)。
+    規則(對應 execute_okx_trade_pipeline 各分支掛 TP 的方式):
+      沒有 TP 單                          → swing_full(讓跑類本來就不掛 TP)
+      停損已在獲利側(保本/移SL過)         → adopt_hold(原始風險距不可知,不碰)
+      兩張 TP 同價、R≈1(做空)             → bor_1r(BOR 固定1R;保留熔斷計數)
+      兩張 TP 同價、R≈2.5                 → s4h_fixed(S4H 固定2.5R)
+      兩張 TP 不同價                       → ""(傳統固定R:TP1 成交後保本)
+      一張 TP 全倉、R≈2(做空)             → fourjd_2r(4JD 2R + 0.8R 保本)
+      一張 TP 全倉、R≈4                   → box_trend
+      一張 TP 半倉                         → swing_tp(TP1 半倉 + 剩半轉折移SL)
+      其餘                                 → adopt_hold"""
+    close_side = "buy" if side == "short" else "sell"
+    oo = ex.fetch_open_orders(sym)
+    tps = []
+    for o in oo or []:
+        info = o.get("info") or {}
+        if str(info.get("reduceOnly")).lower() != "true" and not o.get("reduceOnly"): continue
+        if o.get("side") != close_side: continue
+        if info.get("posSide") and info.get("posSide") != side: continue
+        if (o.get("type") or info.get("ordType")) not in ("limit", "post_only"): continue
+        px = float(o.get("price") or info.get("px") or 0); amt = float(o.get("remaining") or o.get("amount") or info.get("sz") or 0)
+        if px > 0 and amt > 0: tps.append((px, amt, o.get("id")))
+    if not tps:
+        return ("swing_full", None, str(ct), "交易所無TP單")
+    loss_side_ok = (sl_trig > entry) if side == "short" else (sl_trig < entry)
+    if not loss_side_ok:
+        return ("adopt_hold", None, str(ct), "停損已在獲利側,原始風險不可知")
+    risk0 = abs(entry - sl_trig)
+    tps.sort(key=lambda t: abs(t[0] - entry))
+    Rs = [abs(t[0] - entry) / risk0 for t in tps]
+    tot = sum(t[1] for t in tps)
+    same_px = (max(t[0] for t in tps) - min(t[0] for t in tps)) / entry <= 0.003
+    # ★R 用「成交均價」算,但 TP 是用「訊號K收盤」算的 → 滑價會把 R 推偏(實測 BOR 的 BICO 1.35、CC 0.78),
+    #   區間要放寬;各類別區間互不重疊。目前開著的「兩張同價TP」策略只有 BOR(1R)/S4H(2.5R)/CME缺口(2R,限BTC/ETH/SOL)。
+    _is_cme = (sym.split(":")[0] in globals().get("CME_GAP_COINS", []))
+    if len(tps) >= 2 and same_px:
+        R = Rs[0]
+        if _is_cme and 1.6 <= R <= 2.4:
+            return ("cme_gap", tps[0][2], str(ct), f"CME幣兩張TP同價 R={R:.2f}")
+        if side == "short" and 0.6 <= R <= 1.5:
+            return ("bor_1r", tps[0][2], str(ct), f"兩張TP同價 R={R:.2f}")
+        if side == "short" and 2.0 <= R <= 3.0:
+            return ("s4h_fixed", tps[0][2], str(ct), f"兩張TP同價 R={R:.2f}")
+        return ("adopt_hold", None, str(ct), f"兩張TP同價但 R={R:.2f} 對不上已知策略")
+    if len(tps) >= 2:
+        return ("", tps[0][2], str(round(ct - tps[0][1], 8)), f"兩張TP不同價 R={Rs[0]:.2f}/{Rs[-1]:.2f}")
+    R = Rs[0]; frac = tot / ct if ct else 0
+    if frac >= 0.9:
+        if side == "short" and 1.6 <= R <= 2.5:
+            return ("fourjd_2r", tps[0][2], str(ct), f"單張全倉TP R={R:.2f}")
+        if _is_cme and side == "long" and 1.6 <= R <= 2.4:     # CME缺口倉太小拆不了半→單張全倉TP
+            return ("cme_gap", tps[0][2], str(ct), f"CME幣單張全倉TP R={R:.2f}")
+        if 3.5 <= R <= 4.5:
+            return ("box_trend", tps[0][2], str(ct), f"單張全倉TP R={R:.2f}")
+        return ("adopt_hold", None, str(ct), f"單張全倉TP R={R:.2f} 對不上已知策略")
+    if 0.3 <= frac <= 0.7:
+        return ("swing_tp", tps[0][2], str(round(ct - tps[0][1], 8)), f"單張半倉TP R={R:.2f}")
+    return ("adopt_hold", None, str(ct), f"TP量比例{frac:.2f}對不上已知策略")
+
+
 def adopt_untracked_okx_positions():
     """啟動時把未追蹤的 OKX 倉位納入保本追蹤：讀既有止損推算R→達1R自動移保本。
     讀不到止損則只發通知、不亂下單(避免重複止損/亂猜)。採用倉位不做金字塔。"""
@@ -8337,12 +8448,21 @@ def adopt_untracked_okx_positions():
                     if _atrA > 0: risk = max(risk, _atrA)
             except Exception as _atr_err:
                 print(f"[Adopt] {sym} ATR下限計算失敗(用原risk): {_atr_err}", flush=True)
-            # 接管倉統一走 swing_full(整倉,與 BingX 一致)——不補TP。
-            # 用戶要:接管動作 = 達1R保本 + N字型移動停利(check_trailing swing_full 分支處理)。
-            # 原「有TP→固定R(等TP1才移SL)」改掉,改成主動的整倉移SL。
+            # ★★2026-09-14 改:不再一律 swing_full。先看交易所上掛著的 TP 限價單推回原策略的出場規格
+            #   (追蹤紀錄已改存 volume,這裡只是紀錄仍遺失時的保險)。認不出來→adopt_hold 不碰。
             tp1_id=None
             inferred_es  = "swing_full"
             inferred_rem = str(ct)
+            try:
+                _inf = _infer_adopted_exit(ex, sym, side, entry, sl_trig, ct)
+            except Exception as _ie:
+                _inf = None
+                print(f"[Adopt] {sym} 出場推斷失敗(退回舊行為 swing_full): {_ie}", flush=True)
+            if _inf:
+                inferred_es, tp1_id, inferred_rem, _why = _inf
+                if inferred_es != "swing_full":
+                    risk = abs(entry - sl_trig)      # 固定R類用原始停損距(ATR下限只給讓跑類)
+                print(f"[Adopt] {sym} {side} 出場推斷 → {inferred_es}({_why})", flush=True)
             tkey=f"okx_adopt_{inst_id}_{side}_{int(time.time())}"
             active_real_trades[tkey]={
                 "exchange":"okx","inst_id":inst_id,"symbol":sym,"direction":side,
@@ -8356,7 +8476,11 @@ def adopt_untracked_okx_positions():
                 "bot_verified":True,   # ★2026-08-03 已用broker tag驗證=bot自己開的倉,才准被時間停損碰
             }
             adopted+=1
-            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ swing_full 達1R保本+N字型移SL")
+            _es_txt = {"swing_full": "swing_full 轉折移SL", "bor_1r": "BOR 固定1R(不動)", "s4h_fixed": "S4H 固定2.5R(不動)",
+                       "fourjd_2r": "4JD 2R+0.8R保本", "box_trend": "箱突破 4R", "swing_tp": "TP1半倉+剩半轉折移SL",
+                       "": "固定R TP1/TP2", "cme_gap": "CME缺口 2R+300h超時",
+                       "adopt_hold": "認不出原策略→交易所SL/TP不動"}.get(inferred_es, inferred_es)
+            dc_log(f"📥 已接管未追蹤倉位 {sym} {side}(進場{entry}、止損{sl_trig})→ {_es_txt}")
         except Exception as ie:
             print(f"[Adopt] {p.get('symbol')} 失敗: {ie}")
     # 診斷:dump 每個 OKX 接管倉的 es/sl/tp1,看 swing_full vs 固定R 分布(進Railway logs)
@@ -8501,7 +8625,7 @@ CME_GAP_TP_R        = 2.0
 CME_GAP_SL_WIN      = 12         # SL=補滿前12根1H極值
 CME_GAP_FILL_WIN_H  = 336        # 缺口有效期2週
 CME_GAP_TIMEOUT_H   = 300        # 進場後300h未觸SL/TP→市價平倉(回測同款)
-CME_GAP_STATE_FILE  = "cme_gap_state.json"
+CME_GAP_STATE_FILE  = os.path.join(_PERSIST_DIR, "cme_gap_state.json")   # ★09-14 改存 volume(武裝中的缺口 redeploy 不丟)
 
 # ★2026-07-19 全域時間停損(用戶要求改善持單體感):任何倉開超過此時數還沒觸TP/SL→市價平。
 # 動機:真實持倉分佈=贏單中位0h(秒收)但輸單拖3.8h、3筆抱>3天(最長85h)→「贏的秒跑輸的拖著看紅盤」體感最差。
@@ -8690,6 +8814,8 @@ def main_polling_loop():
     build_dynamic_symbols()
     # 還原重啟前的倉位追蹤（保本/移動止損續行，解決 redeploy 後追蹤丟失）
     load_active_trades()
+    load_risk_state()   # ★BOR/4JD 熔斷計數(存在 volume,redeploy 不歸零)
+    print(f"[Persist] 存檔目錄 {_PERSIST_DIR}", flush=True)
     _cme_load_state()   # CME週末缺口狀態(redeploy不丟武裝中的缺口)
     # 接管現有未追蹤的 OKX 倉位（手動開的/重啟前丟失的）→ 讀既有止損納入自動保本
     adopt_untracked_okx_positions()

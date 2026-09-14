@@ -303,6 +303,7 @@ print('done')
 - 解法：持久化到 `active_trades.json`（已加 .gitignore）。開倉後 + 每輪 `check_trailing_stops` 後存檔；啟動時 `load_active_trades()` 讀回。
 - BingX 的 `headers`（含金鑰）不落地，讀回時用全域 `BINGX_API_KEY` 重建。
 - ⚠️ 勿刪 `save_active_trades()` / `load_active_trades()` 呼叫，否則追蹤丟失重現。
+- ★★2026-09-14 訂正：上面那個修法**在 Railway 上從來沒生效**——容器檔案系統每次 redeploy 都清空，`active_trades.json` 存在程式目錄等於沒存，每次部署所有倉被重新接管、出場一律改成 swing_full。現在：Railway volume `saikesi-bot-clean-volume` 掛在 `/data`，`_PERSIST_DIR` 自動用它（追蹤池、BOR/4JD 熔斷計數、CME 缺口狀態都存這）。紀錄仍遺失時 `_infer_adopted_exit` 用交易所掛著的 TP 單推回原策略出場；認不出→`adopt_hold` 不碰。BOR(`bor_1r`)/S4H(`s4h_fixed`) 在 `_HANDS_OFF_ES`：交易所掛好 SL/TP 就不保本不移SL。
 
 **Bug B：OKX 倉位從未被追蹤（已修 commit 1e4dfb7）**
 - 原本只有 BingX 開倉會 `active_real_trades[...]=`，OKX 完全沒有 → OKX 的保本/移動止損從未執行。
