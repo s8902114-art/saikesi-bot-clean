@@ -4637,8 +4637,46 @@ BOR_COOLDOWN_BARS = 4     # 同幣冷卻 4 根 4h(對齊回測 driver 的 COOLDO
 BOR_DAILY_CAP   = 5       # 每日新倉上限(叢集風控:回測一天最多13筆、≥5筆的有43天)
 # ★熔斷(CLAUDE.md 第11條:觀察條款必須寫成代碼 —— BPR 就是栽在只寫註解)
 BOR_MAX_CONSEC_SL = 20    # 回測最長連虧 14 筆 → 連續 20 筆吃滿停損自動停用等人工複查
+# ★★貼支撐閘(2026-09-14,用戶:「這兩天空單空在支撐區,空了就下不去」)
+#   live 09-13~14 BOR 9 筆有 5 筆進場時下方 <0.25R 就有支撐區(回測只 16%),停損的 HYPE/VIRTUAL 都在其中。
+#   支撐區=官方進階班灰區定義:影線(高/低樞紐 k=3)多次停在同一水平(±1% 合併、≥2 次觸及),回看 600 根 4H。
+#   回測 724 筆(`_bt_bor_support.py`):下方 0~0.25R 有支撐 n=115 勝50% EV−0.037(唯一負桶);無支撐 n=382 勝65% EV+0.284。
+#   凍結流程(`_bt_bor_support_wf.py`,只用訓練段勝率選 tol×門檻,且總R不得低於無閘)→ 選中 tol=1%、<0.25R:
+#     全體 n 724→605 勝 60.9→63.6% EV +0.191→+0.244 總R +138.1→+147.6;驗/新/22 三層勝率都升(22層總R −1.6)
+#     日 block bootstrap:EV差 CI[+0.013,+0.093]、勝率差 CI[+0.7,+4.7]pt 皆>0;總R差 CI 跨 0(P>0=73%)
+#     滾動前推(嚴格「總R不降」才選):樣本外 勝 59.4→60.6% EV +0.162→+0.186 總R +69.7→+75.3
+#   ★回看深度:live 只給 300 根時效果縮水(EV+0.211) → 用 S4H 同一份 1000 根深抓快取(沒抓到就用 300 根,log 會印)。
+#   ★被擋的訊號照樣佔冷卻(回測是先過冷卻才套閘),否則 live 會比回測多出單。
+BOR_SUP_GATE    = True
+BOR_SUP_MIN_R   = 0.25    # 下方最近支撐區上緣離進場 < 0.25R → 不空
+BOR_SUP_TOL     = 0.01
+BOR_SUP_K       = 3
+BOR_SUP_TOUCH   = 2
+BOR_SUP_LOOK    = 600
 _BOR_DIAG = {"呼叫":0, "K棒不足":0, "無訊號":0, "停損無效":0, "停損過寬":0,
-             "冷卻":0, "每日上限":0, "熔斷":0, "成立":0}
+             "冷卻":0, "每日上限":0, "貼支撐":0, "熔斷":0, "成立":0}
+
+
+def _support_below_R(hi, lo, i, entry, sl, k=3, tol=0.01, L=600, min_touch=2):
+    """進場當下「下方最近支撐區」離進場幾 R(手抄自回測 `_lib_support_below.support_below`,已對拍)。
+    只用 ≤ i 已確認的樞紐(j ≤ i−k)。無支撐區 → (nan, 0)。"""
+    a = max(k, i - L); lv = []
+    for j in range(a, i - k + 1):
+        w0, w1 = j - k, j + k + 1
+        if w0 < 0: continue
+        if hi[j] == hi[w0:w1].max() and hi[j] > hi[w0:j].max(): lv.append(hi[j])
+        if lo[j] == lo[w0:w1].min() and lo[j] < lo[w0:j].min(): lv.append(lo[j])
+    lv = sorted(lv); zones = []
+    for p in lv:
+        if zones and (p - zones[-1]["ref"]) / zones[-1]["ref"] <= tol:
+            zones[-1]["hi"] = p; zones[-1]["n"] += 1
+        else:
+            zones.append({"ref": p, "hi": p, "n": 1})
+    risk = sl - entry
+    sup = [z for z in zones if z["n"] >= min_touch and z["hi"] < entry]
+    if not sup or risk <= 0: return float("nan"), 0
+    z = max(sup, key=lambda z: z["hi"])
+    return float((entry - z["hi"]) / risk), int(z["n"])
 _BOR_LAST_BAR: Dict[str, int] = {}
 _BOR_DAY = {"day": "", "count": 0}
 _BOR_RISK = {"consec_sl": 0, "halted": False}
@@ -4710,7 +4748,20 @@ def _check_bor_short(symbol_item: str, okx_swap_symbol: str):
         if _BOR_DAY["day"] != _today: _BOR_DAY.update(day=_today, count=0)
         if _BOR_DAY["count"] >= BOR_DAILY_CAP:
             _BOR_DIAG["每日上限"] += 1; return False, "", 0.0
-        _BOR_LAST_BAR[okx_swap_symbol] = _bar_ts
+        _BOR_LAST_BAR[okx_swap_symbol] = _bar_ts          # ★先佔冷卻(被貼支撐閘擋掉也算,對齊回測)
+        if BOR_SUP_GATE:
+            _deep = _s4h_deep_candles(okx_swap_symbol, df)
+            try:
+                _j = int(_deep.index.get_loc(df.index[i]))
+            except Exception:
+                _deep, _j = df, i                            # 對不上就用淺的 300 根
+            _sr, _sn = _support_below_R(_deep["high"].values.astype(float), _deep["low"].values.astype(float),
+                                        _j, float(e), float(sl), k=BOR_SUP_K, tol=BOR_SUP_TOL,
+                                        L=BOR_SUP_LOOK, min_touch=BOR_SUP_TOUCH)
+            if _sr == _sr and _sr < BOR_SUP_MIN_R:
+                _BOR_DIAG["貼支撐"] += 1
+                print(f"[BOR-Short] {symbol_item} 擋:下方 {_sr:.2f}R 就有支撐區(觸{_sn}次,回看{min(_j, BOR_SUP_LOOK)}根)", flush=True)
+                return False, "", 0.0
         _BOR_DAY["count"] += 1
         _BOR_DIAG["成立"] += 1
         return True, f"突破回踩空(跌破前低{PH:.6g}→反彈回測+{deep:.2f}%→看跌吞噬)", float(sl)
