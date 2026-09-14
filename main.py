@@ -4213,7 +4213,81 @@ _S4H_DEEP_BUDGET   = {"used": 0}
 _S4H_LAST_BAR: Dict[str, int] = {}          # inst -> 上次觸發的 4h bar epoch(冷卻)
 _S4H_DAY = {"day": "", "count": 0}          # 每日新倉計數
 _S4H_DIAG = {"呼叫":0, "K棒不足":0, "非吞噬":0, "流動性":0, "無123":0, "不在斐波":0,
-             "非LL":0, "冷卻":0, "每日上限":0, "停損無效":0, "成立":0}
+             "非LL":0, "冷卻":0, "每日上限":0, "停損無效":0, "急漲擋":0, "成立":0}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ★2026-09-15 進場品質閘(S4H 急漲閘 / 4JD 位置閘 + BTC 急漲閘)
+# ══════════════════════════════════════════════════════════════════════════════
+# 用戶:「會輸的就去找原因找方法改善,提升勝率,不能砍到沒單,多空都不能啞巴」。
+# 選法事先寫死(_night_select3.py / _night_combo.py):每個候選只用訓練段(23Q4~24Q3)挑,
+#   通過 = 驗證/新幣/2022/2026(63幣)/2026(live幣池96幣) 五段 ≥4 段每筆R變好 + 整體勝率不降
+#   + 留單≥60% + BTC 日線多頭/空頭時各留≥50%(不會轉多轉空就啞巴)。
+# S4H 急漲閘(用戶做空核心「先看怎麼漲上來的:一口氣急漲不空第一個頭」,feedback_approach_1a_2a):
+#   進場前 48 根已收盤 1H 內最高點 t,往前 72 根內最低點 s = 這段上漲;途中拉回≥3%再創新高算一個A。
+#   A≤1 且 漲幅≥12% → 不空。n=627:留92% 勝39→40% 每筆+0.272→+0.300R 總R+170→+174
+#   五段 4/5(驗+0.26→+0.33 新+0.49→+0.53 22+0.42→+0.38❌ 26−0.11→−0.06 26L+0.41→+0.45)
+# 4JD 位置閘:最近30根已收盤 4H 高低區間裡,進場價位置<15% → 不空(空在這波最底,live 輸單圖共同點)
+# 4JD BTC 閘:BTC 近24h 漲>+1% → 不空(09-14 HYPE/VIRTUAL 等同一根4H 在 BTC 反彈時一起被掃)
+#   兩道合併 n=533:留65% 勝27→30% 每筆+0.151→+0.243R 總R+81→+84 五段 5/5
+#   (驗+0.63→+0.70 新+0.26→+0.50 22+0.38→+0.55 26+0.06→+0.07 26L−0.20→−0.19)
+#   ★已知:4JD 在 2026 live 幣池本身每筆 −0.20R,這兩道閘救不回,另查。
+# ★對拍:_chk_night_gates_port.py 用 exec 抽這段函式,在回測資料上逐筆重算特徵,須與回測 0 不一致。
+# ★被擋的訊號照樣佔冷卻/每日上限(回測是在已成交的單上事後過濾)。
+S4H_SPIKE_GATE     = True
+S4H_SPIKE_MAX_A    = 1
+S4H_SPIKE_RISE     = 12.0        # %
+S4H_SPIKE_PULL     = 0.03        # 拉回≥3%才算一個A
+FOURJD_POS_GATE    = True
+FOURJD_POS_N       = 30          # 根 4H
+FOURJD_POS_MIN     = 15.0        # %
+FOURJD_BTC_GATE    = True
+FOURJD_BTC_MAX     = 1.0         # BTC 24h 漲幅上限 %
+
+
+def _gate_count_As(h, l, s, e, pull=0.03):
+    """起漲低點 s → 高點 e 之間的 A 數:高點之後先拉回≥pull、再被創新高,那個高點算一個A(同 _lib_1a2a.count_As)。"""
+    n = 0; hi = h[s]; pulled = False
+    for i in range(s + 1, e + 1):
+        if h[i] > hi:
+            if pulled: n += 1
+            hi = h[i]; pulled = False
+        elif l[i] <= hi * (1 - pull):
+            pulled = True
+    return n
+
+
+def _gate_rise_leg(h, l, W=48, B=72, pull=0.03):
+    """h/l = 已收盤 1H(最後一根=決策時點前最後一根)。回傳 (A數, 漲幅%)。"""
+    k = len(h)
+    a = max(0, k - W); t = a + int(np.argmax(h[a:k]))
+    b = max(0, t - B); s = b + int(np.argmin(l[b:t + 1]))
+    if t <= s: return 0, 0.0
+    return int(_gate_count_As(h, l, s, t, pull)), float((h[t] / l[s] - 1) * 100)
+
+
+def _gate_range_pos_short(h4, l4, e, N=30):
+    """最近 N 根已收盤 4H 高低區間(含進場價)裡,進場價的位置%(0=最低點)。"""
+    hh = h4[-N:]; ll = l4[-N:]
+    hi = max(float(np.max(hh)), e); lo = min(float(np.min(ll)), e)
+    return float((e - lo) / (hi - lo) * 100) if hi > lo else float("nan")
+
+
+_BTC24_CACHE: Dict[int, float] = {}
+
+
+def _btc_24h_change(end_ts: pd.Timestamp) -> float:
+    """BTC 永續:截至 end_ts(含)已收盤 15m 的收盤 vs 96 根前。抓不到回 nan(呼叫端放行)。"""
+    key = int(end_ts.timestamp())
+    if key in _BTC24_CACHE: return _BTC24_CACHE[key]
+    try:
+        b = fetch_market_candles("BTC-USDT-SWAP", "15m", 300)
+        b = b[b.index + pd.Timedelta(minutes=15) <= end_ts]
+        v = float((b["close"].values[-1] / b["close"].values[-97] - 1) * 100) if len(b) >= 97 else float("nan")
+    except Exception as ex:
+        print(f"[BTC24h] 失敗(放行): {ex}"); v = float("nan")
+    if len(_BTC24_CACHE) > 64: _BTC24_CACHE.clear()
+    _BTC24_CACHE[key] = v
+    return v
 
 
 def _s4h_pivots(hi, lo, pv):
@@ -4415,6 +4489,18 @@ def _check_s4h_short(symbol_item: str, okx_swap_symbol: str):
             _S4H_DIAG["停損無效"] += 1; return False, "", 0.0
         _S4H_LAST_BAR[okx_swap_symbol] = _bar_ts
         _S4H_DAY["count"] += 1
+        if S4H_SPIKE_GATE:                              # ★2026-09-15 急漲閘(說明見常數區)
+            _end = df.index[i] + pd.Timedelta(hours=4)
+            d1 = fetch_market_candles(okx_swap_symbol, "1H", 300)
+            if d1 is not None and not d1.empty:
+                d1 = d1[d1.index + pd.Timedelta(hours=1) <= _end]
+                if len(d1) >= 130:
+                    _nA, _rise = _gate_rise_leg(d1["high"].values.astype(float), d1["low"].values.astype(float),
+                                                pull=S4H_SPIKE_PULL)
+                    if _nA <= S4H_SPIKE_MAX_A and _rise >= S4H_SPIKE_RISE:
+                        _S4H_DIAG["急漲擋"] += 1
+                        print(f"[S4H-Short] {symbol_item} 擋:一口氣急漲上來(A={_nA} 漲{_rise:.1f}%),不空第一個頭", flush=True)
+                        return False, "", 0.0
         _S4H_DIAG["成立"] += 1
         return True, f"4h吞噬+趨勢線123+斐波{S4H_FIB_LO}~{S4H_FIB_HI}+LL結構", float(sl)
     except Exception as ex:
@@ -4467,7 +4553,7 @@ FOURJD_LOOKBACK   = 210      # 需要的 1H 根數下限(減速24+盤整36+ADX�
 FOURJD_MAX_CONSEC_SL = 8     # 回測最長連續吃滿停損 = 4 筆;連續 8 筆吃滿 → 自動停用等人工複查
 _FOURJD_DIAG = {"呼叫": 0, "K棒不足": 0, "無位階": 0, "未觸及": 0, "非跌破": 0,
                 "減速不合": 0, "觸及不足": 0, "量不足": 0, "ADX盤整": 0,
-                "流動性": 0, "冷卻": 0, "停損無效": 0, "熔斷": 0, "成立": 0}
+                "流動性": 0, "冷卻": 0, "停損無效": 0, "熔斷": 0, "位置擋": 0, "BTC漲擋": 0, "成立": 0}
 _FOURJD_LAST_BAR: Dict[str, int] = {}
 _FOURJD_RISK = {"consec_sl": 0, "halted": False}
 
@@ -4619,6 +4705,24 @@ def _check_fourjd_short(symbol_item: str, okx_swap_symbol: str):
         if _bar_ts - _FOURJD_LAST_BAR.get(okx_swap_symbol, 0) < FOURJD_COOLDOWN_BARS * 3600:
             _FOURJD_DIAG["冷卻"] += 1; return False, "", 0.0
         _FOURJD_LAST_BAR[okx_swap_symbol] = _bar_ts
+        _end = d1.index[-1] + pd.Timedelta(hours=1)     # ★2026-09-15 位置閘 + BTC 急漲閘(說明見 S4H 常數區)
+        if FOURJD_POS_GATE:
+            d4 = fetch_market_candles(okx_swap_symbol, "4H", 60)
+            if d4 is not None and not d4.empty:
+                d4 = d4[d4.index + pd.Timedelta(hours=4) <= _end]
+                if len(d4) >= FOURJD_POS_N:
+                    _pos = _gate_range_pos_short(d4["high"].values.astype(float), d4["low"].values.astype(float),
+                                                 float(d1["close"].values[-1]), FOURJD_POS_N)
+                    if _pos == _pos and _pos < FOURJD_POS_MIN:
+                        _FOURJD_DIAG["位置擋"] += 1
+                        print(f"[4JD-Short] {symbol_item} 擋:在最近{FOURJD_POS_N}根4H的最底部(位置{_pos:.0f}%)", flush=True)
+                        return False, "", 0.0
+        if FOURJD_BTC_GATE:
+            _b24 = _btc_24h_change(_end)
+            if _b24 == _b24 and _b24 > FOURJD_BTC_MAX:
+                _FOURJD_DIAG["BTC漲擋"] += 1
+                print(f"[4JD-Short] {symbol_item} 擋:BTC 24h 漲 {_b24:+.2f}%", flush=True)
+                return False, "", 0.0
         _FOURJD_DIAG["成立"] += 1
         return True, why, float(sl)
     except Exception as ex:
