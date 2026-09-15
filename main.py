@@ -3796,6 +3796,50 @@ VLONG_MAX_POS_PCT   = 70.0   # ★主閘:進場價在前24h區間的百分位上
 #   ★9/4 實際那6筆有5筆位階在74~93%,光位階閘就擋掉(只有TRIA位階51%會放行)。
 VLONG_MAX_RUNUP_PCT = 999.0  # 漲幅閘=關閉(999)。保留變數與log輸出供觀察,不參與擋單。
 
+# ★★★2026-09-16 群聚閘 + BTC 反彈閘(用戶:「把2V弄到可以用為止」)──────────────────────────
+# 2026 回測 V成型 −0.23R/勝24%,一路追到底才找到原因:**V成型是「全市場爆倉後集體反彈」的事件策略**。
+#   全部 3252 筆(原12期 + 2025/2026 幣安全市場 + 已下架幣)前5天貢獻 100% 總R(2025-02-03 +550R、2025-10-10 +450R);
+#   平常日零星的 V 勝率 31%、每筆≈0R —— 17 種出場、OI三種量法、秋總錨點、1H/4H/日線支撐、V尺寸、擴大幣池全部救不起來。
+# 即時判斷(只用進場當下以前):
+#   ①群聚:前 4h 內掃描池裡「別的幣」也出過 V成型(過完其他閘)的數量,換算到 163 幣池 ≥ 3
+#      原12期 +1.07/勝76%、2025補的900多個幣(含已下架) +0.97~+1.62,<3 個 ≈0
+#   ②BTC 已從 24h 最低點反彈 ≥3%(崩盤殺完了,不是還在殺)—— 崩盤中途出現的 V 會被下一段再殺(2024-04-12/08-05/12-09)
+#   合併驗收(含 8 次從沒參與挑選的崩盤月 _bt_crash_events.py):n=1418 每筆+1.03R 勝73% 吃滿停損24%
+#     事件日 22 天 賺17 虧5,拿掉最賺2天仍 +0.71R;群聚但 BTC 未反彈 n=387 +0.00R
+#     反彈門檻 2/3/4/5% = +0.83/+1.03/+0.93/+0.89(平台,不是單點);腳本 _chk_crowd_btc.py
+# ★代價(照實):平常日幾乎不出單,崩盤反彈時一次出很多;2026 前9個月只有 08-22 一次群聚,且BTC未反彈→會被擋。
+# ★被群聚/BTC閘擋掉的 V 照樣記進群聚名單(回測的群聚就是算所有過完其他閘的 V)。
+VLONG_CROWD_GATE      = True
+VLONG_CROWD_MIN_163   = 3.0      # 換算到 163 幣池的「別的幣出V」數量下限;實際門檻 = 3 × 目前掃描池幣數 / 163
+VLONG_CROWD_WIN_SEC   = 4 * 3600
+VLONG_BTC_REBOUND_MIN = 3.0      # BTC 收盤 / 近96根15m最低點 − 1 ≥ 3%
+_VLONG_CROWD: Dict[str, float] = {}   # symbol -> 最近一次出 V(過完其他閘)的訊號K起始 epoch
+_BTC_REB_CACHE: Dict[int, float] = {}
+
+
+def _btc_rebound_24h(end_ts: pd.Timestamp) -> float:
+    """BTC 永續截至 end_ts(含)已收盤 15m:收盤 / 近96根最低點 − 1(%)。抓不到回 nan(呼叫端放行,同其他閘)。"""
+    key = int(end_ts.timestamp())
+    if key in _BTC_REB_CACHE: return _BTC_REB_CACHE[key]
+    try:
+        b = fetch_market_candles("BTC-USDT-SWAP", "15m", 300)
+        b = b[b.index + pd.Timedelta(minutes=15) <= end_ts]
+        v = float((b["close"].values[-1] / b["low"].values[-96:].min() - 1) * 100) if len(b) >= 96 else float("nan")
+    except Exception as ex:
+        print(f"[BTC反彈] 失敗(放行): {ex}"); v = float("nan")
+    if len(_BTC_REB_CACHE) > 64: _BTC_REB_CACHE.clear()
+    _BTC_REB_CACHE[key] = v
+    return v
+
+
+def _vlong_crowd_count(symbol_item: str, now_ts: float) -> int:
+    """記下本幣這次出V,回傳前 4h 內「別的幣」出過 V 的數量(並清掉過期紀錄)。"""
+    for k in [k for k, t in _VLONG_CROWD.items() if now_ts - t > VLONG_CROWD_WIN_SEC]:
+        _VLONG_CROWD.pop(k, None)
+    n = sum(1 for k, t in _VLONG_CROWD.items() if k != symbol_item and t <= now_ts)
+    _VLONG_CROWD[symbol_item] = now_ts
+    return n
+
 # ★★2026-09-06 真假吸收閘(用戶逼出來的:「有大量進場有吸收,後面才會帶動市場價格」)────────
 # 原本 VLONG 的「吸收」只有一行 `cvd[低2]<cvd[低1]`,沒有幅度也沒有量 → CVD 跌 1 單位也算吸收。
 # 用戶講的機制:「很多人市價賣,主力用**限價掛單**吸收 → CVD降但價格下不去 → 才形成第二個V」。
@@ -3845,7 +3889,7 @@ def _vlong_zigzag_lows(hi, lo, pct):
 
 _VLONG_LAST: Dict[str, dict] = {}   # symbol -> 最近一次V成型明細(供訊號卡數據面板)
 _VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0,
-               "追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "觸發": 0}
+               "追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "群聚不足": 0, "BTC未反彈": 0, "觸發": 0}
 
 
 def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
@@ -4028,6 +4072,21 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                 continue
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
+            _crowd_txt = ""
+            if VLONG_CROWD_GATE:                            # ★2026-09-16 群聚閘 + BTC 反彈閘(說明見常數區)
+                _now = float(df.index[-1].timestamp())
+                _n_other = _vlong_crowd_count(symbol_item, _now)
+                _need = VLONG_CROWD_MIN_163 * len(SYMBOLS) / 163.0
+                if _n_other < _need:
+                    _VLONG_DIAG["群聚不足"] += 1
+                    print(f"[V-Long] {symbol_item} V成型成立但前4h只有{_n_other}個別的幣出V(需{_need:.1f})→不是崩盤反彈,不進", flush=True)
+                    continue
+                _reb = _btc_rebound_24h(df.index[-1] + pd.Timedelta(minutes=15))
+                if _reb == _reb and _reb < VLONG_BTC_REBOUND_MIN:
+                    _VLONG_DIAG["BTC未反彈"] += 1
+                    print(f"[V-Long] {symbol_item} 群聚{_n_other}幣但BTC只從24h低點彈{_reb:.1f}%(<{VLONG_BTC_REBOUND_MIN}%)→可能還在殺,不進", flush=True)
+                    continue
+                _crowd_txt = f"/群聚{_n_other}幣/BTC反彈{_reb:.1f}%"
             _VLONG_DIAG["觸發"] += 1
             try:
                 _oiv = (pd.Series(df["oi"].values.astype(float)).ffill().bfill().values
@@ -4042,7 +4101,7 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                 }
             except Exception:
                 pass
-            return True, f"V成型吸收多(擺動{pct*100:g}%/間隔{j2-j1}根/低點{p1:.6g}→{p2:.6g})", sl
+            return True, f"V成型吸收多(擺動{pct*100:g}%/間隔{j2-j1}根/低點{p1:.6g}→{p2:.6g}{_crowd_txt})", sl
         _VLONG_DIAG["無V成型"] += 1
         return False, "", 0.0
     except Exception as e:
