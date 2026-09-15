@@ -3868,6 +3868,7 @@ def _vlong_crowd_count(symbol_item: str, now_ts: float) -> int:
 VLONG_ABS_MIN_VOLX = 1.2     # ①大量進場:兩低點間平均量 ≥ 1.2 × 該幣近96根中位量
 VLONG_ABS_MIN_CVDX = 1.0     # ②賣壓夠重:CVD下降 ≥ 1.0 × 該幣近96根常態CVD波動
 VLONG_TP_R = 2.5
+VLONG_CVD_PAGES = 6          # ★2026-09-16 OKX rubik taker-volume 一頁只回 72 筆(6h),翻 6 頁 = 36h(吸收強度基準要 ≈24h)
 
 
 def _vlong_zigzag_lows(hi, lo, pct):
@@ -3899,8 +3900,17 @@ def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
     OKX 回傳格式 [ts, sellVol, buyVol];一次約 576 根 5m ≈ 48 小時。
     ★與回測一致:回測的合約CVD也是用 taker buy/sell 推算,不是 Coinalyze。"""
     ccy = okx_swap_symbol.split("-")[0]
-    rows = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
-                                  {"ccy": ccy, "instType": "CONTRACTS", "period": "5m"})
+    # ★★2026-09-16 OKX 改版:一次只回 72 筆(6h),不再是 576 筆(48h)→ live log 每次都「CVD不足」,V成型等於全瞎。
+    #   帶 end 往回翻頁可拿回完整歷史(實測 8 頁=48h、無缺口、間隔0.5秒不被限流)。
+    #   吸收強度的基準要低點2之前 97 根15m(≈24h)→ 翻 VLONG_CVD_PAGES 頁(36h)。
+    rows = []; _end = None
+    for _pg in range(VLONG_CVD_PAGES):
+        _q = {"ccy": ccy, "instType": "CONTRACTS", "period": "5m"}
+        if _end is not None: _q["end"] = str(_end)
+        _r = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume", _q)
+        if not _r: break
+        rows += _r; _end = int(_r[-1][0]) - 1
+        if _pg < VLONG_CVD_PAGES - 1: time.sleep(0.35)
     if not rows or len(rows) < 60:
         return pd.Series(dtype=float)
     recs = []
@@ -3978,14 +3988,9 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
         n = len(hi)
         if n < 200:
             _VLONG_DIAG["K棒不足"] += 1; return False, "", 0.0
-        cvd = _okx_contract_cvd_15m(okx_swap_symbol or symbol_item.replace("/", "-") + "-SWAP",
-                                    df.index)
-        if cvd is None or len(cvd) == 0:
-            _VLONG_DIAG["無CVD"] += 1; return False, "無合約CVD來源", 0.0
-        cv = cvd.values.astype(float)
-        ok_mask = np.isfinite(cv)
-        if ok_mask.sum() < 60:
-            _VLONG_DIAG["CVD不足"] += 1; return False, "合約CVD數據不足", 0.0
+        # ★2026-09-16 改成「價格先成立 V 型才抓 CVD」(下方迴圈內):CVD 現在要向 OKX 翻 6 頁,
+        #   每幣每 15 分鐘都抓會被限流;V 型價格條件本來就很少成立。判斷結果與先抓完全相同(CVD 只在 V 成立後才用到)。
+        cv = None
         # ★2026-09-01 修(用戶回報 ZRO 有吸收卻沒抓到):
         #   原本把價格截斷到 CVD 的 48 小時範圍才跑 ZigZag → 5% 擺動在 48h 內通常只形成
         #   **1 個**低點樞紐(不足 2 個),幾乎永遠判不出 V。回測有幾個月歷史故樞紐充足,
@@ -4009,6 +4014,13 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                 print(f"[V-Long] {symbol_item} 流動性不足(15m成交額中位 {_liq:,.0f} < "
                       f"{VLONG_MIN_LIQ:,.0f})→跳過", flush=True)
                 continue
+            if cv is None:
+                cvd = _okx_contract_cvd_15m(okx_swap_symbol or symbol_item.replace("/", "-") + "-SWAP", df.index)
+                if cvd is None or len(cvd) == 0:
+                    _VLONG_DIAG["無CVD"] += 1; return False, "無合約CVD來源", 0.0
+                cv = cvd.values.astype(float)
+                if np.isfinite(cv).sum() < 60:
+                    _VLONG_DIAG["CVD不足"] += 1; return False, "合約CVD數據不足", 0.0
             if not (np.isfinite(cv[j1]) and np.isfinite(cv[j2])):
                 continue                                   # 樞紐落在CVD涵蓋範圍外 → 跳過這個擺動
             if not (float(cv[j2]) < float(cv[j1])): continue   # ★吸收:合約CVD低點降低
