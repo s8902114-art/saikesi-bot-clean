@@ -3695,6 +3695,45 @@ _ENGULF_DIAG = {"呼叫":0, "K棒不足":0, "非下跌regime":0, "不在近12根
 # 最怕收盤延遲/跳空),應是首批停用而非例外。★但它live真R+0.130確實≈回測+0.106(唯一不衰減的策略),
 # 重開條件:前5支驗證完(live勝率回到45-50%)後,單獨放它回來再觀察20筆。原註:# 山寨看跌吞噬空(1H,2026-06-24 WF):放量吞噬+價<EMA100下跌regime。★2026-07-01忠實複刻重測(真main.py邏輯/7個不重疊期間23Q4~25H2/n=550):EV+0.176,7/7期全正,PF1.29,轉正式(拿掉觀察標籤)。限非主流山寨,純價量不碰OI/CVD,固定2R,SL近高。
 ENGULF_MIN_LIQ = 100_000.0   # ★2026-09-11 近96根1H USDT成交額中位下限 —— **補回 0906 回測規格裡本來就有、live 漏抄的閘**
+
+# ★★★2026-09-16 深夜 大盤波動閘(用戶:「再搞搞 不然空單這樣行嗎」)──────────────────────────
+# 起因:吞噬空在 2026(到09-15,live幣池97) 每筆 −0.119/勝36%,而且**比配對隨機還差**
+#   (超額 −0.241,按天 block bootstrap P(超額≥0)=3.5%)→ 不是大環境逆風,是進場在那個環境下反轉。
+# 先排除的方向(都做過同等力度、都沒過):
+#   ①進場K品質閘(7特徵×6門檻×2方向 + 兩兩組合):訓練段選到的在 2026 全失效。
+#   ★真因診斷:**2026 與舊期別的進場K品質分布幾乎一模一樣**(上影0.10/0.09、實體0.78/0.80、
+#     量倍1.82/1.89、位階28.8/27.5、ATR1.27/1.23、前24h漲幅−0.58/−0.86)→ 訊號沒變差,
+#     所以加進場閘本來就救不了。變的是「在什麼環境下觸發」。
+# 這一刀 = BTC 近96根15m 的 (high−low) 平均 ÷ 現價,即大盤 24h 平均真實區間%。
+#   機制:大盤在恐慌高波動時做空 = 空在殺盤尾段,被反彈打掉。跟用戶「不要空在大支撐」同一件事。
+# 驗收(只用訓練段22H1/22H2/23H1選門檻,2026完全不參與挑選;腳本 _chk_btcvol.py):
+#   吞噬空 訓練 +1.096→**+1.794**(勝62→71%) 驗證 +0.699→**+1.172** 新幣 +0.532→**+0.730**
+#          **2026 −0.119→+0.050**(勝36→38%) 留存 50~68%;**逐期 9/9 全正**
+# ★一般性檢查(關鍵,避免曲線擬合):同一刀套到另外三支空單 —— S4H 2026 +0.372→**+0.81**(同向),
+#   4JD −0.216→−0.167(仍負,不套)、BOR −0.02→−0.12(**變差,不套**)。
+#   同時淘汰了「BTC 7天跌幅」那半:全體空單單獨看是**反向**的(≥−2% −0.048 vs <−2% +0.009)=曲線擬合。
+# ★2026 閘後 CI[−0.271,+0.460]、P(EV>0)=58% —— 只到「從明確虧損變成打平」,不是證明會賺,照實記。
+ENGULF_BTCVOL_GATE = True
+ENGULF_BTCVOL_MAX  = 0.30    # BTC 近96根15m 平均(high−low)÷現價 的上限%
+_BTCVOL_CACHE: Dict[int, float] = {}
+
+
+def _btc_atr24_pct() -> float:
+    """BTC 近96根已收盤15m 的 (high−low) 平均 ÷ 最新收盤 ×100。抓不到回 nan(呼叫端放行,同其他閘)。"""
+    key = int(time.time() // 300)
+    if key in _BTCVOL_CACHE: return _BTCVOL_CACHE[key]
+    v = float("nan")
+    try:
+        b = fetch_market_candles("BTC-USDT-SWAP", "15m", 300)
+        if b is not None and len(b) >= 96:
+            h = b["high"].values[-96:].astype(float); l = b["low"].values[-96:].astype(float)
+            c = float(b["close"].values[-1])
+            if c > 0: v = float(np.mean(h - l) / c * 100)
+    except Exception as ex:
+        print(f"[BTC波動] 失敗(放行): {ex}", flush=True)
+    if len(_BTCVOL_CACHE) > 32: _BTCVOL_CACHE.clear()
+    _BTCVOL_CACHE[key] = v
+    return v
 # 證據(_sim_engulf_exits.py + 濾網拆解,2026 live幣池重放 A窗05-01~09-11 / B窗01-10~03-10,固定2R):
 #   無此閘(=live) n=436 EV−0.049 / 有此閘 n=227 EV+0.081(A+0.038 B+0.159)
 #   **被擋掉的 n=209 EV−0.190 CI[−0.362,−0.005]**,兩窗皆負。
@@ -3734,8 +3773,18 @@ def _check_engulf_short(symbol_item: str, df: pd.DataFrame) -> Tuple[bool, str]:
         _body = abs(float(cl[-1]) - float(op[-1])) / _rng
         if _body < ENGULF_MIN_BODY:
             _ENGULF_DIAG["實體不足"] += 1; return False, ""
+        # ★★2026-09-16 大盤波動閘(說明見 ENGULF_BTCVOL_GATE 常數區):恐慌高波動時不空
+        _bv = float("nan")
+        if ENGULF_BTCVOL_GATE:
+            _bv = _btc_atr24_pct()
+            if _bv == _bv and _bv > ENGULF_BTCVOL_MAX:
+                _ENGULF_DIAG["大盤波動擋"] = _ENGULF_DIAG.get("大盤波動擋", 0) + 1
+                print(f"[Engulf-Short] {symbol_item} 擋:BTC 24h平均區間 {_bv:.2f}%"
+                      f"(>{ENGULF_BTCVOL_MAX}%)=恐慌殺盤,空單易被反彈打掉", flush=True)
+                return False, ""
         _ENGULF_DIAG["成立"] += 1
-        return True, f"看跌吞噬+放量+價<EMA100+實體{_body:.0%}"
+        _bvt = f"+大盤波動{_bv:.2f}%" if _bv == _bv else ""
+        return True, f"看跌吞噬+放量+價<EMA100+實體{_body:.0%}{_bvt}"
     except Exception as e:
         print(f"[Engulf-Short] {symbol_item} 失敗: {e}")
         return False, ""
@@ -4476,6 +4525,24 @@ FOURJD_POS_MIN     = 15.0        # %
 FOURJD_BTC_GATE    = True
 FOURJD_BTC_MAX     = 1.0         # BTC 24h 漲幅上限 %
 
+# ★★★2026-09-16 深夜 4JD 進場品質閘(用戶:「再搞搞 不然空單這樣行嗎」)──────────────────────
+# 4JD 在 2026(到09-15,live幣池97) 每筆 −0.216/勝17%,**比配對隨機還差**(超額 −0.205,P(超額≥0)=7.6%)。
+# ★先說清楚:**既有的 FOURJD_POS_GATE(4H/N30/≥15%) 在 2026 實測是白擋的** ——
+#   被它擋掉的 EV −0.193、留下的 −0.204,兩邊一樣爛,只砍單量不改品質(腳本 _an_shorts_gated.py)。
+#   留著是因為被擋那批確實略差,但它救不了策略。
+# 這兩道是另外選出來的(只用訓練段22H1/22H2/23H1、用勝率選,2026完全不參與挑選;
+#   並要求驗證段與新幣層都要比各自無閘基準改善才進候選 → 592/330 個候選裡取訓練段勝率第一)：
+#   ①進場位階 = 近96根已收盤1H 區間裡進場收盤的位置% ≥ 30(太貼近期低點=空在殺完的底部)
+#   ②進場K(1H)實體佔全棒幅 ≥ 0.50
+# 驗收:訓練 +0.383→**+0.663**(勝34→48.7%) 驗證 +0.302→**+0.433** 新幣 +0.211→**+0.310**
+#      **2026 −0.216→+0.035**(勝17→22%) 留存26%;逐期 5/5 全正。腳本 _an_short_env2.py
+# ★誠實標註:2026 CI 跨 0(P(EV>0)≈56%)、留存只有26% → 這是「從明確虧損變成打平」,不是證明會賺。
+# ★BTC 波動閘(吞噬空那道)對 4JD **無效**(2026 −0.216→−0.167 仍負),所以沒套上來。
+FOURJD_Q_GATE      = True
+FOURJD_Q_POS_N     = 96          # 根 1H
+FOURJD_Q_POS_MIN   = 30.0        # %
+FOURJD_Q_BODY_MIN  = 0.50        # 進場1H K棒實體佔全棒幅
+
 
 def _gate_count_As(h, l, s, e, pull=0.03):
     """起漲低點 s → 高點 e 之間的 A 數:高點之後先拉回≥pull、再被創新高,那個高點算一個A(同 _lib_1a2a.count_As)。"""
@@ -4955,6 +5022,25 @@ def _check_fourjd_short(symbol_item: str, okx_swap_symbol: str):
             if _b24 == _b24 and _b24 > FOURJD_BTC_MAX:
                 _FOURJD_DIAG["BTC漲擋"] += 1
                 print(f"[4JD-Short] {symbol_item} 擋:BTC 24h 漲 {_b24:+.2f}%", flush=True)
+                return False, "", 0.0
+        if FOURJD_Q_GATE:      # ★2026-09-16 進場品質閘(說明見 FOURJD_Q_GATE 常數區)
+            _h1 = d1["high"].values.astype(float); _l1 = d1["low"].values.astype(float)
+            _c1 = d1["close"].values.astype(float); _o1 = d1["open"].values.astype(float)
+            if len(_c1) >= FOURJD_Q_POS_N:
+                _w = slice(-FOURJD_Q_POS_N, None)
+                _rr = float(_h1[_w].max() - _l1[_w].min())
+                _qp = float((_c1[-1] - _l1[_w].min()) / _rr * 100) if _rr > 0 else 50.0
+                if _qp < FOURJD_Q_POS_MIN:
+                    _FOURJD_DIAG["位階低擋"] = _FOURJD_DIAG.get("位階低擋", 0) + 1
+                    print(f"[4JD-Short] {symbol_item} 擋:進場在近{FOURJD_Q_POS_N}根1H區間的 {_qp:.0f}%"
+                          f"(<{FOURJD_Q_POS_MIN:g}%)=空在殺完的底部", flush=True)
+                    return False, "", 0.0
+            _rg1 = float(_h1[-1] - _l1[-1])
+            _bd1 = abs(float(_c1[-1]) - float(_o1[-1])) / _rg1 if _rg1 > 0 else 0.0
+            if _bd1 < FOURJD_Q_BODY_MIN:
+                _FOURJD_DIAG["實體不足擋"] = _FOURJD_DIAG.get("實體不足擋", 0) + 1
+                print(f"[4JD-Short] {symbol_item} 擋:進場1H實體只有 {_bd1:.0%}"
+                      f"(<{FOURJD_Q_BODY_MIN:.0%})", flush=True)
                 return False, "", 0.0
         _FOURJD_DIAG["成立"] += 1
         return True, why, float(sl)
