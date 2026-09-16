@@ -488,7 +488,7 @@ _RISK_STATE_FILE = os.path.join(_PERSIST_DIR, "strategy_risk_state.json")   # BO
 #   不移保本、不移SL、不加碼;只在倉位消失時移除追蹤(BOR 另做熔斷計數)。
 #   ★2026-09-15 S4H 移出(用戶:「保住本金為主」)→ 改走 box_trend/fourjd_2r 那段「只做一次保本」,浮盈 S4H_BE_R 移保本。
 #   BOR 維持不保本(用戶:「停利1R的就不用保本了」)。
-_HANDS_OFF_ES = ("bor_1r", "adopt_hold")
+_HANDS_OFF_ES = ("bor_1r", "engulf_1r", "fourjd_1r", "adopt_hold")
 
 
 def save_risk_state():
@@ -2477,11 +2477,24 @@ def check_trailing_stops_for_real():
                 # ★4J減速跌破空 熔斷計數(CLAUDE.md第11條:觀察條款要寫成代碼)。
                 #   判定精確:TP=2R > 保本觸發0.8R,所以「賺的單必定先經過0.8R」→ tp1_hit=True;
                 #   從未觸發保本就消失 = 只能是吃滿停損(本策略 _strat_ts_h=-1 不設時停)。
-                if trade.get("exit_strategy") == "fourjd_2r":
+                if trade.get("exit_strategy") == "fourjd_1r":
+                    # ★★2026-09-16 判準換掉:TP 改 1R 全平且**不保本**後,原本的
+                    #   `tp1_hit=False ⇒ 吃滿停損` 會把**贏單也算成連虧**(TP1=TP2 同價,一次全平後
+                    #   剩餘量歸零 →「TP1成交→移保本」那段的 if new_algo_id: 不成立)。
+                    #   這正是 2026-09-13 在 BOR 上記過的坑,改用同一套幾何判準:
+                    #   只做空、TP 在進場價下方 1R、SL 在上方 → 現價 ≥ 進場價 ⇒ 停損側出場。
+                    #   抓價失敗一律不計數(寧可漏算也不要誤觸熔斷),判定值印進 log 供事後對帳。
                     try:
-                        _fourjd_record_result(not bool(trade.get("tp1_hit")))
+                        _fjd_ep = float(trade.get("entry_price") or 0)
+                        _fjd_cp = float(ex.fetch_ticker(symbol).get("last") or 0)
+                        if _fjd_ep > 0 and _fjd_cp > 0:
+                            _fjd_is_sl = bool(_fjd_cp >= _fjd_ep)
+                            print(f"[4JD] {name} 出場判定 現價{_fjd_cp:.6g} vs 進場{_fjd_ep:.6g}"
+                                  f" → {'吃滿停損' if _fjd_is_sl else '獲利出場'}"
+                                  f" (連虧{_FOURJD_RISK['consec_sl']}/{FOURJD_MAX_CONSEC_SL})", flush=True)
+                            _fourjd_record_result(_fjd_is_sl)
                     except Exception as _fre:
-                        print(f"[4JD] 熔斷計數失敗: {_fre}")
+                        print(f"[4JD] 熔斷計數失敗(本筆不計數): {_fre}")
                 elif trade.get("exit_strategy") == "bor_1r":
                     # ★突破回踩空 熔斷計數(2026-09-13)。
                     # ★★不能照抄 4JD 的 tp1_hit 判準:BOR **沒有保本**且 TP1=TP2 都在 1R,
@@ -3622,6 +3635,22 @@ def _check_box_short(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame) -> Tu
         print(f"[Box-Short] {symbol_item} 失敗: {e}")
         return False, ""
 
+
+# ★★★2026-09-16 深夜 出場改版(用戶:「不降低單量的情況 增加勝率」+「停損率高那就是進場不對」)
+# 先驗用戶那句話:對 1650 筆**吃滿停損**的單算「停損前最大有利幅度(MFE)」——
+#   吞噬空 2026:先賺過>0.5R 才被打掉的佔 **53%**、從沒賺過(<0.2R)只有 23%,
+#   而且**被停損後 48h 內價格照樣走到原 1R 目標的佔 44%** → 主因是**停損太緊被影線掃**,不是進場看錯方向。
+#   (4JD 相反:掃損後只有 15% 會回到 1R、停損後中位 −0.11R,它才是比較接近「進場不對」。)
+# 所以解法是**放寬停損 + 縮短停利**:n 一筆不砍,把「先賺過又被打回」那群轉成贏單。
+# 掃描 停損×(1.0~2.2) × 停利(1~3R) × 保本(無/0.5/0.8/1/1.5R) 共124組,**只用訓練段選、用勝率選**,
+# 且把 live 的 MAX_SL=12% 封頂模擬進去(腳本 _bt_exit_capped.py / _an_exit_sweep.py):
+#   吞噬空 現行讓跑 訓+1.096/勝62% 驗+0.699/47% 新幣+0.532/49% **2026 −0.119/勝36%**
+#          SL×2.2/TP1R 訓+0.536/**勝78%** 驗+0.239/**63%** 新幣+0.149/**59%** **2026 +0.063/勝54%/總R+10.6**
+#   → 四層勝率全升、2026 由負轉正,撞 MAX_SL 上限的只有 8%。
+# ★代價講明:放棄長尾(舊期別總R 砍半,最大一筆曾有 +13R)。這是「勝率 vs 總R」的取捨,用戶要勝率。
+# ★停利 1R 不加保本(用戶規則),故 exit_strategy 走 engulf_1r ∈ _HANDS_OFF_ES。
+ENGULF_SL_MULT = 2.2     # 停損距離 = 原規格(近4根高+0.15ATR)距離 × 2.2
+ENGULF_TP_R    = 1.0     # 停利 1R 全平
 
 ENGULF_MIN_BODY = 0.70   # ★★★2026-09-06 進場品質閘:吞噬K實體佔全棒幅比例 ≥70%
 # ★2026-09-15 訂正:下表的 EV/勝率/吃滿停損是**固定2R出場**算的(今天同規則重跑 fix2:實體≥0.70 n=373 +0.525,各層對得上)。
@@ -4843,8 +4872,15 @@ FOURJD_STEPS_MIN  = 11       # 減速:那24根裡的下跌根數下限(爬樓梯
 FOURJD_TOUCH_MIN  = 2        # ★位階要真的成立:盤整期間觸及位階次數(官方「兩次成立」)
 FOURJD_VOLX_MIN   = 2.0      # 進場K成交量 / 近96根中位量
 FOURJD_ADX_MIN    = 15.0     # ★用戶看圖抓到的:ADX<15(盤整)那桶是唯一負的
-FOURJD_TP_R       = 2.0      # 停利 2R 全平(用戶要求至少2R)
-FOURJD_BE_R       = 0.8      # 浮盈 0.8R → 停損移到進場價(吃滿停損 51.9%→30.5%)
+# ★★★2026-09-16 深夜 出場改版(同 ENGULF_SL_MULT 那段的掃描,只用訓練段選、用勝率選,含 MAX_SL 封頂模擬)
+#   4JD 現行(TP2R+0.8R保本) 訓+0.386/勝35% 驗+0.333/33% 新幣+0.280/30% **2026 −0.211/勝18%**
+#        SL×1.3/TP1R      訓+0.362/**勝69%** 驗+0.230/**63%** 新幣**+0.323**/**66%** **2026 −0.108/勝46%**
+#   逐期 10/10 期勝率全部上升(17→47%、32→72%、30→65%、21→75%、7→50%…),n 一筆沒少。
+#   ★選 ×1.3 不選 ×1.5:數字幾乎一樣但撞 MAX_SL=12% 上限的比例 15%→7%,回測與 live 落差更小。
+#   ★2026 仍是負的(−0.108, bootstrap P(EV>0)=25%),只是從 −0.211 改善一半 —— 別當成它會賺。
+FOURJD_SL_MULT    = 1.3      # 停損距離 = 原規格(盤整區最高點×1.0015)距離 × 1.3
+FOURJD_TP_R       = 1.0      # ★停利 1R 全平(原 2.0;改版理由見上)
+FOURJD_BE_R       = 0.8      # (保留但不再使用:TP=1R 依用戶規則不加保本,exit_strategy 走 fourjd_1r)
 FOURJD_BUF        = 0.0015   # 停損 buffer
 FOURJD_MIN_LIQ    = 100_000.0  # 近96根成交額中位
 FOURJD_COOLDOWN_BARS = 6     # 同幣冷卻 6 根 1H
@@ -7210,7 +7246,7 @@ class SykesTradingBot:
         if is_fourjd_short:
             # ★4J減速跌破空:整倉 TP 2R + 浮盈0.8R移保本(見 execute_*_pipeline 的 fourjd_2r 分支)。
             #   回測:無保本 吃滿停損51.9% → 0.8R保本 30.5%,容錯 12.5→13.8。
-            exit_strategy = "fourjd_2r"
+            exit_strategy = "fourjd_1r"   # ★2026-09-16 TP改1R不保本→交給交易所掛單,不再走保本分支
             _strat_ts_h = -1         # ★不設時間停損:回測沒設(進場後最多走400根)
         elif is_bor_short:
             # ★BOR:固定 1R 全平(TP override 見下方 SL/TP 區塊)。
@@ -7228,8 +7264,8 @@ class SykesTradingBot:
             # ★2026-09-05 吞噬空重開,出場從固定2R改成 swing_full(整倉讓跑,不掛TP)。
             #   容錯 7.5→10.7、成本0.25%後 +0.153→+0.278,四層皆正,訊號量一筆沒砍(2.12筆/天)。
             #   驗收方式=**逐根重放 live 既有的 _swing_trail_update_sl**,不是我另寫一套(見上方 ENGULF_SHORT_ENABLED 註解)。
-            exit_strategy = "swing_full"
-            _strat_ts_h = -1         # ★不設時停:回測沒設;swing_full 預設會吃到讓跑型24h,那不是驗過的規格
+            exit_strategy = "engulf_1r"   # ★2026-09-16 讓跑改成 寬停損+TP1R(見 ENGULF_SL_MULT 註解)
+            _strat_ts_h = -1         # ★不設時停(回測沒設)
         elif is_dh_short:
             exit_strategy = "line_full"                                  # DH空：整倉切線讓跑(2026-06-13關加碼:
             #   按年顯示加碼只在強熊好(2022),震盪/牛市害它(2024純跑+0.32 vs 加碼-0.02)。切線出場不變,只去加碼。
@@ -7343,7 +7379,8 @@ class SykesTradingBot:
                 tp2_target = current_close + risk_dist * tp2_mult
         else:
             if is_fourjd_short and _fjd_sl > 0:
-                calculated_sl = round(float(_fjd_sl), 8)   # ★4J減速跌破:停損=盤整區最高點×1.0015(對齊回測,移植對拍0不一致)
+                # ★4J減速跌破:停損=盤整區最高點×1.0015,★2026-09-16 起距離再 ×FOURJD_SL_MULT(見常數註解)
+                calculated_sl = round(current_close + (float(_fjd_sl) - current_close) * FOURJD_SL_MULT, 8)
             elif is_bor_short and _bor_sl > 0:
                 calculated_sl = round(float(_bor_sl), 8)   # ★BOR:停損=回測段最高點×1.001(對齊回測 sl_mode="retest_low" 的做空鏡像)
             elif is_s4h_short and _s4h_sl > 0:
@@ -7351,7 +7388,9 @@ class SykesTradingBot:
             elif is_llh_short and _llh_sl > 0:
                 calculated_sl = round(float(_llh_sl), 8)   # ★LL→LH:停損=前一個高點H1(對齊回測)
             elif is_engulf_short:
-                calculated_sl = round(float(df["high"].values[-4:].max()) + 0.15 * current_atr, 8)   # 吞噬空:近4根高+0.15ATR(對齊回測)
+                # 吞噬空:近4根高+0.15ATR,★2026-09-16 起距離再 ×ENGULF_SL_MULT(見常數註解)
+                _eng_sl0 = float(df["high"].values[-4:].max()) + 0.15 * current_atr
+                calculated_sl = round(current_close + (_eng_sl0 - current_close) * ENGULF_SL_MULT, 8)
             else:
                 calculated_sl = _find_pivot_high(df, p["structure_lookback"], p.get("sl_atr_buffer", 0.0))
             risk_pct = abs(calculated_sl - current_close) / current_close
@@ -7366,11 +7405,14 @@ class SykesTradingBot:
             tp2_mult   = p["tp2_swing_mult"] if is_swing else p["tp2_intraday_mult"]
             risk_dist  = calculated_sl - current_close
             if is_fourjd_short and _fjd_sl > 0:
-                # ★4J減速跌破:2R 全平,對齊回測(用戶要求至少2R;滾動前推 TP2.0 選中 9/9)
+                # ★4J減速跌破:★2026-09-16 起 TP 1R 全平(原2R),不保本 —— 見 FOURJD_SL_MULT 常數註解
                 tp1_target = tp2_target = current_close - risk_dist * FOURJD_TP_R
             elif is_bor_short and _bor_sl > 0:
                 # ★BOR:1R 全平,對齊回測(不分批、**不設時間停損**)
                 tp1_target = tp2_target = current_close - risk_dist * BOR_TP_R
+            elif is_engulf_short:
+                # ★吞噬空:2026-09-16 起 TP 1R 全平(原 swing_full 讓跑),不保本 —— 見 ENGULF_SL_MULT 常數註解
+                tp1_target = tp2_target = current_close - risk_dist * ENGULF_TP_R
             elif is_s4h_short and _s4h_sl > 0:
                 # ★S4H:2.5R 全平,對齊回測(不分批、**不設時間停損**)
                 tp1_target = tp2_target = current_close - risk_dist * S4H_TP_R
