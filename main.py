@@ -3809,12 +3809,44 @@ VLONG_MAX_RUNUP_PCT = 999.0  # 漲幅閘=關閉(999)。保留變數與log輸出�
 #     反彈門檻 2/3/4/5% = +0.83/+1.03/+0.93/+0.89(平台,不是單點);腳本 _chk_crowd_btc.py
 # ★代價(照實):平常日幾乎不出單,崩盤反彈時一次出很多;2026 前9個月只有 08-22 一次群聚,且BTC未反彈→會被擋。
 # ★被群聚/BTC閘擋掉的 V 照樣記進群聚名單(回測的群聚就是算所有過完其他閘的 V)。
+#
+# ★★★2026-09-16 深夜 訂正:群聚從「硬擋」改成「加碼」,BTC 門檻 3%→1%,另加選幣層(下方 VLONG_ANOM_*)
+#   起因:拉了數據獵手後台 121 筆真實訊號獨立驗證(_chk_dhx_verify.py)—— 他們 8~9 月做多 +0.19~+0.28R/筆,
+#   我方同期 433 筆進場卡與他們 118 筆訊號「同幣同向±24h」只重疊 1/118,而他們賺的正是「底背離吸收做多」
+#   (n=26 +0.388 勝73%)=**跟我們 VLONG 同一套策略**。所以問題不是沒有這個策略,是我們把它閘到不出單。
+#   量化(腳本 _cmp_final_gates.py,同一批訊號同出場):
+#     舊12期 TP2.5R   無新閘 n447 +0.717 勝50% 總R+320.7
+#                     群聚≥3且BTC≥3%(前版) n291(65%) +0.964 勝57% 總R+280.5   ← 每筆最好但總R最低
+#                     異常12h且BTC≥1%(現版) n375(84%) +0.856 勝54% 總R+320.8   ← 勝率↑、總R不減、少砍18%
+#     2026 live幣池97 前版只留 17%(0.18筆/天=五天半一單)、現版留 48%(0.51筆/天),每筆 −0.103→−0.102
+#   ★群聚閘本身沒有錯(它在 8 個崩盤月 n=1418 驗過),但①舊12期幣池只有 25~39 幣,換算倍率 5.4
+#     → 那段回測裡它**全部放行**(447/447),所以 +0.664 那個數字跟它無關;②2026 沒有大崩盤 → 它幾乎不出單。
+#     結論:它選的是「崩盤反彈日」,該當**加碼**用,不該當唯一的進場許可。
 VLONG_CROWD_GATE      = True
 VLONG_CROWD_MIN_163   = 3.0      # 換算到 163 幣池的「別的幣出V」數量下限;實際門檻 = 3 × 目前掃描池幣數 / 163
 VLONG_CROWD_WIN_SEC   = 4 * 3600
-VLONG_BTC_REBOUND_MIN = 3.0      # BTC 收盤 / 近96根15m最低點 − 1 ≥ 3%
+VLONG_CROWD_MODE      = "boost"  # "boost"=群聚只加碼(現行) / "gate"=群聚不足就擋(2026-09-16 白天的舊行為)
+VLONG_CROWD_BOOST     = 1.5      # 群聚成立且 BTC 反彈≥VLONG_CROWD_BTC_REB → 下注×1.5(舊12期那格 +0.964/勝57%)
+VLONG_CROWD_BTC_REB   = 3.0      # 加碼才要求的 BTC 反彈門檻(原硬擋值)
+VLONG_BTC_REBOUND_MIN = 1.0      # 硬擋門檻放寬:BTC 收盤/近96根15m最低點−1 ≥ 1%
+                                 #   舊12期 ≥1% 保留90% +0.773 勝51%(≥3% 只保留65%);2026 ≥3% 只保留17%且EV更差
 _VLONG_CROWD: Dict[str, float] = {}   # symbol -> 最近一次出 V(過完其他閘)的訊號K起始 epoch
 _BTC_REB_CACHE: Dict[int, float] = {}
+
+# ★★★2026-09-16 深夜 選幣層:成交量異常 或 OI 異常(用戶:「他們OI儀表板選幣就成交量或OI異常阿」)
+#   數據獵手的訊號 content 寫著 source=volume_top100;用戶定調選幣層=量/OI異常。自己重建後測到**對照組**:
+#   舊12期 TP2.5R:進場前12h內有量或OI異常 n412(92%) +0.814 勝52% 總R+335.5(比無閘的+320.7還高)
+#                 **完全沒異常的那 8%  n35  −0.423 勝17% 吃滿停損83%**  ← 這就是要擋的那群
+#   逐期 10/12 期改善、無一期變差;2026 中性(−0.046→−0.047,不傷)。腳本 _bt_absorb_anom_live.py
+#   ★視窗深度已對齊 live:量用 72h 基準(296根≤fetch上限300)、OI 用 rubik 翻4頁=100h(實測無缺口)
+#     7天窗 vs 72h窗 結果幾乎相同(+0.288 vs +0.290)→ 不是「凍結規格 live 執行不了」那種坑
+VLONG_ANOM_GATE    = True
+VLONG_ANOM_VOLX    = 3.0    # 量異常:近4根(1h)量 / 前288根(72h)同長度量的中位 ≥ 3.0x
+VLONG_ANOM_VOL_BASE= 288
+VLONG_ANOM_LOOK_H  = 12     # 異常發生在進場前 12h 內就算數(警報是選幣層,不是進場訊號)
+VLONG_ANOM_OI_PAGES= 4      # rubik open-interest-history 15m 每頁100筆,4頁=100h
+VLONG_ANOM_OI_Q    = 0.95   # OI異常:|近1h OI變化%| > 自身近96h 的 p95
+_VLONG_OI_CACHE: Dict[str, tuple] = {}   # instId -> (抓取epoch, pd.Series(oi, 15m index))
 
 
 def _btc_rebound_24h(end_ts: pd.Timestamp) -> float:
@@ -3839,6 +3871,98 @@ def _vlong_crowd_count(symbol_item: str, now_ts: float) -> int:
     n = sum(1 for k, t in _VLONG_CROWD.items() if k != symbol_item and t <= now_ts)
     _VLONG_CROWD[symbol_item] = now_ts
     return n
+
+
+def _okx_oi_hist_15m(inst_id: str, pages: int = VLONG_ANOM_OI_PAGES) -> Optional[pd.Series]:
+    """OKX rubik open-interest-history(15m)翻頁取回約 pages×100 根的 OI(oiUsd)。
+    ★一頁只回 100 筆(=25h),要 96h 的 p95 基準就必須帶 end 往回翻(實測 4 頁=100h、無缺口)。
+    ★同 _okx_contract_cvd_15m 的模式:呼叫端只在「價格已成立 V」之後才打,不會每幣每輪洗量。
+    抓不到回 None → 呼叫端當「OI 未知」處理(不擋、也不當通過)。"""
+    ck = _VLONG_OI_CACHE.get(inst_id)
+    if ck and (time.time() - ck[0]) < 600:
+        return ck[1]
+    rows: List[list] = []
+    end = None
+    try:
+        for _ in range(max(1, pages)):
+            params = {"instId": inst_id, "period": "15m"}
+            if end is not None:
+                params["end"] = str(end)
+            d = _fetch_okx_public_data("/api/v5/rubik/stat/contracts/open-interest-history", params)
+            if not d:
+                break
+            rows += d
+            end = min(int(r[0]) for r in d) - 1
+            time.sleep(0.35)
+    except Exception as ex:
+        print(f"[V-Long OI] {inst_id} 抓取失敗: {ex}", flush=True)
+    if len(rows) < 120:          # 不足 30h 就算不出 96h 的 p95 → 當未知
+        return None
+    try:
+        s = pd.Series({pd.to_datetime(int(r[0]), unit="ms", utc=True): float(r[3]) for r in rows})
+        s = s[~s.index.duplicated()].sort_index()
+    except Exception:
+        return None
+    if len(_VLONG_OI_CACHE) > 200:
+        _VLONG_OI_CACHE.clear()
+    _VLONG_OI_CACHE[inst_id] = (time.time(), s)
+    return s
+
+
+def _vlong_anomaly_ok(inst_id: str, df: pd.DataFrame) -> Tuple[bool, str]:
+    """★選幣層:進場前 VLONG_ANOM_LOOK_H 小時內,該幣出現過「成交量異常」或「OI 異常」。
+      量異常 = 近4根(1h)量 / 前 VLONG_ANOM_VOL_BASE 根同長度量的中位 ≥ VLONG_ANOM_VOLX
+               (用比值,所以 OKX 的 vol 是合約張數也不影響 —— 同一合約 ctVal 會約掉)
+      OI異常 = |近1h OI 變化%| > 自身近96h 同指標的 p95
+    回傳 (通過, 說明)。兩邊都算不出來 → 放行(同其他閘的慣例:資料不足不擋單)。"""
+    look = int(VLONG_ANOM_LOOK_H * 4)
+    hits: List[str] = []
+    unknown = 0
+    # ── ① 成交量異常(用現成 K 線,不打 API)
+    try:
+        v = pd.Series(df["vol"].values.astype(float))
+        base_n = min(int(VLONG_ANOM_VOL_BASE), max(0, len(v) - 8))
+        if base_n >= 96:
+            v4 = v.rolling(4).sum()
+            volx = (v4 / v4.shift(4).rolling(base_n).median()).values
+            seg = volx[-(look + 1):]
+            seg = seg[np.isfinite(seg)]
+            if len(seg):
+                mx = float(np.nanmax(seg))
+                if mx >= VLONG_ANOM_VOLX:
+                    hits.append(f"量異{mx:.1f}x")
+            else:
+                unknown += 1
+        else:
+            unknown += 1
+    except Exception:
+        unknown += 1
+    if hits:                      # 量已異常就不必再打 OI 的 API
+        return True, "選幣:" + "+".join(hits)
+    # ── ② OI 異常(rubik 翻頁)
+    try:
+        s = _okx_oi_hist_15m(inst_id)
+        if s is None or len(s) < 120:
+            unknown += 1
+        else:
+            end_ts = df.index[-1] + pd.Timedelta(minutes=15)
+            s = s[s.index <= end_ts]
+            ch = (s.pct_change(4).abs() * 100).dropna()
+            if len(ch) < 100:
+                unknown += 1
+            else:
+                q = float(ch.iloc[-384:].quantile(VLONG_ANOM_OI_Q))
+                recent = ch.iloc[-(look + 1):]
+                if len(recent) and float(recent.max()) > q > 0:
+                    hits.append(f"OI異{float(recent.max()):.2f}%>p95{q:.2f}%")
+    except Exception as ex:
+        print(f"[V-Long 選幣] {inst_id} OI 異常判斷失敗(當未知): {ex}", flush=True)
+        unknown += 1
+    if hits:
+        return True, "選幣:" + "+".join(hits)
+    if unknown >= 2:              # 兩個來源都算不出 → 放行,不要用資料不足去殺訊號
+        return True, "選幣:資料不足(放行)"
+    return False, "選幣:12h內無量/OI異常"
 
 # ★★2026-09-06 真假吸收閘(用戶逼出來的:「有大量進場有吸收,後面才會帶動市場價格」)────────
 # 原本 VLONG 的「吸收」只有一行 `cvd[低2]<cvd[低1]`,沒有幅度也沒有量 → CVD 跌 1 單位也算吸收。
@@ -3890,7 +4014,8 @@ def _vlong_zigzag_lows(hi, lo, pct):
 
 _VLONG_LAST: Dict[str, dict] = {}   # symbol -> 最近一次V成型明細(供訊號卡數據面板)
 _VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0,
-               "追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "群聚不足": 0, "BTC未反彈": 0, "觸發": 0}
+               "追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "群聚不足": 0, "BTC未反彈": 0,
+               "無異常": 0, "群聚加碼": 0, "觸發": 0}
 
 
 def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
@@ -4085,24 +4210,44 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
             _crowd_txt = ""
-            if VLONG_CROWD_GATE:                            # ★2026-09-16 群聚閘 + BTC 反彈閘(說明見常數區)
+            _vlong_boost = 1.0
+            if VLONG_CROWD_GATE:    # ★2026-09-16 深夜改版:群聚→加碼、BTC→放寬硬擋(說明見常數區)
                 _now = float(df.index[-1].timestamp())
-                _n_other = _vlong_crowd_count(symbol_item, _now)
+                _n_other = _vlong_crowd_count(symbol_item, _now)   # 仍要呼叫:它同時負責把本幣記進群聚名單
                 _need = VLONG_CROWD_MIN_163 * len(SYMBOLS) / 163.0
-                if _n_other < _need:
+                if VLONG_CROWD_MODE == "gate" and _n_other < _need:
                     _VLONG_DIAG["群聚不足"] += 1
                     print(f"[V-Long] {symbol_item} V成型成立但前4h只有{_n_other}個別的幣出V(需{_need:.1f})→不是崩盤反彈,不進", flush=True)
                     continue
                 _reb = _btc_rebound_24h(df.index[-1] + pd.Timedelta(minutes=15))
                 if _reb == _reb and _reb < VLONG_BTC_REBOUND_MIN:
                     _VLONG_DIAG["BTC未反彈"] += 1
-                    print(f"[V-Long] {symbol_item} 群聚{_n_other}幣但BTC只從24h低點彈{_reb:.1f}%(<{VLONG_BTC_REBOUND_MIN}%)→可能還在殺,不進", flush=True)
+                    print(f"[V-Long] {symbol_item} BTC 只從24h低點彈{_reb:.1f}%(<{VLONG_BTC_REBOUND_MIN}%)→還在殺,不進", flush=True)
                     continue
-                _crowd_txt = f"/群聚{_n_other}幣/BTC反彈{_reb:.1f}%"
+                if _n_other >= _need and (_reb != _reb or _reb >= VLONG_CROWD_BTC_REB):
+                    _vlong_boost = VLONG_CROWD_BOOST      # 崩盤反彈日=舊12期那格 +0.964/勝57% → 加碼
+                    _VLONG_DIAG["群聚加碼"] += 1
+                    _crowd_txt = f"/群聚{_n_other}幣×{VLONG_CROWD_BOOST:g}/BTC反彈{_reb:.1f}%"
+                else:
+                    _crowd_txt = f"/BTC反彈{_reb:.1f}%" if _reb == _reb else ""
+            if VLONG_ANOM_GATE:     # ★選幣層:12h 內要有量或OI異常(沒異常那群 −0.423R/勝17%)
+                _anom_ok, _anom_txt = _vlong_anomaly_ok(okx_swap_symbol or symbol_item, df)
+                if not _anom_ok:
+                    _VLONG_DIAG["無異常"] += 1
+                    print(f"[V-Long] {symbol_item} V成型成立但{_anom_txt}→不是主力在動的幣,不進", flush=True)
+                    continue
+                _crowd_txt += f"/{_anom_txt}"
             _VLONG_DIAG["觸發"] += 1
             try:
-                _oiv = (pd.Series(df["oi"].values.astype(float)).ffill().bfill().values
-                        if "oi" in df.columns else None)
+                # ★2026-09-16 訂正:live 的 15m df **沒有 oi 欄**(fetch_market_candles 只回 OHLCV)
+                #   → 這裡以前恆為 None,訊號卡的 OI 欄一直是空的。改用選幣層剛抓好的 rubik 序列。
+                _oiv = None
+                if "oi" in df.columns:
+                    _oiv = pd.Series(df["oi"].values.astype(float)).ffill().bfill().values
+                else:
+                    _ck = _VLONG_OI_CACHE.get(okx_swap_symbol or symbol_item)
+                    if _ck and _ck[1] is not None and len(_ck[1]) > 5:
+                        _oiv = _ck[1][_ck[1].index <= df.index[-1] + pd.Timedelta(minutes=15)].values
                 _oip = ((_oiv[-1] / _oiv[-5] - 1) * 100
                         if _oiv is not None and len(_oiv) > 5 and _oiv[-5] > 0 else None)
                 _VLONG_LAST[symbol_item] = {
@@ -4110,6 +4255,7 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                     "low1": float(p1), "low2": float(p2),
                     "up_pct": (float(p2) / float(p1) - 1) * 100,
                     "cvd_delta": float(cv[j2]) - float(cv[j1]), "oi_pct": _oip,
+                    "boost": float(_vlong_boost),   # ★群聚日加碼倍數,呼叫端讀這個餵 dh_boost
                 }
             except Exception:
                 pass
@@ -6404,7 +6550,10 @@ class SykesTradingBot:
                 if _VLONG_DIAG["呼叫"] % 50 == 0:
                     print(f"[V-Long儀表] {_VLONG_DIAG} 深快取{len(_VLONG_KL_CACHE)}幣", flush=True)
                 if is_vlong:
-                    print(f"[V-Long] {symbol_item} {_vlong_r} sl={_vlong_sl:.6g}", flush=True)
+                    # ★2026-09-16 深夜:群聚(崩盤反彈日)改成加碼而非硬擋 → 這裡把倍數接到下注
+                    _vb = float(_VLONG_LAST.get(symbol_item, {}).get("boost", 1.0) or 1.0)
+                    if _vb > 1.0: dh_boost = max(dh_boost, _vb)
+                    print(f"[V-Long] {symbol_item} {_vlong_r} sl={_vlong_sl:.6g} 下注×{dh_boost:g}", flush=True)
             except Exception as _vle:
                 print(f"[V-Long] {symbol_item} 判斷失敗: {_vle}")
 
