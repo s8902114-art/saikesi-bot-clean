@@ -3874,6 +3874,26 @@ VLONG_MAX_POS_PCT   = 70.0   # ★主閘:進場價在前24h區間的百分位上
 #   ★9/4 實際那6筆有5筆位階在74~93%,光位階閘就擋掉(只有TRIA位階51%會放行)。
 VLONG_MAX_RUNUP_PCT = 999.0  # 漲幅閘=關閉(999)。保留變數與log輸出供觀察,不參與擋單。
 
+# ★★2026-09-18 新增「近7天漲幅閘」(與上面的 24h `_chg24` 是**不同的軸**,24h 那道已測過被位階閘取代)
+#   起因:用戶「要嘛大跌才在空 要嘛漲很多了才在多」「你進場不對 就算停損給你拉10%也是損」。
+#   診斷(_an_zz_2026.py):2026 的 V成型訊號與舊期別**特徵分布完全不同**——
+#     近7天漲 舊期別中位 −4.0% vs 2026 **+16.4%**;對BTC強度 −2.3% vs **+12.0%**;頻率 0.34→2.58筆/天(7.6倍)。
+#     ＝2026 的訊號是在「已經噴完」的地方發的,這就是 live 追高的機械根源。
+#   忠實 live 規格(TP2.5R+1.5R保本+位階≤70)實測(_bt_vlong_7d.py,四層):
+#     無閘      訓+0.315/容錯9.8 驗+0.751/23.7 新幣+0.596/18.2 **2026 −0.012/−0.4 總R−6.5**
+#     **<0%**   訓+0.312/9.8    驗+0.909/28.7 新幣+0.809/24.8 **2026 +0.030/+0.9 總R+7.6**
+#     <−10%    訓+0.388/12.2   驗+1.042/32.4 新幣+0.838/25.7  2026 +0.078/+2.4 總R+16.0
+#   ★選 0% 而不是 −10%:0 不是掃出來的參數(滾動前推每季重選門檻從沒選到 −10,選 −20/−30),
+#     不掛參數風險;且用戶 13 筆真實進場有 **12 筆** 近7天漲<0(唯一例外 ZEC +6.99%)。
+#   ★代價(照 0905 用戶教訓,容錯與總R一起看):驗證段總R **+266.5→+177.3(−33%)**、
+#     R≥2 大贏單只保住 **61%**、2026 留樣率 45%。這與 24h 漲幅閘被否決的理由同類,
+#     但差別是:24h 那道**四層沒有全改善**,這道是四層 EV/容錯全改善且把 2026 從負轉正。
+#   ★驗收:逐根重放 177/177=100%、live 300根視窗 100% 重現(7天值改用 **1H K線** 取得,見 _vlong_7d_runup);
+#     滾動前推(門檻選擇計入樣本外)n=327 EV+0.539 勝52%;按日 block bootstrap 全期 CI[+0.082,+0.699] P=99.4%,
+#     **2026 CI[−0.064,+0.374] P=91.7%(跨0,不顯著)**;成本 0.10→0.25% 只從 +0.430 掉到 +0.399。
+#   ★已知弱點(寫在這裡供事後對帳):它是**事件型**策略——去掉最好3天 EV +0.430→+0.142、去5天 +0.071。
+VLONG_MAX_7D_RUNUP = 0.0     # 近7天(168根1H)漲幅 > 此值 → 擋。取不到值=未知→放行(寧可漏擋不誤擋)。
+
 # ★★★2026-09-16 群聚閘 + BTC 反彈閘(用戶:「把2V弄到可以用為止」)──────────────────────────
 # 2026 回測 V成型 −0.23R/勝24%,一路追到底才找到原因:**V成型是「全市場爆倉後集體反彈」的事件策略**。
 #   全部 3252 筆(原12期 + 2025/2026 幣安全市場 + 已下架幣)前5天貢獻 100% 總R(2025-02-03 +550R、2025-10-10 +450R);
@@ -4092,8 +4112,36 @@ def _vlong_zigzag_lows(hi, lo, pct):
 
 _VLONG_LAST: Dict[str, dict] = {}   # symbol -> 最近一次V成型明細(供訊號卡數據面板)
 _VLONG_DIAG = {"呼叫": 0, "K棒不足": 0, "無CVD": 0, "CVD不足": 0, "無V成型": 0,
-               "追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "群聚不足": 0, "BTC未反彈": 0,
+               "追漲擋": 0, "7天追漲擋": 0, "位階擋": 0, "量不足": 0, "賣壓不足": 0, "群聚不足": 0, "BTC未反彈": 0,
                "無異常": 0, "群聚加碼": 0, "觸發": 0}
+
+
+_VLONG_7D_CACHE: Dict[str, Any] = {}   # instId -> (取得時間, 近7天漲幅% 或 None)
+
+
+def _vlong_7d_runup(inst_id: str) -> Optional[float]:
+    """近7天漲幅%(=現價 vs 168 小時前收盤)。
+    ★為什麼用 1H 不用 15m:live 的 `fetch_market_candles` 受 OKX /market/candles 限制**上限300根**,
+      15m 300根只有 3.1 天,拿不到 7 天;1H 只需 169 根(7天),遠在上限內、不必 history-candles 分頁。
+      回測用 15m 的 cl[c2-672],時間戳與 1H 的 c[-169] 相同(同一時刻的最後成交價),定義一致。
+    ★呼叫位置:放在位階閘**之後**(那時候候選已被濾到極少),每輪只會多打個位數的 API。
+    抓不到 → 回 None,呼叫端當「未知」放行。"""
+    ck = _VLONG_7D_CACHE.get(inst_id)
+    if ck and (time.time() - ck[0]) < 1800:
+        return ck[1]
+    val = None
+    try:
+        _d1h = fetch_market_candles(inst_id, "1H", 200)
+        if _d1h is not None and len(_d1h) >= 169:
+            _c = _d1h["close"].values.astype(float)
+            if float(_c[-169]) > 0:
+                val = (float(_c[-1]) - float(_c[-169])) / float(_c[-169]) * 100.0
+    except Exception as _e7d:
+        print(f"[V-Long] {inst_id} 近7天漲幅取得失敗(放行): {_e7d}", flush=True)
+    if len(_VLONG_7D_CACHE) > 300:
+        _VLONG_7D_CACHE.clear()
+    _VLONG_7D_CACHE[inst_id] = (time.time(), val)
+    return val
 
 
 def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
@@ -4285,6 +4333,17 @@ def _check_vlong(symbol_item: str, okx_bar_fmt: str, df: pd.DataFrame,
                 print(f"[V-Long] {symbol_item} 進場位階 {_pos:.0f}% "
                       f"(>{VLONG_MAX_POS_PCT:g}%,買在區間上緣)→擋", flush=True)
                 continue
+            # ★2026-09-18 近7天漲幅閘(說明與實測數字見 VLONG_MAX_7D_RUNUP 常數區)
+            #   放在位階閘之後 = 只對已通過其餘所有閘的候選打這支 API。
+            _chg7d = _vlong_7d_runup(okx_swap_symbol or symbol_item)
+            if _chg7d is not None and _chg7d > VLONG_MAX_7D_RUNUP:
+                _VLONG_DIAG["7天追漲擋"] += 1
+                print(f"[V-Long] {symbol_item} 近7天已漲 {_chg7d:+.1f}% "
+                      f"(>{VLONG_MAX_7D_RUNUP:g}%)→擋(7天反追漲閘)", flush=True)
+                continue
+            # 判定值印進 log 供事後對帳(觀察條款寫成代碼)
+            print(f"[V-Long] {symbol_item} 通過閘:位階{_pos:.0f}% 24h{_chg24:+.1f}% "
+                  f"7天{(f'{_chg7d:+.1f}%' if _chg7d is not None else '未知')}", flush=True)
             sl = float(p2) * 0.999
             if sl >= float(df["close"].iloc[-1]): continue
             _crowd_txt = ""
