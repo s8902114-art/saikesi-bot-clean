@@ -2420,12 +2420,23 @@ def check_trailing_stops_for_real():
     #   →trail/保本/時間停損全部失效(13天實證:31筆持倉>24h但時停只觸發2次、保本0次)。
     #   全查=1次API,既省限流又避免誤刪;查詢失敗時本輪完全不做移除判定(_pos_ok=False)。
     _pos_set = set(); _pos_ok = False; _pos_n = 0   # ★_pos_n=真實倉數(每倉會放2個entry進_pos_set)
+    # ★★2026-09-19 新增 _pos_sz:同一次 API 順手記下**交易所實際張數**(不多打任何請求)。
+    #   動機(ZEN 裸倉事故):時間停損/OI早出 平倉用的是 `remaining_amount`,但這個值在
+    #   「TP1出一半」型態下只有半倉(且 redeploy 後由推斷重建,更容易失準)→ 平不乾淨,
+    #   卻照樣 `_cancel_okx_algo_order` 撤停損 + 從追蹤池移除 → **剩下的量變成無停損又無人管的裸倉**。
+    _pos_sz: Dict[Any, float] = {}
     try:
         for _p in ex.fetch_positions():
             if abs(float(_p.get("contracts") or 0)) > 0 and _p.get("side"):
                 _sym = _p.get("symbol"); _sd = _p.get("side")
                 _pos_n += 1
                 _pos_set.add((_sym, _sd))
+                _pos_sz[(_sym, _sd)] = abs(float(_p.get("contracts") or 0))
+                try:
+                    _iid = (_p.get("info") or {}).get("instId")
+                    if _iid: _pos_sz[(_iid, _sd)] = abs(float(_p.get("contracts") or 0))
+                except Exception:
+                    pass
                 # ★★2026-08-27 致命bug修復:ccxt fetch_positions 回的是**統一格式**('ONE/USDT:USDT'),
                 #   但追蹤池記的 trade["symbol"] 是 execute_okx_trade_pipeline 收到的 **instId**
                 #   ('ONE-USDT-SWAP',來源 OKX_SWAP)。兩者**永遠比不上** →
@@ -2551,27 +2562,36 @@ def check_trailing_stops_for_real():
                 print(f"[TimeStop] {name} 接管倉未驗證來源(可能是手動倉)→不套時間停損", flush=True)
             if (not _adopted_unverified and trade.get("exit_strategy") != "cme_gap" and _ts_open > 0
                     and time.time() - _ts_open > _tsh * 3600):
+                # ★2026-09-19 用**交易所實際張數**平,不用 remaining_amount(ZEN 裸倉事故:只平了半倉)
+                _amt_ts = _pos_sz.get((symbol, direction)) or _pos_sz.get((inst_id, direction)) \
+                    or float(trade.get("remaining_amount", 0) or 0)
                 try:
                     ex.create_market_order(symbol=symbol,
                         side=("sell" if direction == "long" else "buy"),
-                        amount=float(trade.get("remaining_amount", 0) or 0),
+                        amount=_amt_ts,
                         params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
                     _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
-                    dc_log(f"⏰ {name} 開倉滿{_tsh}h未到目標,市價平倉(時間停損)")
+                    dc_log(f"⏰ {name} 開倉滿{_tsh}h未到目標,市價平倉(時間停損) 平{_amt_ts}張")
                 except Exception as _tse:
-                    print(f"[TimeStop] {name} 平倉失敗: {_tse}")
+                    # ★平倉失敗就**不准**撤停損、也不准移出追蹤池(否則變裸倉)
+                    print(f"[TimeStop] {name} 平倉失敗(保留停損與追蹤,不移除): {_tse}", flush=True)
+                    continue
                 active_real_trades.pop(trade_key, None); save_active_trades(); continue
 
             # ── 山寨多單 OI降早出(OI_EARLY_EXIT_ENABLED):主力出貨即跑,救COAI式吐回 ──
             if _oi_drop_exit_long(trade):
+                # ★2026-09-19 同 ZEN 事故修法:用交易所實際張數,且平倉失敗不撤停損不移除追蹤
+                _amt_oi = _pos_sz.get((symbol, direction)) or _pos_sz.get((inst_id, direction)) \
+                    or float(trade.get("remaining_amount", 0) or 0)
                 try:
                     ex.create_market_order(symbol=symbol, side="sell",
-                        amount=float(trade.get("remaining_amount", 0) or 0),
+                        amount=_amt_oi,
                         params={"posSide": direction, "tdMode": MARGIN_MODE, "reduceOnly": True})
                     _cancel_okx_algo_order(inst_id, trade.get("sl_algo_id"))
-                    dc_log(f"📉 {name} OI降早出(主力出貨),市價平倉")
+                    dc_log(f"📉 {name} OI降早出(主力出貨),市價平倉 平{_amt_oi}張")
                 except Exception as _oie:
-                    print(f"[OI-Exit] {name} 平倉失敗: {_oie}")
+                    print(f"[OI-Exit] {name} 平倉失敗(保留停損與追蹤,不移除): {_oie}", flush=True)
+                    continue
                 active_real_trades.pop(trade_key, None); save_active_trades(); continue
 
             # ── 金字塔加碼：驗證過的多單(C3/W底)達 +1R 且未加過 → 加一單位 ──────────
@@ -7338,12 +7358,23 @@ class SykesTradingBot:
             #   固定2.5R=+0.265/5期正(EV+一致性都勝)。tp override見下方SL/TP區塊(比照吞噬空單一目標)。
         elif tf_id == "1H" and direction == "long" and is_macd_long:
             exit_strategy = "swing_full"                                 # 1H MACD多(新增):整倉轉折移SL讓跑(驗+0.605>TP1.5+0.465,順勢抱)
-            _strat_ts_h = 24    # 24h最佳(EV+0.271/容錯18.3🟢);12h砍57%EV、容錯掉6.2點
+            # ★★★2026-09-19 24 → -1(不設時間停損)。**這是 09-06「關掉時間停損」那次的漏改**:
+            #   當時我只把 GLOBAL_TIMESTOP_H / LETRUN_TIMESTOP_H 改成 10**6,沒發現策略專屬的
+            #   `_strat_ts_h` 在 `_timestop_hours()` 裡**優先度高於常數**(`if _h > 0: return _h`)
+            #   → MACD多 的 24h 時停一直活著。實際事故:ZEN 09-17 16:06 開倉 → 09-18 16:15
+            #   「⏰ ZEN-USDT-SWAP 開倉滿24h未到目標,市價平倉(時間停損)」,用戶當場抓到。
+            #   而且它只平了 remaining_amount(32張)、撤掉停損、把倉從追蹤池移除 →
+            #   **剩下 32 張變成無停損又無人管的裸倉**,用戶 16:32 自己出掉。
+            # ★數據也支持不設:同一批訊號 無時停 EV+0.309/容錯18.9 > 24h +0.271/18.3(見上方 09-06 註解)。
+            # ★用戶硬性規則:不要時間停損、保本要留。
+            _strat_ts_h = -1
         elif tf_id == "1H" and direction == "short" and is_short:
             exit_strategy = "swing_full"                                 # 1H C3空+階梯：整倉pivot移SL(驗+0.263/MDD10%)
-            _strat_ts_h = 12    # ★2026-08-02 C3空專屬12h(讓跑型預設24h對它不利):
-            # 3期回測(n=49,樣本小視為線索) 12h勝率63.3%/EV+0.171/容錯13.5🟢/連虧3 vs 24h 53.1%/+0.161/10.2🟡/連虧4
-            # =12h每一項都較好。★證明「按出場型態設時停」仍太粗,必須逐策略。
+            # ★★2026-09-19 12 → -1(不設)。與 MACD多 同一個漏改(見上)。
+            #   原註的 12h vs 24h 比較 **從來沒有跟「無時停」比過**,而 n=49 我自己標了「樣本小視為線索」;
+            #   09-06 的 live 實測(持倉時長分桶)證明時停砍的正好是贏單(>25h 那桶均 +6.46U = 被砍那批的5.6倍)。
+            #   用戶硬性規則:不要時間停損。要重開必須先補「無時停」對照組。
+            _strat_ts_h = -1    # 原:12(C3空專屬,已停用)
         elif tf_id == "15m" and direction == "long" and is_macd_long:
             exit_strategy = "swing_tp_1h"                                # 15m MACD多：TP1+參1H轉折移SL
         elif tf_id == "15m" and direction == "short" and is_macd_short:
