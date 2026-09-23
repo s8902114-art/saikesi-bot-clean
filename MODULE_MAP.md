@@ -184,3 +184,22 @@ saikesi-bot-clean/
 | 不碰型出場 | `_HANDS_OFF_ES` | `bor_1r`/`adopt_hold`：OKX 與 BingX 追蹤迴圈都直接 continue（S4H 09-15 移出，改 1.5R 保本） |
 | 接管出場推斷 | `def _infer_adopted_exit` | 看交易所 reduceOnly TP 限價單：同價兩張 R≈1→BOR、≈2.5→S4H、CME幣≈2→cme_gap；單張全倉 R≈2 空→4JD；半倉→swing_tp；無TP→swing_full；停損已在獲利側或對不上→adopt_hold |
 | 吞噬空出場 | 山寨覆寫處 `and not is_engulf_short` | 不再被改成 swing_tp，回到驗過的 swing_full |
+
+### 私人儀表板 dashboard.py（2026-09-24，唯讀，不碰交易邏輯）
+
+| 元件 | 位置 / 定位字串 | 重點 |
+|---|---|---|
+| 模組 | `dashboard.py` | 全部 stdlib，無新依賴；flask 只在 `register()` 裡 import |
+| 掛載 | main.py `dashboard.register(app, globals())`（`app = Flask(__name__)` 下方） | 傳 globals 進去→讀到的永遠是當下的 `SYMBOLS`/`_oi_history`/`active_real_trades`/各 `*_DIAG` |
+| 被動快照 | main.py `dashboard.put(symbol_item, tf_id,` （在 scan 的「5. 空頭趨勢」之後） | 只記上面**已經算完**的值：價格/ATR%/ADX/通道位置/bear-bull。零額外 API、零額外指標計算 |
+| 訊號記錄 | main.py `dashboard.sig(symbol, tf,`（`create_interactive_signal` 內） | 策略名用訊號卡同一個 `source_tag`，避免顯示層跟策略對不上 |
+| 路由 | `/d/<DASH_TOKEN>`（頁面）、`/d/<DASH_TOKEN>/api`（JSON） | 沒設 `DASH_TOKEN` 或長度<16 → **一律 404**（不回 401） |
+
+★四條不准違反的規矩（違反就會重演舊坑）：
+1. 顯示層只讀 bot 算好的值，**不准自己再算一次**（CLAUDE.md 第12條，BPR 標錯策略的教訓）。
+   OI 榜的 `(latest-oldest)/oldest` 與有效性判準是逐行抄 `_fetch_okx_oi_movers`，改一邊要改兩邊。
+2. 開網頁**不打任何交易所 API**（天花板是 rate limit）。
+3. `put()`/`sig()` 永不拋例外，呼叫點另外再包一層 try —— 儀表板壞掉不可以影響交易。
+4. `active_real_trades` 內含 `headers`（API 簽章）→ 輸出走 `_TRADE_FIELDS` **白名單**，絕不 dump 原始 dict。
+
+驗證腳本：`_chk_dash.py`（27 項，含權杖 fail-closed／OI 公式對齊／未實現 R／**憑證不外洩**／漏斗 Δ）。

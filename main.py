@@ -50,6 +50,7 @@ import requests
 import numpy as np
 import pandas as pd
 import daily_report   # 每日00:00(UTC)復盤(record_entry進場記;daily_tick主迴圈發)
+import dashboard      # 私人儀表板(唯讀,掛在既有 Flask 上;沒設 DASH_TOKEN 就整個不存在)
 import ccxt
 from flask import Flask, request, jsonify
 
@@ -667,6 +668,12 @@ def create_interactive_signal(sig: Dict[str, Any], symbol: str, tf: str, cvd_ok:
     }
 
     reason = _entry_reason(sig.get("source_tag", ""), sig["side"], tf, sig.get("dh_boost", 1.0))
+    # 儀表板：訊號卡發一張就記一筆(策略名用訊號卡同一個 source_tag,避免顯示層跟策略對不上)
+    try:
+        dashboard.sig(symbol, tf, sig["side"], sig.get("source_tag", "") or "—",
+                      float(sig["entry"]), float(sig["sl"]))
+    except Exception:
+        pass
     # ★2026-09-01 修:順籌碼分數是「**進場當下 1H 的快照**」,不是即時值。
     #   用戶回報 LA 字卡寫 +8、之後用 `幣` 指令查卻是負的 → 同一個 judge_coin,
     #   差別只是**算的時間點不同**(字卡=進場當下 / 指令=你查的當下),分數本來就會變。
@@ -6650,6 +6657,19 @@ class SykesTradingBot:
         bear_trend  = bool(bear_series.iloc[-BEAR_MIN_BARS:].min() == 1) if len(bear_series) >= BEAR_MIN_BARS \
                       else bool(ema144.iloc[-1] < ema576.iloc[-1])
 
+        # ── 儀表板被動快照：只記「上面已經算完的值」，不多打一次 API、不多算一次指標。
+        #    包在 try 裡且 dashboard.put 自己也不拋例外 → 儀表板壞掉不可能影響交易。
+        try:
+            dashboard.put(symbol_item, tf_id,
+                          px=float(current_close),
+                          atrp=float(current_atr) / float(current_close) if current_close else None,
+                          adx=float(current_adx),
+                          vg=("大通道上" if current_close > large_top else
+                              "大通道內" if current_close >= large_bot else "大通道下"),
+                          trend="bear" if bear_trend else "bull")
+        except Exception:
+            pass
+
     # 6. 雙軌 QQE MOD
         p_l = get_params(tf_id, "long")
         p_s = get_params(tf_id, "short")
@@ -7736,6 +7756,15 @@ _bot_ref = SykesTradingBot()
 # ══════════════════════════════════════════════════════════════════════════════
 
 app = Flask(__name__)
+
+# 私人儀表板：/d/<DASH_TOKEN> 看頁面、/d/<DASH_TOKEN>/api 拿 JSON。
+# 傳 globals() 進去 → 儀表板讀到的永遠是當下的 SYMBOLS/_oi_history/active_real_trades/各 *_DIAG，
+# 不會複製一份出來走味（顯示層要跟邏輯同步，見 CLAUDE.md 第12條）。
+# 沒設 DASH_TOKEN(或長度<16) → 兩個路由一律回 404，等於這個功能不存在。
+try:
+    dashboard.register(app, globals())
+except Exception as _dash_reg_err:
+    print(f"[DASH] 儀表板路由註冊失敗(不影響交易): {_dash_reg_err}", flush=True)
 
 def verify_discord_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
     """ Ed25519 靜態無狀態簽章驗證演算法 """
