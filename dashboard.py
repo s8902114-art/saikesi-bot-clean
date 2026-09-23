@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924i"
+VER = "20260924j"
 
 
 def _clean(v):
@@ -216,12 +216,19 @@ def _market(G, win_h=1.0, top_n=300):
             quad = ("多頭建倉" if px_pct > 0 else "空頭建倉") if oi_pct > 0 else \
                    ("空頭平倉" if px_pct > 0 else "多頭平倉")
             s = snap.get(inst) or {}
+            # 排名表的象限：官方 sigKey 用 `d.priceChg`，同時刻對帳 24H 命中 17/20（1H 只有 7/20）。
+            # 另 3 筆是被官方評分系統的 mktLabel 覆寫 —— 我們沒有那套評分，複刻不了，這是已知差異。
+            c24 = s.get("chg24h")
+            quad24 = quad if c24 is None else (
+                ("多頭建倉" if c24 >= 0 else "空頭建倉") if oi_pct >= 0 else
+                ("空頭平倉" if c24 >= 0 else "多頭平倉"))
             mc = mcap.get(inst.replace("-USDT-SWAP", ""))
             rows.append({
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
                 "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None,
                 # 官方兩道固定條件（價格是**上限**：要「OI 大動、價格還沒動」）
+                "q24": quad24,
                 "inq": abs(oi_pct) >= QUAD_OI_MIN and abs(px_pct) <= QUAD_PX_MAX,
                 "inflow": (win_h == 1.0 and oi_pct >= INFLOW_OI_MIN
                            and abs(px_pct) <= INFLOW_PX_MAX),
@@ -236,7 +243,9 @@ def _market(G, win_h=1.0, top_n=300):
             for r in rows:
                 a = abs(r["oi"])
                 r["an"] = 2 if a >= p95 else (1 if a >= p90 else 0)
-        rows.sort(key=lambda r: abs(r.get("d_usd") or 0), reverse=True)   # 官方:依變化金額
+        # ★官方前端代碼是 `Math.abs(oiChgPct)` 降序取 top20（文案寫「依變化金額」是錯的，
+        #   以代碼為準），而且是**全部幣一起排**再分到四組，不是每組各取 N。
+        rows.sort(key=lambda r: abs(r.get("oi") or 0), reverse=True)
     except Exception:
         pass
     # 還要等多久：拿「OI 與價格都有」的幣裡最深的那份歷史當進度。
@@ -457,6 +466,20 @@ _HTML = """<!doctype html>
   .qh{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600}
   .src{margin-left:auto;align-self:center;font-size:10px;color:var(--dim);
        border:1px solid var(--line);border-radius:99px;padding:2px 8px}
+  .cl{color:var(--fg);text-decoration:underline;text-decoration-color:var(--line);
+      cursor:pointer;text-underline-offset:3px}
+  .ovl{position:fixed;inset:0;background:#000a;z-index:40}
+  .cd{position:fixed;z-index:41;left:50%;transform:translateX(-50%);bottom:0;width:100%;
+      max-width:460px;border-radius:14px 14px 0 0;max-height:86vh;overflow:auto;
+      padding-bottom:calc(16px + env(safe-area-inset-bottom))}
+  .cq{font-size:15px;font-weight:700}
+  .cr{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);
+      font-size:13px;font-variant-numeric:tabular-nums}
+  .cr span{color:var(--dim)}
+  .btns{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .bt{flex:1;min-width:104px;padding:11px 8px;border-radius:9px;border:1px solid var(--line);
+      background:#0f141c;color:var(--fg);font-size:13px;cursor:pointer;font-weight:600}
+  .bt.bo{background:#16233a;border-color:var(--accent);color:#cfe0ff}
   .bar{height:6px;background:#0f141c;border-radius:99px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
   .ver{font-size:10px;color:var(--dim);cursor:pointer;padding:3px 8px;border:1px solid var(--line);
@@ -484,6 +507,7 @@ _HTML = """<!doctype html>
 
 <div class="tabs" id="tabs"></div>
 <div id="view"></div>
+<div id="card"></div>
 
 <script>
 const API = location.pathname.replace(/\\/$/,'') + '/api';
@@ -551,6 +575,7 @@ function draw(){
   vEl.parentElement.style.color = (D.ver===PAGE_VER) ? '' : 'var(--warn)';
 
   const v=document.getElementById('view');
+  document.getElementById('card').innerHTML = cardHTML();
   if(TAB==='mkt') v.innerHTML = viewMkt();
   if(TAB==='rank') v.innerHTML = viewRank();
   if(TAB==='pos') v.innerHTML = viewPos();
@@ -624,7 +649,8 @@ function scatter(rows){
     .sort((a,b)=>Math.abs(b.oi)-Math.abs(a.oi)).slice(0,18).map(r=>r.inst));
   for(const r of rows){ if(!hit(r)) continue;
     const c=QCLR[r.q], px=X(r.oi), py=Y(r.px);
-    s += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${named.has(r.inst)?4:2.8}" fill="${c}"/>`;
+    s += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${named.has(r.inst)?4:2.8}"`
+      +  ` fill="${c}" style="cursor:pointer" onclick="openCard('${r.inst}')"/>`;
     if(named.has(r.inst)){
       // 靠右半邊的標籤改放在點的**左側**並右對齊，否則寬螢幕下會被切掉（實測 CA/AP/ST…）
       const right = px > (x0+x1)/2;
@@ -651,6 +677,63 @@ function inflowCard(){
     + '看 OI 有沒有保留、相對 BTC 強弱、CVD 方向再判斷多空。</div></div>';
 }
 
+// ── 幣種字卡 + 直接開 APP 的按鈕 ────────────────────────────────────────────
+// ★「先開 APP、沒裝才退回網頁」的手法抄自 datahunterx 官方前端（2026-09-24 抓到）：
+//   設一個 1500ms 後開網頁的 timeout → 監聽 blur（APP 跳出來時頁面失焦）就取消它。
+//   OKX 的 scheme 是官方驗證過的；TradingView 用通用 scheme；
+//   CoinGlass 沒有公開 scheme，用 https（手機裝了 APP 會被 Universal Link 接走）。
+function openApp(scheme, webUrl){
+  if(/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) && scheme){
+    const t = setTimeout(()=>window.open(webUrl,'_blank'), 1500);
+    window.addEventListener('blur', ()=>clearTimeout(t), {once:true});
+    window.location.href = scheme;
+  } else {
+    window.open(webUrl,'_blank');
+  }
+}
+function goOKX(c){      // 下單頁（永續）
+  openApp('okx://pro/trade/main/page?bizType=2&instId='+c+'-USDT-SWAP',
+          'https://www.okx.com/trade-swap/'+c.toLowerCase()+'-usdt-swap'); }
+function goTV(c){       // 官方用的符號就是 OKX:<COIN>USDTPERP
+  openApp('tradingview://chart?symbol=OKX%3A'+c+'USDTPERP',
+          'https://tw.tradingview.com/chart/?symbol='+encodeURIComponent('OKX:'+c+'USDTPERP')); }
+function goCG(c){
+  openApp('', 'https://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT'); }
+
+let CARD = null;
+function openCard(inst){ CARD = inst; draw(); }
+function closeCard(){ CARD = null; draw(); }
+function cardHTML(){
+  if(!CARD || !D.mkt) return '';
+  const r = (D.mkt.rows||[]).find(x=>x.inst===CARD);
+  if(!r) return '';
+  const c = r.inst.replace('-USDT-SWAP','');
+  const meta = (D.mkt.quads&&D.mkt.quads[r.q]) ? D.mkt.quads[r.q] : ['',''];
+  const row=(k,v,cl='')=>`<div class="cr"><span>${k}</span><b class="${cl}">${v}</b></div>`;
+  return '<div class="ovl" onclick="closeCard()"></div>'
+    + `<div class="card cd" onclick="event.stopPropagation()">`
+    + `<h2><span class="qh">${c}</span><span onclick="closeCard()" style="cursor:pointer">✕</span></h2>`
+    + `<div class="cq" style="color:${QCLR[r.q]}">${r.q}　<small>${meta[0]}</small></div>`
+    + `<div class="sub" style="margin:6px 0 10px">${meta[1]||''}</div>`
+    + row('現價', pf(r.last))
+    + row(`OI 變化 (${D.mkt.win_h}H)`, pct(r.oi), cls(r.oi))
+    + row(`價格變化 (${D.mkt.win_h}H)`, pct(r.px), cls(r.px))
+    + row('價格 24H', pct(r.chg24h), cls(r.chg24h))
+    + row('OI／市值', r.oimc? f(r.oimc*100,2)+'%' : '—')
+    + row('OI 名目', r.oiu? '$'+f(r.oiu/1e6,1)+'M' : '—')
+    + row('24H 成交額', r.vol? '$'+f(r.vol/1e6,1)+'M' : '—')
+    + (r.inflow? '<div class="sub" style="color:var(--warn);margin-top:8px">◆ 資金注入候選'
+        + '（1H OI ≥ 4%、|價格| ≤ 3%）：官方下一步是觀察 15 分鐘後看 OI 有沒有保留、'
+        + '相對 BTC 強弱與 CVD 方向。</div>' : '')
+    + `<div class="btns">
+         <button class="bt bo" onclick="goOKX('${c}')">OKX 下單</button>
+         <button class="bt" onclick="goTV('${c}')">TradingView</button>
+         <button class="bt" onclick="goCG('${c}')">CoinGlass</button>
+       </div>`
+    + '<div class="sub" style="margin-top:8px">手機會直接開 APP；沒安裝才退回網頁。</div>'
+    + '</div>';
+}
+
 function viewMkt(){
   const m=D.mkt, rows=m.rows||[];
   if(!rows.length) return noData(m);
@@ -668,7 +751,8 @@ function viewMkt(){
     + `<div class="sub">官方固定值：象限圖 OI ≥ 1%、|價格| ≤ 5%。`
     + `<b>價格是上限</b> —— 找的是「OI 大動、價格還沒動」。</div>`
     + (sel.length ? table('sel', ['幣','OI%','價%','象限'], sel, r=>[
-          {v:r.inst, h:(r.inflow?'<span class="star">◆</span>':'')+r.inst.replace('-USDT-SWAP','')},
+          {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+            + (r.inflow?'<span class="star">◆</span>':'')+r.inst.replace('-USDT-SWAP','')+'</a>'},
           {v:r.oi, h:pct(r.oi), c:cls(r.oi)},
           {v:r.px, h:pct(r.px), c:cls(r.px)},
           {v:r.q, h:`<span style="color:${QCLR[r.q]}">${r.q}</span>`},
@@ -682,15 +766,17 @@ function viewRank(){
   if(!rows.length) return noData(m);
   let h = '<div class="card">' + winBar()
     + `<h2>OI 異動排名<span>${m.win_h}H 持倉量變化・依變化金額排序</span></h2></div>`;
+  const top20 = rows.slice(0,20);      // ★官方：全部一起排取前 20，再分四組
   for(const q of QUADS){
-    const g = rows.filter(r=>r.q===q).slice(0,10);
+    const g = top20.filter(r=>(r.q24||r.q)===q);
     if(!g.length) continue;
     const meta = (m.quads&&m.quads[q]) ? m.quads[q] : ['',''];
     h += `<div class="card"><h2><span class="qh" style="color:${QCLR[q]}">${q}</span>`
       +  `<span title="${meta[1]}">${meta[0]}</span></h2>`
       + table('rk'+q, ['#','幣種','價格','OI變化','OI/市值','價24H'], g, r=>[
           {v:g.indexOf(r)+1, h:String(g.indexOf(r)+1), c:'dim'},
-          {v:r.inst, h:(r.an===2?'<span class="star">★</span>':'')+r.inst.replace('-USDT-SWAP','')},
+          {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+            + (r.an===2?'<span class="star">★</span>':'')+r.inst.replace('-USDT-SWAP','')+'</a>'},
           pf(r.last),
           {v:r.oi, h:pct(r.oi), c:cls(r.oi)},
           {v:r.oimc||0, h:r.oimc?f(r.oimc*100,2)+'%':'—'},
@@ -777,7 +863,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924i';
+const PAGE_VER = '20260924j';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
