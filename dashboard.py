@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924f"
+VER = "20260924g"
 
 
 def _clean(v):
@@ -150,27 +150,41 @@ INFLOW_OI_MIN, INFLOW_PX_MAX = 0.04, 0.03    # 資金注入候選（官方只用
 DASH_SAMPLE_SEC_FALLBACK = 300.0
 
 
-def _at(hist, target_ts, tol):
-    """取 hist 中**最接近** target_ts 的點（差距須 ≤ tol）；沒有就回 None。
+def _at(hist, target_ts, max_gap):
+    """在 target_ts 做**線性內插**，回 (target_ts, 內插值)；辦不到就回 None。
 
-    ★不可以寫成「取 ≤ target+tol 的最後一點」：那會系統性偏向**較新**的點，
-      1H 窗實際只量到 45 分鐘 —— 實測 +30% 被算成 +13%（2026-09-24 被測試抓到）。
-    ★也不可以在超出 tol 時硬拿最舊的點頂替：歷史不夠長就是不夠長，寧可不顯示，
-      不可以拿 12h 的變化標成 1H。
+    為什麼不是「取最接近的點」（前兩版都錯在這）：
+      ①「取 ≤ target+容差的最後一點」→ 系統性偏向較新的點，1H 窗實際只量到 45 分鐘
+        （實測 +30% 被算成 +13%）。
+      ②「取最接近且差距 ≤ 容差的點」→ 要求**剛好有取樣點落在目標時刻附近**。
+        但取樣相位是任意的，而且改過取樣頻率後新舊資料密度不同 →
+        target 隨時間滑動，時而對得上時而對不上，**同一個窗會忽有忽無**
+        （2026-09-24 線上實測：1H 窗先 300 幣、20 分鐘後同一個窗 0 幣）。
+    內插沒有相位問題：只要 target 落在序列範圍內就算得出來。
+
+    兩道防線（寧可不顯示，也不要給錯的數字）：
+      · target 比最舊的點還舊 → None（歷史真的不夠長，不可以拿短窗冒充長窗）
+      · 跨越 target 的那兩點間距 > max_gap → None（中間有停機的大洞，內插不可信）
     """
-    best = None
+    prev = None
     for t, v in hist:
-        d = abs(t - target_ts)
-        if d <= tol and (best is None or d < best[0]):
-            best = (d, t, v)
-    return (best[1], best[2]) if best else None
+        if t <= target_ts:
+            prev = (t, v)
+        elif prev is None:
+            return None                      # 最舊的點都比 target 新 → 歷史不夠長
+        else:
+            if t - prev[0] > max_gap:
+                return None                  # 這段有大洞（bot 停機）→ 不內插
+            f = (target_ts - prev[0]) / (t - prev[0])
+            return (target_ts, prev[1] + (v - prev[1]) * f)
+    return None                              # target 比最新的點還新
 
 
 def _market(G, win_h=1.0, top_n=300):
     """★四象限（OI 變化 × 價格變化）。兩邊都讀記憶體，零 API。
 
-    OI ← `_oi_history`、價 ← `_PX_HISTORY`，**同一個時間窗**（都由 `_oi_sample_tick` 每 15 分鐘取樣）。
-    官方 OI 異動排名看的是 **1H**，所以預設 1H；UI 可切 4H/12H。
+    OI ← `_oi_history`、價 ← `_PX_HISTORY`，**同一個時間窗**（都由 `_oi_sample_tick` 每 5 分鐘取樣）。
+    官方只有 15m / 30m / 1H 三檔，排名預設 1H。窗的兩端都用 `_at` 線性內插，沒有相位問題。
     排序照官方：**依 OI 變化的「金額」**（|ΔOI USD|），不是百分比 —— 小幣百分比會灌水。
     """
     rows = []
@@ -181,26 +195,21 @@ def _market(G, win_h=1.0, top_n=300):
         mcap = G.get("_MCAP") or {}
         now = time.time()
         target = now - win_h * 3600
-        # ★容差要跟「取樣間隔」和「窗長」兩邊都掛鉤，不能寫死 1800：
-        #   寫死 1800 時，才累積 37 分鐘的資料也會通過 1H 窗的檢查（誤差佔窗長一半），
-        #   畫面就會把 37 分鐘的變化標成「1H 變化」。2026-09-24 線上實測抓到。
-        #   取樣間隔 S=900 → 最近的點距離目標最多 S/2；再給 60 秒抖動；且不得超過窗長的 1/4。
         samp = float(G.get("DASH_SAMPLE_SEC") or DASH_SAMPLE_SEC_FALLBACK)
-        tol = min(samp / 2 + 60, win_h * 3600 * 0.25)
+        # 內插允許跨越的最大空洞：正常取樣間隔的 4 倍，且至少 30 分鐘。
+        # 超過就是 bot 停過機，那段不內插（給 None，該幣這輪不顯示）。
+        max_gap = max(samp * 4, 1800.0)
         for inst, hist in list(oi_all.items()):
             if not hist or len(hist) < 2:
                 continue
-            base = _at(hist, target, tol)
-            # ★基準點必須**真的落在這個窗的起點附近**。只檢查上界不夠：歷史稀疏時
-            #   `_at` 會回一個 12 小時前的點，卻被當成 1H 窗算 → 數字大好幾倍還標著 1H。
-            #   寧可不顯示，也不可以拿不同窗的東西混進來比。
+            base = _at(hist, target, max_gap)   # 內插；歷史不夠長或中間有洞 → None
             if not base or base[1] <= 0:
                 continue
             l_v = hist[-1][1]
             d_usd = l_v - base[1]
             oi_pct = d_usd / base[1]
             ph = px_all.get(inst) or []
-            pbase = _at(ph, target, tol) if len(ph) >= 2 else None
+            pbase = _at(ph, target, max_gap) if len(ph) >= 2 else None
             if not pbase or pbase[1] <= 0:
                 continue                  # 價格同理：不同窗不可以混（同上）
             px_pct = (ph[-1][1] - pbase[1]) / pbase[1]
@@ -756,7 +765,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924f';
+const PAGE_VER = '20260924g';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
