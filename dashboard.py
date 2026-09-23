@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924h"
+VER = "20260924i"
 
 
 def _clean(v):
@@ -445,7 +445,7 @@ _HTML = """<!doctype html>
   .wb{padding:4px 12px;border:1px solid var(--line);border-radius:7px;background:#0f141c;
       color:var(--dim);cursor:pointer;font-size:12px}
   .wb.on{color:var(--fg);border-color:var(--accent);background:#16233a}
-  .sc{width:100%;height:auto;display:block;margin:2px 0 6px;overflow:visible}
+  .sc{width:100%;max-width:560px;height:auto;display:block;margin:2px auto 6px;overflow:hidden}
   .sc .ql{font-size:9px;font-weight:600;opacity:.85}
   .sc .qr{text-anchor:end}
   .sc .ax{font-size:8px;fill:var(--dim)}
@@ -625,9 +625,11 @@ function scatter(rows){
   for(const r of rows){ if(!hit(r)) continue;
     const c=QCLR[r.q], px=X(r.oi), py=Y(r.px);
     s += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${named.has(r.inst)?4:2.8}" fill="${c}"/>`;
-    if(named.has(r.inst))
-      s += `<text x="${(px+6).toFixed(1)}" y="${(py+3.5).toFixed(1)}" class="pl">`
-        +  `${r.inst.replace('-USDT-SWAP','')}</text>`; }
+    if(named.has(r.inst)){
+      // 靠右半邊的標籤改放在點的**左側**並右對齊，否則寬螢幕下會被切掉（實測 CA/AP/ST…）
+      const right = px > (x0+x1)/2;
+      s += `<text x="${(right?px-6:px+6).toFixed(1)}" y="${(py+3.5).toFixed(1)}"`
+        +  ` class="pl${right?' qr':''}">${r.inst.replace('-USDT-SWAP','')}</text>`; } }
   return s + '</svg>';
 }
 
@@ -775,7 +777,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924h';
+const PAGE_VER = '20260924i';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
