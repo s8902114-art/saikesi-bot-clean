@@ -8654,6 +8654,68 @@ def _dash_hist_load() -> None:
         print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
 
 
+_BN_HISTORY: Dict[str, list] = {}       # 幣安 OI（張數）instId -> [(ts, oi)]
+_BN_STATE = {"ok": None, "fail": 0, "n": 0}
+DASH_BN_TOP_N = 60                      # 只對「最可能進排名」的前 N 幣補幣安，不打全市場
+
+
+def _bn_oi_sample(now_s: float, keep_from: float) -> None:
+    """★補幣安 OI，讓 OI 變化% 能跟官方一樣取「OKX 與幣安的算術平均」。
+
+    幣安**沒有全市場 OI 的批量端點**（`/fapi/v1/openInterest` 一次一個幣），官方也是逐幣打。
+    權重 1／次，每分鐘上限 2400，所以 60 幣 ÷ 5 分鐘完全在限額內。
+    ★Railway 的 IP 曾被幣安地理封鎖（HTTP 451，開機連通性檢查就會印）。
+      這裡連續失敗 3 次就整個停用，不會每輪重試洗 log；成功則自動恢復使用。
+    存的是**張數**不是 USD —— 算變化% 不需要換算（合約面值不變時比值相同）。
+    """
+    global _BN_HISTORY
+    if _BN_STATE["fail"] >= 3:
+        return
+    try:
+        # 挑要補的幣：優先 |OKX 1H 變化| 大的（最可能進排名），不足就用 OI 金額大的補滿
+        scored = []
+        for inst, h in _oi_history.items():
+            if len(h) >= 2 and h[0][1] > 0:
+                scored.append((abs(h[-1][1] - h[0][1]) / h[0][1], h[-1][1], inst))
+        scored.sort(reverse=True)
+        picks = [x[2] for x in scored[:DASH_BN_TOP_N]]
+        ok = 0
+        for inst in picks:
+            sym = inst.replace("-USDT-SWAP", "") + "USDT"
+            try:
+                r = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                                 params={"symbol": sym}, timeout=6)
+                if r.status_code == 451:
+                    _BN_STATE["fail"] += 1
+                    print(f"[DASH] 幣安 OI 被地理封鎖(451) → 停用幣安來源，"
+                          f"OI 變化只用 OKX（第 {_BN_STATE['fail']}/3 次）", flush=True)
+                    return
+                if r.status_code != 200:
+                    continue
+                v = float(r.json().get("openInterest", 0) or 0)
+                if v <= 0:
+                    continue
+                hh = _BN_HISTORY.setdefault(inst, [])
+                hh.append((now_s, v))
+                _BN_HISTORY[inst] = [(t, x) for (t, x) in hh if t >= keep_from] or [(now_s, v)]
+                ok += 1
+            except Exception:
+                continue
+            time.sleep(0.05)            # 節流：60 幣約 3 秒，不影響取樣週期
+        _BN_STATE["ok"] = ok > 0
+        _BN_STATE["n"] = ok
+        if ok == 0:
+            _BN_STATE["fail"] += 1
+        else:
+            _BN_STATE["fail"] = 0
+        for k in list(_BN_HISTORY.keys()):
+            if k not in _oi_history:
+                del _BN_HISTORY[k]
+    except Exception as e:
+        _BN_STATE["fail"] += 1
+        print(f"[DASH] 幣安 OI 取樣失敗({_BN_STATE['fail']}/3): {e}", flush=True)
+
+
 def _oi_sample_tick(force: bool = False) -> bool:
     """★儀表板的 OI／價格取樣（**_oi_history / _TICKER_SNAP / _PX_HISTORY 的唯一寫入點**）。
     兩支公開端點，各一次涵蓋全市場約 400 個合約：
@@ -8730,6 +8792,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
                         del _PX_HISTORY[k]
     except Exception as e:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
+    _bn_oi_sample(now_s, keep_from)     # 補幣安 OI（被封就自動停用，見函數內說明）
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
     _DASH_SAMPLE["i"] = int(_DASH_SAMPLE.get("i", 0)) + 1
     if force or _DASH_SAMPLE["i"] % DASH_SAVE_EVERY == 0:

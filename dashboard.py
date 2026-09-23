@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924k"
+VER = "20260924m"
 
 
 def _clean(v):
@@ -208,6 +208,16 @@ def _market(G, win_h=1.0, top_n=300):
             l_v = hist[-1][1]
             d_usd = l_v - base[1]
             oi_pct = d_usd / base[1]
+            # ★官方 `oi_chg_1h` = OKX 與幣安 OI 變化%的**算術平均**（逐筆驗算過：
+            #   STABLE (9.29+2.21)/2=5.75、ONE (8.44+0.69)/2=4.56、PYTH (5.4−0.01)/2=2.70）。
+            #   只有一所有資料時就用那一所 —— 官方 CNPY 只有 OKX 時也是直接用 5.20。
+            src = "OKX"
+            bh = (G.get("_BN_HISTORY") or {}).get(inst)
+            if bh and len(bh) >= 2:
+                bb = _at(bh, target, max_gap)
+                if bb and bb[1] > 0:
+                    oi_pct = (oi_pct + (bh[-1][1] - bb[1]) / bb[1]) / 2.0
+                    src = "OKX+BN"
             ph = px_all.get(inst) or []
             pbase = _at(ph, target, max_gap) if len(ph) >= 2 else None
             if not pbase or pbase[1] <= 0:
@@ -228,7 +238,7 @@ def _market(G, win_h=1.0, top_n=300):
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
                 "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None,
                 # 官方兩道固定條件（價格是**上限**：要「OI 大動、價格還沒動」）
-                "q24": quad24,
+                "q24": quad24, "src": src,
                 "inq": abs(oi_pct) >= QUAD_OI_MIN and abs(px_pct) <= QUAD_PX_MAX,
                 "inflow": (win_h == 1.0 and oi_pct >= INFLOW_OI_MIN
                            and abs(px_pct) <= INFLOW_PX_MAX),
@@ -261,7 +271,9 @@ def _market(G, win_h=1.0, top_n=300):
                 depth = max(depth, nowt - max(h[0][0], ph[0][0]))
     except Exception:
         pass
+    _bn = sum(1 for r in rows if r.get("src") == "OKX+BN")
     return {"win_h": win_h, "quads": {k: list(v) for k, v in _QUAD.items()},
+            "src": ("OKX+BN " + str(_bn)) if _bn else "OKX",
             "gate": {"oi_min": QUAD_OI_MIN, "px_max": QUAD_PX_MAX,
                      "inflow_oi": INFLOW_OI_MIN, "inflow_px": INFLOW_PX_MAX},
             "tracked": len(G.get("_oi_history") or {}),
@@ -589,8 +601,8 @@ function draw(){
 function winBar(){
   return '<div class="wins">' + WINS.map(([w,n])=>
     `<div class="wb ${W===w?'on':''}" onclick="setW(${w})">${n}</div>`).join('')
-    + '<span class="src" title="官方用 OKX+幣安兩所；幣安 fapi 在 Railway 被地理封鎖(HTTP 451)，'
-    + '所以這裡只有 OKX 單一交易所">OKX</span></div>';
+    + `<span class="src" title="官方 oi_chg_1h = OKX 與幣安的算術平均。這裡有補到幣安的幣會標 OKX+BN；
+       幣安 fapi 若被 Railway 地理封鎖(451)就只剩 OKX。">${(D&&D.mkt&&D.mkt.src)||'OKX'}</span></div>`;
 }
 function noData(m){
   const pctDone = Math.min(100, Math.round(m.depth_min/(m.win_h*60)*100)) || 0;
@@ -699,18 +711,21 @@ function goUL(url){ if(MOB) location.href = url; else window.open(url,'_blank');
 function goOKX(c){      // 下單頁（永續）。scheme 是官方 _okxOrder() 驗證過的
   openApp('okx://pro/trade/main/page?bizType=2&instId='+c+'-USDT-SWAP',
           'https://www.okx.com/trade-swap/'+c.toLowerCase()+'-usdt-swap'); }
-function goTV(c){       // ★符號用 OKX:<COIN>USDT.P（TradingView 的永續寫法）
-  goUL('https://www.tradingview.com/chart/?symbol='
-       + encodeURIComponent('OKX:'+c+'USDT.P')); }
+function goTV(c){
+  // ★★加到主畫面的 iOS PWA（standalone）**不會觸發 Universal Link** —— 它會直接在同一個
+  //   webview 裡把網頁打開（用戶回報「TV 變開網頁了」就是這個）。所以一定要用自訂 scheme。
+  //   上一版跳了 APP 卻沒帶符號，疑似是 `OKX%3A` 被二次編碼；這版冒號不編碼。
+  openApp('tradingview://chart?symbol=OKX:'+c+'USDT.P',
+          'https://www.tradingview.com/chart/?symbol='+encodeURIComponent('OKX:'+c+'USDT.P')); }
 function goCG(c){
-  // CoinGlass 沒有公開的 deep-link 規格（查不到官方文件）。
-  // Android 可以用 intent:// 指定 package 強制交給 APP；iOS 只能試 coinglass:// 再退回網頁。
+  // `coinglass://` 實測是「無效的網址」→ CoinGlass APP 沒註冊這個 scheme，這條路不通。
+  // 查不到任何官方 deep-link 規格，所以 iOS 只能開網頁；Android 還能用 intent:// 交給 APP。
   const web = 'https://www.coinglass.com/tv/Binance_'+c+'USDT';
   if(/Android/i.test(navigator.userAgent)){
     location.href = 'intent://www.coinglass.com/tv/Binance_'+c+'USDT'
       + '#Intent;scheme=https;package=com.coinglass.android;S.browser_fallback_url='
       + encodeURIComponent(web) + ';end';
-  } else { openApp('coinglass://', web); } }
+  } else { window.open(web,'_blank'); } }
 
 let CARD = null;
 function openCard(inst){ CARD = inst; draw(); }
@@ -875,7 +890,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924k';
+const PAGE_VER = '20260924m';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
