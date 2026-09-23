@@ -8592,6 +8592,61 @@ _PX_HISTORY: Dict[str, list] = {}    # instId -> [(ts, last), ...]  與 _oi_hist
 _MCAP: Dict[str, float] = {}         # COIN -> 市值USD（CoinGecko 那支本來就回傳，原本被丟掉）
 _DASH_SAMPLE = {"ts": 0.0, "n": 0}
 DASH_SAMPLE_SEC = 900                # 15 分鐘取樣一次（官方 OI 異動排名看 1H 變化，1H 一點沒有解析度）
+_DASH_HIST_FILE = os.path.join(_PERSIST_DIR, "dash_hist.json")
+
+
+def _dash_hist_save() -> None:
+    """★把 OI／價格取樣落地到 Railway volume（/data），redeploy 不歸零。
+    不存檔的話每次部署 1H 窗都要重等一小時、12H 窗等於永遠等不到
+    （部署頻率比 12 小時高）。時間戳取整數、數值取 6 位有效數字以縮小檔案。"""
+    try:
+        keep_from = time.time() - (OI_MOVERS_WINDOW_H + 1) * 3600
+        def _pack(d):
+            out = {}
+            for k, h in d.items():
+                # 9 位有效數字:OI 的 1H 變化常常只有 1~3%,存成 6 位(1000052→1000050)
+                # 的量化誤差雖小,但沒必要拿精度換那一點檔案大小(實測 476 幣約 1MB)。
+                pts = [[int(t), float(f"{v:.9g}")] for (t, v) in h if t >= keep_from]
+                if pts:
+                    out[k] = pts
+            return out
+        tmp = _DASH_HIST_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"v": 1, "ts": int(time.time()),
+                       "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY)},
+                      f, separators=(",", ":"))
+        os.replace(tmp, _DASH_HIST_FILE)      # 原子替換,避免寫到一半被重啟砍成半截檔
+    except Exception as e:
+        print(f"[DASH] 取樣落地失敗(不影響交易): {e}", flush=True)
+
+
+def _dash_hist_load() -> None:
+    """啟動時讀回取樣歷史。太舊的點在這裡就濾掉（bot 停機期間的空窗不該被當成連續資料）。"""
+    global _PX_HISTORY
+    try:
+        if not os.path.exists(_DASH_HIST_FILE):
+            print("[DASH] 無歷史存檔,從零開始累積", flush=True)
+            return
+        with open(_DASH_HIST_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        keep_from = time.time() - (OI_MOVERS_WINDOW_H + 1) * 3600
+        def _unpack(src):
+            out = {}
+            for k, pts in (src or {}).items():
+                arr = [(float(t), float(v)) for t, v in pts if float(t) >= keep_from]
+                if len(arr) >= 1:
+                    out[k] = arr
+            return out
+        _oi_history.update(_unpack(d.get("oi")))
+        _PX_HISTORY = _unpack(d.get("px"))
+        _depth = 0
+        for _k, _h in _oi_history.items():
+            if _h:
+                _depth = max(_depth, int((time.time() - _h[0][0]) / 60))
+        print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣,"
+              f"最深 {_depth} 分鐘(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
+    except Exception as e:
+        print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
 
 
 def _oi_sample_tick(force: bool = False) -> bool:
@@ -8654,6 +8709,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
     except Exception as e:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
+    _dash_hist_save()          # 每次取樣完落地,redeploy 不歸零
     return True
 
 
@@ -9520,6 +9576,7 @@ def main_polling_loop():
     # ★2026-09-24 儀表板:啟動就先取樣一次。主迴圈的取樣點在 synchronise_and_wait_next_candle
     #   **之後**,所以 redeploy 完最多要等 15 分鐘才有第一個點,儀表板整段時間是空的。
     try:
+        _dash_hist_load()      # ★先讀回存檔,再取樣 → redeploy 後 1H/12H 窗接得上,不用重等
         _oi_sample_tick(force=True)
         print(f"[DASH] 啟動取樣完成:報價 {len(_TICKER_SNAP)} 幣 / OI 追蹤 {len(_oi_history)} 幣", flush=True)
     except Exception as _ise:
