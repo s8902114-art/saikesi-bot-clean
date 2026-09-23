@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924j"
+VER = "20260924k"
 
 
 def _clean(v):
@@ -691,14 +691,26 @@ function openApp(scheme, webUrl){
     window.open(webUrl,'_blank');
   }
 }
-function goOKX(c){      // 下單頁（永續）
+const MOB = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+// Universal Link（iOS）/ App Link（Android）要用 location.href 才會被 APP 接走；
+// window.open 會開新分頁，常常就留在瀏覽器裡 —— 這就是「跳了 APP 卻沒跳到幣別」的原因。
+function goUL(url){ if(MOB) location.href = url; else window.open(url,'_blank'); }
+
+function goOKX(c){      // 下單頁（永續）。scheme 是官方 _okxOrder() 驗證過的
   openApp('okx://pro/trade/main/page?bizType=2&instId='+c+'-USDT-SWAP',
           'https://www.okx.com/trade-swap/'+c.toLowerCase()+'-usdt-swap'); }
-function goTV(c){       // 官方用的符號就是 OKX:<COIN>USDTPERP
-  openApp('tradingview://chart?symbol=OKX%3A'+c+'USDTPERP',
-          'https://tw.tradingview.com/chart/?symbol='+encodeURIComponent('OKX:'+c+'USDTPERP')); }
+function goTV(c){       // ★符號用 OKX:<COIN>USDT.P（TradingView 的永續寫法）
+  goUL('https://www.tradingview.com/chart/?symbol='
+       + encodeURIComponent('OKX:'+c+'USDT.P')); }
 function goCG(c){
-  openApp('', 'https://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT'); }
+  // CoinGlass 沒有公開的 deep-link 規格（查不到官方文件）。
+  // Android 可以用 intent:// 指定 package 強制交給 APP；iOS 只能試 coinglass:// 再退回網頁。
+  const web = 'https://www.coinglass.com/tv/Binance_'+c+'USDT';
+  if(/Android/i.test(navigator.userAgent)){
+    location.href = 'intent://www.coinglass.com/tv/Binance_'+c+'USDT'
+      + '#Intent;scheme=https;package=com.coinglass.android;S.browser_fallback_url='
+      + encodeURIComponent(web) + ';end';
+  } else { openApp('coinglass://', web); } }
 
 let CARD = null;
 function openCard(inst){ CARD = inst; draw(); }
@@ -863,7 +875,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924j';
+const PAGE_VER = '20260924k';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

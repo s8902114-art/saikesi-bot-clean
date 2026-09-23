@@ -8664,6 +8664,23 @@ def _oi_sample_tick(force: bool = False) -> bool:
         return False
     _DASH_SAMPLE["ts"] = time.time()
     now_s = time.time()
+    # ★只留加密貨幣：不過濾的話美股代幣(TSEM/SQQQ/GTLB/NMR…)會混進 OI 排名 ——
+    #   2026-09-24 與官方同時刻對帳時抓到，官方清單裡一個都沒有（他們有獨立的美股分頁）。
+    #   同型事故 memory 記過一次（SNXX instCategory=3 經 OI 增長榜進池、吞噬空真的開了空單）。
+    #   另排除穩定幣（官方 `_whaleRadarIsEligibleCoin` 也有這張清單）。
+    try:
+        _crypto_ok = _okx_crypto_symbols()
+    except Exception:
+        _crypto_ok = set()
+    _STABLE_EX = {"USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD", "USDS", "USDE", "USDD",
+                  "USDY", "USDG", "USDF", "USDTB", "RLUSD", "PYUSD", "BFUSD", "USDB",
+                  "FRAX", "LUSD", "SUSD", "GUSD", "USD0"}
+
+    def _dash_ok(inst_id):
+        coin = inst_id.replace("-USDT-SWAP", "")
+        if coin in _STABLE_EX:
+            return False
+        return (not _crypto_ok) or (coin in _crypto_ok)   # 抓不到清單就不過濾（與其他來源一致）
     keep_from = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600      # 留到比最大窗多 1 小時就夠
     # ① OI
     try:
@@ -8672,7 +8689,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
         if r.status_code == 200:
             for row in r.json().get("data", []):
                 inst = row.get("instId", "")
-                if not inst.endswith("-USDT-SWAP"):
+                if not inst.endswith("-USDT-SWAP") or not _dash_ok(inst):
                     continue
                 try:
                     oi_usd = float(row.get("oiUsd", 0) or 0)
@@ -8693,7 +8710,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
             snap = {}
             for t in r.json().get("data", []):
                 inst = t.get("instId", "")
-                if not inst.endswith("-USDT-SWAP"):
+                if not inst.endswith("-USDT-SWAP") or not _dash_ok(inst):
                     continue
                 try:
                     last = float(t["last"]); op = float(t["open24h"]); vc = float(t.get("volCcy24h", 0) or 0)
