@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924g"
+VER = "20260924h"
 
 
 def _clean(v):
@@ -583,10 +583,16 @@ function noData(m){
 function scatter(rows){
   const Wd=360, Ht=300, L=34, R=8, T=10, B=24;
   const x0=L, x1=Wd-R, y0=T, y1=Ht-B, cx=(x0+x1)/2, cy=(y0+y1)/2;
-  const mx = Math.max(OITH*1.6, ...rows.map(r=>Math.abs(r.oi*100)))*1.05 || 10;
-  const my = Math.max(PXTH*1.6, ...rows.map(r=>Math.abs(r.px*100)))*1.05 || 10;
-  const X = v => cx + (v*100/mx)*((x1-x0)/2);
-  const Y = v => cy - (v*100/my)*((y1-y0)/2);
+  // ★軸範圍用 p95 不用 max：用 max 時一個離群值就把整張圖壓扁，
+  //   實測線上凌晨時段所有點擠成一條水平線（Y 軸 ±20% 但點都在 ±3% 內）。
+  //   下限綁在門檻的 1.6 倍，確保虛線框一定看得到；超出範圍的點夾到邊緣。
+  const q95 = a => { if(!a.length) return 0; const s=[...a].sort((p,q)=>p-q);
+                     return s[Math.min(s.length-1, Math.floor(s.length*0.95))]; };
+  const mx = Math.max(OITH*1.6, q95(rows.map(r=>Math.abs(r.oi*100)))*1.15) || 10;
+  const my = Math.max(PXTH*1.6, q95(rows.map(r=>Math.abs(r.px*100)))*1.15) || 10;
+  const clamp = (v,lo,hi) => Math.max(lo, Math.min(hi, v));
+  const X = v => clamp(cx + (v*100/mx)*((x1-x0)/2), x0+2, x1-2);
+  const Y = v => clamp(cy - (v*100/my)*((y1-y0)/2), y0+2, y1-2);
   const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   let s = `<svg viewBox="0 0 ${Wd} ${Ht}" class="sc">`;
   s += `<rect x="${cx}" y="${y0}" width="${x1-cx}" height="${cy-y0}" fill="#35d07f" opacity=".07"/>`
@@ -613,11 +619,15 @@ function scatter(rows){
     +  `<text x="${x1}" y="${Ht-6}" class="ax qr">+${mx.toFixed(0)}% OI</text>`;
   for(const r of rows){ if(hit(r)) continue;
     s += `<circle cx="${X(r.oi).toFixed(1)}" cy="${Y(r.px).toFixed(1)}" r="2" fill="#4a5568" opacity=".6"/>`; }
+  // 命中的點全部畫，但**只給前 18 大標字**：85 個標籤會糊成一團看不懂（線上實測）
+  const named = new Set(rows.filter(hit)
+    .sort((a,b)=>Math.abs(b.oi)-Math.abs(a.oi)).slice(0,18).map(r=>r.inst));
   for(const r of rows){ if(!hit(r)) continue;
     const c=QCLR[r.q], px=X(r.oi), py=Y(r.px);
-    s += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="4" fill="${c}"/>`
-      +  `<text x="${(px+6).toFixed(1)}" y="${(py+3.5).toFixed(1)}" class="pl">`
-      +  `${r.inst.replace('-USDT-SWAP','')}</text>`; }
+    s += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="${named.has(r.inst)?4:2.8}" fill="${c}"/>`;
+    if(named.has(r.inst))
+      s += `<text x="${(px+6).toFixed(1)}" y="${(py+3.5).toFixed(1)}" class="pl">`
+        +  `${r.inst.replace('-USDT-SWAP','')}</text>`; }
   return s + '</svg>';
 }
 
@@ -765,7 +775,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924g';
+const PAGE_VER = '20260924h';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
