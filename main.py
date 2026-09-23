@@ -8655,7 +8655,12 @@ def _dash_hist_load() -> None:
 
 
 _BN_HISTORY: Dict[str, list] = {}       # 幣安 OI（張數）instId -> [(ts, oi)]
-_BN_STATE = {"ok": None, "fail": 0, "n": 0}
+_BN_STATE = {"ok": None, "fail": 0, "n": 0, "host": 0}
+# ★Railway 出口 IP 被幣安地理封鎖(451,實測確認)。fapi1~4 是幣安自己的備援網域,
+#   有時封鎖名單不一致 —— 依序試,找到通的就固定用它;全部不通才停用。
+_BN_HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com",
+             "https://fapi2.binance.com", "https://fapi3.binance.com",
+             "https://fapi4.binance.com"]
 DASH_BN_TOP_N = 60                      # 只對「最可能進排名」的前 N 幣補幣安，不打全市場
 
 
@@ -8683,12 +8688,18 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
         for inst in picks:
             sym = inst.replace("-USDT-SWAP", "") + "USDT"
             try:
-                r = requests.get("https://fapi.binance.com/fapi/v1/openInterest",
+                r = requests.get(_BN_HOSTS[_BN_STATE["host"]] + "/fapi/v1/openInterest",
                                  params={"symbol": sym}, timeout=6)
                 if r.status_code == 451:
+                    # 換下一個備援網域再試；全部試完才算真的不通
+                    if _BN_STATE["host"] + 1 < len(_BN_HOSTS):
+                        _BN_STATE["host"] += 1
+                        print(f"[DASH] 幣安 451 → 改試備援網域 "
+                              f"{_BN_HOSTS[_BN_STATE['host']]}", flush=True)
+                        return
                     _BN_STATE["fail"] += 1
-                    print(f"[DASH] 幣安 OI 被地理封鎖(451) → 停用幣安來源，"
-                          f"OI 變化只用 OKX（第 {_BN_STATE['fail']}/3 次）", flush=True)
+                    print(f"[DASH] 幣安 OI:{len(_BN_HOSTS)} 個網域全部被地理封鎖(451) → "
+                          f"停用，OI 變化只用 OKX（第 {_BN_STATE['fail']}/3 次）", flush=True)
                     return
                 if r.status_code != 200:
                     continue
