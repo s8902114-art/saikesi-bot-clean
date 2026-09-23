@@ -8485,7 +8485,17 @@ def _fetch_coingecko_top100() -> list:
             timeout=15
         )
         if r.status_code == 200:
-            return [c["symbol"].upper() for c in r.json()]
+            _rows = r.json()
+            # ★2026-09-24 儀表板:同一份回應本來就含 market_cap,原本只取 symbol 就丟掉。
+            #   官方「OI／市值」= 衍生品槓桿相對幣種規模,是風險/擁擠度指標(不是買賣訊號)。零額外 API。
+            for _c in _rows:
+                try:
+                    _mc = float(_c.get("market_cap") or 0)
+                    if _mc > 0:
+                        _MCAP[_c["symbol"].upper()] = _mc
+                except (TypeError, ValueError):
+                    pass
+            return [c["symbol"].upper() for c in _rows]
         print(f"[SYMBOLS] CoinGecko HTTP {r.status_code}", flush=True)
     except Exception as e:
         print(f"[SYMBOLS] CoinGecko 抓取失敗: {e}", flush=True)
@@ -8575,6 +8585,77 @@ def _fetch_okx_liquid_pool(min_volccy: float = LIQ_POOL_MIN_VOLCCY) -> list:
     except Exception as e:
         print(f"[SYMBOLS] 流動性底池抓取失敗: {e}", flush=True)
         return []
+
+# ══ 儀表板資料取樣（唯一寫入點，見 CLAUDE.md「同一個欄名、多個來源」的坑）═══════════
+_TICKER_SNAP: Dict[str, dict] = {}   # instId -> {last, chg24h, volccy_usd, ts}
+_PX_HISTORY: Dict[str, list] = {}    # instId -> [(ts, last), ...]  與 _oi_history 同節奏，四象限才同窗
+_MCAP: Dict[str, float] = {}         # COIN -> 市值USD（CoinGecko 那支本來就回傳，原本被丟掉）
+_DASH_SAMPLE = {"ts": 0.0, "n": 0}
+DASH_SAMPLE_SEC = 900                # 15 分鐘取樣一次（官方 OI 異動排名看 1H 變化，1H 一點沒有解析度）
+
+
+def _oi_sample_tick(force: bool = False) -> bool:
+    """★儀表板的 OI／價格取樣（**_oi_history / _TICKER_SNAP / _PX_HISTORY 的唯一寫入點**）。
+    兩支公開端點，各一次涵蓋全市場約 400 個合約：
+      public/open-interest → _oi_history        market/tickers → _TICKER_SNAP + _PX_HISTORY
+    15 分鐘一次 = 96 次/天，跟現役 K 線查詢比可忽略。失敗一律吞掉，不影響交易。"""
+    global _TICKER_SNAP
+    if not force and time.time() - _DASH_SAMPLE["ts"] < DASH_SAMPLE_SEC:
+        return False
+    _DASH_SAMPLE["ts"] = time.time()
+    now_s = time.time()
+    keep_from = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600      # 留到比最大窗多 1 小時就夠
+    # ① OI
+    try:
+        r = requests.get("https://www.okx.com/api/v5/public/open-interest",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code == 200:
+            for row in r.json().get("data", []):
+                inst = row.get("instId", "")
+                if not inst.endswith("-USDT-SWAP"):
+                    continue
+                try:
+                    oi_usd = float(row.get("oiUsd", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if oi_usd <= 0:
+                    continue
+                h = _oi_history.setdefault(inst, [])
+                h.append((now_s, oi_usd))
+                _oi_history[inst] = [(t, v) for (t, v) in h if t >= keep_from] or [(now_s, oi_usd)]
+    except Exception as e:
+        print(f"[DASH] OI 取樣失敗: {e}", flush=True)
+    # ② 價格（存在流動性門檻之前，才能跟 _oi_history 全市場對得起來）
+    try:
+        r = requests.get("https://www.okx.com/api/v5/market/tickers",
+                         params={"instType": "SWAP"}, timeout=15)
+        if r.status_code == 200:
+            snap = {}
+            for t in r.json().get("data", []):
+                inst = t.get("instId", "")
+                if not inst.endswith("-USDT-SWAP"):
+                    continue
+                try:
+                    last = float(t["last"]); op = float(t["open24h"]); vc = float(t.get("volCcy24h", 0) or 0)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if last <= 0 or op <= 0:
+                    continue
+                snap[inst] = {"last": last, "chg24h": (last - op) / op,
+                              "volccy_usd": vc * last, "ts": now_s}
+                h = _PX_HISTORY.setdefault(inst, [])
+                h.append((now_s, last))
+                _PX_HISTORY[inst] = [(_t, _v) for (_t, _v) in h if _t >= keep_from] or [(now_s, last)]
+            if snap:
+                _TICKER_SNAP = snap                       # 整批換掉，下架幣自然消失
+                for k in list(_PX_HISTORY.keys()):
+                    if k not in snap:
+                        del _PX_HISTORY[k]
+    except Exception as e:
+        print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
+    _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
+    return True
+
 
 def _fetch_okx_top_movers(top_n: int = TOP_MOVERS_N, min_volccy: float = MIN_MOVER_VOLCCY) -> list:
     """OKX 24h 漲幅前N + 跌幅前N(USDT永續,配流動性門檻;★2026-09-04只留加密貨幣)。
@@ -9487,6 +9568,14 @@ def main_polling_loop():
             #   只打1支OKX ticker API,不碰CoinGecko,負擔可忽略;治「幣中途暴衝完落幕整段沒進掃描池」
             elif time.time() - _movers_last_updated > MOVERS_REFRESH_SEC:
                 refresh_top_movers_only()
+
+            # ★2026-09-24 儀表板:OI/價格取樣拉到 15 分鐘一次(原本綁在 1H 的 movers 刷新裡)。
+            #   數據獵手的 OI 異動排名看的是 **1H 變化**,取樣 1H 一點的話 1H 窗只有兩點=沒有解析度。
+            #   成本:open-interest + tickers 各一支(每支一次涵蓋全市場約400合約),96次/天,可忽略。
+            try:
+                _oi_sample_tick()
+            except Exception as _ose:
+                print(f"[DASH] OI 取樣失敗(不影響交易): {_ose}", flush=True)
 
             # ★★2026-08-27 致命縮排bug修復:原本 `for symbol_item` 迴圈**沒有包在 `for tf` 裡面**
             #   (兩個 for 同一層縮排),導致 `for tf` 只印字,真正的掃描只跑**一次**、且用最後一個 tf。
