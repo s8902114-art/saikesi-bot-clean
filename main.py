@@ -9517,6 +9517,14 @@ def main_polling_loop():
     adopt_untracked_bingx_positions()
     n_sym = len(SYMBOLS)
 
+    # ★2026-09-24 儀表板:啟動就先取樣一次。主迴圈的取樣點在 synchronise_and_wait_next_candle
+    #   **之後**,所以 redeploy 完最多要等 15 分鐘才有第一個點,儀表板整段時間是空的。
+    try:
+        _oi_sample_tick(force=True)
+        print(f"[DASH] 啟動取樣完成:報價 {len(_TICKER_SNAP)} 幣 / OI 追蹤 {len(_oi_history)} 幣", flush=True)
+    except Exception as _ise:
+        print(f"[DASH] 啟動取樣失敗(不影響交易): {_ise}", flush=True)
+
     start_alert = f"🚀 **賽克斯全功能完全體智慧交易系統 v4 實盤部署完成**\n控制中樞已對齊 **{n_sym}** 個主流加密商品（市值前100 × OKX 永續），開始進行 15m/30m/1H/4H 收盤矩陣輪詢機制..."
     dc_log(start_alert)
     tg_log(start_alert)

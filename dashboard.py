@@ -32,6 +32,11 @@ _DIAG_SNAP = {"ts": 0.0, "vals": {}}
 
 _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 
+# ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
+#   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
+#   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
+VER = "20260924d" 
+
 
 def _clean(v):
     """★把值壓成 JSON 安全的型別。不做這件事會出大事：
@@ -194,10 +199,25 @@ def _market(G, win_h=1.0, top_n=300):
         rows.sort(key=lambda r: abs(r.get("d_usd") or 0), reverse=True)   # 官方:依變化金額
     except Exception:
         pass
+    # 還要等多久：拿「OI 與價格都有」的幣裡最深的那份歷史當進度。
+    # 空白畫面要講得出「還差幾分鐘」，不然使用者只會看到一片空，以為壞了。
+    depth = 0.0
+    try:
+        oi_all = G.get("_oi_history") or {}
+        px_all = G.get("_PX_HISTORY") or {}
+        nowt = time.time()
+        for inst, h in oi_all.items():
+            ph = px_all.get(inst)
+            if h and ph:
+                depth = max(depth, nowt - max(h[0][0], ph[0][0]))
+    except Exception:
+        pass
     return {"win_h": win_h, "quads": {k: list(v) for k, v in _QUAD.items()},
             "tracked": len(G.get("_oi_history") or {}),
             "priced": len(G.get("_TICKER_SNAP") or {}),
             "sample": dict(G.get("_DASH_SAMPLE") or {}),
+            "depth_min": int(depth / 60),
+            "eta_min": max(0, int((win_h * 3600 - depth) / 60)),
             "rows": rows[:top_n]}
 
 
@@ -273,6 +293,7 @@ def collect(G, win_h=1.0):
         sigs = sorted(_SIG.values(), key=lambda r: r["ts"], reverse=True)
     return {
         "now": time.time(),
+        "ver": VER,
         "mode": {
             "live": bool(G.get("_LIVE_MODE")),
             "demo": bool(G.get("OKX_DEMO")),
@@ -392,6 +413,10 @@ _HTML = """<!doctype html>
   .sl label b{color:var(--fg);font-variant-numeric:tabular-nums}
   .sl input{flex:1;accent-color:var(--accent);height:26px}
   .qh{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600}
+  .bar{height:6px;background:#0f141c;border-radius:99px;overflow:hidden}
+  .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
+  .ver{font-size:10px;color:var(--dim);cursor:pointer;padding:3px 8px;border:1px solid var(--line);
+       border-radius:99px}
   .kv{display:flex;justify-content:space-between;gap:8px;padding:4px 8px;
       background:#0f141c;border-radius:6px;font-size:12px}
   .kv b{font-weight:600;font-variant-numeric:tabular-nums}
@@ -410,6 +435,7 @@ _HTML = """<!doctype html>
   <span class="pill" id="mode">—</span>
   <span class="pill" id="pool">—</span>
   <span class="pill" id="age">—</span>
+  <span class="ver" onclick="location.reload()" title="點一下強制重新載入">⟳ <span id="ver">—</span></span>
 </div>
 
 <div class="tabs" id="tabs"></div>
@@ -473,6 +499,9 @@ function draw(){
   document.getElementById('pool').textContent = '幣池 ' + m.pool;
   document.getElementById('age').textContent = new Date(D.now*1000)
     .toLocaleTimeString('zh-TW',{hour12:false});
+  const vEl=document.getElementById('ver');
+  vEl.textContent = D.ver || '—';
+  vEl.parentElement.style.color = (D.ver===PAGE_VER) ? '' : 'var(--warn)';
 
   const v=document.getElementById('view');
   if(TAB==='mkt') v.innerHTML = viewMkt();
@@ -490,9 +519,15 @@ function winBar(){
     `<div class="wb ${W===w?'on':''}" onclick="setW(${w})">${n}</div>`).join('') + '</div>';
 }
 function noData(m){
-  return '<div class="card">' + winBar() + '<div class="empty">'
-    + `${m.win_h}H 窗還沒累積夠（每 15 分鐘取樣，追蹤 ${m.tracked} 個合約、報價 ${m.priced} 個）。`
-    + ' bot 重啟會歸零；1H 窗約一小時後就有。</div></div>';
+  const pctDone = Math.min(100, Math.round(m.depth_min/(m.win_h*60)*100)) || 0;
+  return '<div class="card">' + winBar()
+    + `<h2>${m.win_h}H 窗累積中<span>${m.depth_min} / ${m.win_h*60} 分鐘</span></h2>`
+    + `<div class="bar"><i style="width:${pctDone}%"></i></div>`
+    + `<div class="sub" style="margin-top:8px">`
+    + `已取樣 ${m.depth_min} 分鐘，還要約 <b>${m.eta_min} 分鐘</b>`
+    + `（每 15 分鐘取樣一次，追蹤 ${m.tracked} 個合約、報價 ${m.priced} 個）。`
+    + (m.win_h > 1 ? ' 先看 1H 那格，它最快滿。' : '')
+    + ' bot 每次重新部署會歸零重算。</div></div>';
 }
 
 // ── 視覺篩選器：X=OI 變化%，Y=價格變化%，四象限 + 拉桿門檻框 ─────────────────
@@ -660,10 +695,19 @@ function viewSys(){
   return h;
 }
 
+const PAGE_VER = '20260924d';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
-    if(r.ok){ D = await r.json(); draw(); }
+    if(r.ok){
+      D = await r.json();
+      // ★PWA 快取：伺服器已是新版但手機拿的是舊快照 → 自動重載一次（只做一次，避免無限迴圈）
+      if(D.ver && D.ver !== PAGE_VER){
+        let done=false; try{ done = sessionStorage.getItem('rl')===D.ver; }catch(e){}
+        if(!done){ try{ sessionStorage.setItem('rl', D.ver); }catch(e){} location.reload(); return; }
+      }
+      draw();
+    }
   }catch(e){}
 }
 tick(); setInterval(tick, 20000);
