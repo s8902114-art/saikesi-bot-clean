@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924m"
+VER = "20260924n"
 
 
 def _clean(v):
@@ -712,17 +712,20 @@ function goOKX(c){      // 下單頁（永續）。scheme 是官方 _okxOrder() 
   openApp('okx://pro/trade/main/page?bizType=2&instId='+c+'-USDT-SWAP',
           'https://www.okx.com/trade-swap/'+c.toLowerCase()+'-usdt-swap'); }
 function goTV(c){
-  // ★★加到主畫面的 iOS PWA（standalone）**不會觸發 Universal Link** —— 它會直接在同一個
-  //   webview 裡把網頁打開（用戶回報「TV 變開網頁了」就是這個）。所以一定要用自訂 scheme。
-  //   上一版跳了 APP 卻沒帶符號，疑似是 `OKX%3A` 被二次編碼；這版冒號不編碼。
-  openApp('tradingview://chart?symbol=OKX:'+c+'USDT.P',
-          'https://www.tradingview.com/chart/?symbol='+encodeURIComponent('OKX:'+c+'USDT.P')); }
+  // ★試過三種都不對，這是第四種：
+  //   ① scheme + window.open        → 開了 APP，沒帶符號
+  //   ② Universal Link + location.href → PWA(standalone) 直接在 webview 開網頁，根本沒跳 APP
+  //   ③ scheme + location.href      → 一樣開了 APP，沒帶符號（TV 的 scheme 參數格式查不到文件）
+  //   ④ 本版：**Universal Link + window.open('_blank')** —— 在 PWA 裡這會跳出到 Safari，
+  //      再由 Safari 去處理 Universal Link，才有機會帶著符號進 APP。
+  window.open('https://www.tradingview.com/chart/?symbol='
+              + encodeURIComponent('OKX:'+c+'USDT.P'), '_blank'); }
 function goCG(c){
-  // `coinglass://` 實測是「無效的網址」→ CoinGlass APP 沒註冊這個 scheme，這條路不通。
-  // 查不到任何官方 deep-link 規格，所以 iOS 只能開網頁；Android 還能用 intent:// 交給 APP。
-  const web = 'https://www.coinglass.com/tv/Binance_'+c+'USDT';
+  // `coinglass://` 實測「無效的網址」→ APP 沒註冊該 scheme，iOS 只能走網頁。
+  // ★網址帶 zh-TW 才是繁體中文（官方自己用的就是這個路徑）。
+  const web = 'https://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT';
   if(/Android/i.test(navigator.userAgent)){
-    location.href = 'intent://www.coinglass.com/tv/Binance_'+c+'USDT'
+    location.href = 'intent://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT'
       + '#Intent;scheme=https;package=com.coinglass.android;S.browser_fallback_url='
       + encodeURIComponent(web) + ';end';
   } else { window.open(web,'_blank'); } }
@@ -890,7 +893,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924m';
+const PAGE_VER = '20260924n';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
