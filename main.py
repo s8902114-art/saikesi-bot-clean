@@ -8591,7 +8591,12 @@ _TICKER_SNAP: Dict[str, dict] = {}   # instId -> {last, chg24h, volccy_usd, ts}
 _PX_HISTORY: Dict[str, list] = {}    # instId -> [(ts, last), ...]  與 _oi_history 同節奏，四象限才同窗
 _MCAP: Dict[str, float] = {}         # COIN -> 市值USD（CoinGecko 那支本來就回傳，原本被丟掉）
 _DASH_SAMPLE = {"ts": 0.0, "n": 0}
-DASH_SAMPLE_SEC = 900                # 15 分鐘取樣一次（官方 OI 異動排名看 1H 變化，1H 一點沒有解析度）
+# ★取樣間隔 = 300 秒。**不可以等於最短的窗長**：原本 900 秒時，15m 窗要求基準點落在
+#   「正好 15 分鐘前 ± 容差」，但取樣點的相位是任意的 → 線上實測 15m 窗**恆為 0 幣**
+#   (30m 窗 300 幣正常)。官方有 15m/30m/1H 三檔，按鈕在那裡卻永遠空的 = 壞掉的 UI。
+#   成本：兩支公開端點各 288 次/天，相對現役 K 線查詢(每輪約 200 幣)可忽略。
+DASH_SAMPLE_SEC = 300
+DASH_SAVE_EVERY = 3                  # 每 3 次取樣才落地一次(15 分鐘)，避免頻繁寫 volume
 _DASH_HIST_FILE = os.path.join(_PERSIST_DIR, "dash_hist.json")
 
 
@@ -8709,7 +8714,9 @@ def _oi_sample_tick(force: bool = False) -> bool:
     except Exception as e:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
-    _dash_hist_save()          # 每次取樣完落地,redeploy 不歸零
+    _DASH_SAMPLE["i"] = int(_DASH_SAMPLE.get("i", 0)) + 1
+    if force or _DASH_SAMPLE["i"] % DASH_SAVE_EVERY == 0:
+        _dash_hist_save()      # 每 15 分鐘落地一次,redeploy 不歸零
     return True
 
 

@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924e"
+VER = "20260924f"
 
 
 def _clean(v):
@@ -145,7 +145,9 @@ QUAD_OI_MIN, QUAD_PX_MAX = 0.01, 0.05        # 象限圖
 INFLOW_OI_MIN, INFLOW_PX_MAX = 0.04, 0.03    # 資金注入候選（官方只用 1H）
 # 官方流程原文：「先找出 1H 資金注入候選；觀察 15 分鐘後，以 OI 保留、相對 BTC 強弱與 CVD
 #   判斷方向。15m／30m 僅觀察變化，不另產生卡片或通知。」→ 所以只有 15m/30m/1H 三檔，沒有 4H/12H。
-DASH_SAMPLE_SEC_HINT = 900.0
+# ★取樣間隔一律**跟 main.py 讀**，不要在這裡另存一份：
+#   「同一個值、兩個來源」是手冊記過的坑，改了一邊忘了另一邊，容差就會算錯。
+DASH_SAMPLE_SEC_FALLBACK = 300.0
 
 
 def _at(hist, target_ts, tol):
@@ -183,7 +185,8 @@ def _market(G, win_h=1.0, top_n=300):
         #   寫死 1800 時，才累積 37 分鐘的資料也會通過 1H 窗的檢查（誤差佔窗長一半），
         #   畫面就會把 37 分鐘的變化標成「1H 變化」。2026-09-24 線上實測抓到。
         #   取樣間隔 S=900 → 最近的點距離目標最多 S/2；再給 60 秒抖動；且不得超過窗長的 1/4。
-        tol = min(DASH_SAMPLE_SEC_HINT / 2 + 60, win_h * 3600 * 0.25)
+        samp = float(G.get("DASH_SAMPLE_SEC") or DASH_SAMPLE_SEC_FALLBACK)
+        tol = min(samp / 2 + 60, win_h * 3600 * 0.25)
         for inst, hist in list(oi_all.items()):
             if not hist or len(hist) < 2:
                 continue
@@ -753,7 +756,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924e';
+const PAGE_VER = '20260924f';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
