@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924d" 
+VER = "20260924e"
 
 
 def _clean(v):
@@ -121,11 +121,31 @@ def _oi_board(G, top_n=30):
 # ★官方（數據獵手）四象限語意 —— 逐字取自 memory/project_0903_oidash_spec.md 抓到的官方說明。
 #   我第一版自己取名「多建/空出」是錯的，名字和語意都要照官方。
 _QUAD = {
-    "多頭建倉": ("看漲·主動", "最強看多；留意過熱回調", "up"),
-    "空頭平倉": ("看漲·被動", "動力來自空頭出場、不是新買盤；需真實多單接力，否則易反轉回落", "up"),
-    "空頭建倉": ("看跌·主動", "最強看空", "down"),
-    "多頭平倉": ("看跌·被動", "多單在離場", "down"),
+    "多頭建倉": ("本質看漲｜主動做多",
+               "OI 擴張 + 價格上漲：新多單主動進場，買方資金大量湧入。"
+               "是最強的看多信號，代表市場共識偏多，但需留意過熱後的短線回調風險。", "up"),
+    "空頭平倉": ("本質看漲｜被動上漲",
+               "OI 收縮 + 價格上漲：空頭倉位被迫平倉，需買入回補導致價格上漲。"
+               "屬於被動性看漲，上漲動力來自空頭出場而非新買盤，"
+               "需確認後續真實多單能否接力，否則容易反轉回落。", "up"),
+    "空頭建倉": ("本質看跌｜主動做空",
+               "OI 擴張 + 價格下跌：新空單主動進場，賣方資金大量湧入。"
+               "是最強的看空信號，代表市場共識偏空，不宜逆勢追多，注意下跌風險。", "down"),
+    "多頭平倉": ("本質看跌｜被動下跌",
+               "OI 收縮 + 價格下跌：多頭倉位獲利了結或止損離場，賣出壓力導致價格下滑。"
+               "屬於被動性看跌，上漲動能減弱，高位持多者需注意減倉時機，短線可能持續回調。", "down"),
 }
+
+# ★官方硬編碼的篩選條件（2026-09-24 直接看網頁抓的原文）：
+#   「象限圖固定顯示 OI ≥ 1%、|價格| ≤ 5% 的標的；
+#     資金注入候選固定使用 1H OI ≥ 4%、|價格| ≤ 3%。」
+#   ★注意價格是**上限**不是下限 —— 要找的是「OI 大動、價格還沒動」（主力安靜建倉）。
+#     我第一版做成「兩個都要超過門檻」方向相反，正好把他們要的那批濾掉。
+QUAD_OI_MIN, QUAD_PX_MAX = 0.01, 0.05        # 象限圖
+INFLOW_OI_MIN, INFLOW_PX_MAX = 0.04, 0.03    # 資金注入候選（官方只用 1H）
+# 官方流程原文：「先找出 1H 資金注入候選；觀察 15 分鐘後，以 OI 保留、相對 BTC 強弱與 CVD
+#   判斷方向。15m／30m 僅觀察變化，不另產生卡片或通知。」→ 所以只有 15m/30m/1H 三檔，沒有 4H/12H。
+DASH_SAMPLE_SEC_HINT = 900.0
 
 
 def _at(hist, target_ts, tol):
@@ -159,7 +179,11 @@ def _market(G, win_h=1.0, top_n=300):
         mcap = G.get("_MCAP") or {}
         now = time.time()
         target = now - win_h * 3600
-        tol = 1800.0                      # 取樣 15 分鐘一次，允許基準點落在目標前後半小時內
+        # ★容差要跟「取樣間隔」和「窗長」兩邊都掛鉤，不能寫死 1800：
+        #   寫死 1800 時，才累積 37 分鐘的資料也會通過 1H 窗的檢查（誤差佔窗長一半），
+        #   畫面就會把 37 分鐘的變化標成「1H 變化」。2026-09-24 線上實測抓到。
+        #   取樣間隔 S=900 → 最近的點距離目標最多 S/2；再給 60 秒抖動；且不得超過窗長的 1/4。
+        tol = min(DASH_SAMPLE_SEC_HINT / 2 + 60, win_h * 3600 * 0.25)
         for inst, hist in list(oi_all.items()):
             if not hist or len(hist) < 2:
                 continue
@@ -185,6 +209,10 @@ def _market(G, win_h=1.0, top_n=300):
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
                 "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None,
+                # 官方兩道固定條件（價格是**上限**：要「OI 大動、價格還沒動」）
+                "inq": abs(oi_pct) >= QUAD_OI_MIN and abs(px_pct) <= QUAD_PX_MAX,
+                "inflow": (win_h == 1.0 and oi_pct >= INFLOW_OI_MIN
+                           and abs(px_pct) <= INFLOW_PX_MAX),
             })
         # 「異常」= |OI 變化%| 落在全市場高百分位。
         # ★誠實標註：這是**跨幣橫向比較**，不是「相對這個幣自己的常態」（後者要長歷史落地才做得到）。
@@ -213,6 +241,8 @@ def _market(G, win_h=1.0, top_n=300):
     except Exception:
         pass
     return {"win_h": win_h, "quads": {k: list(v) for k, v in _QUAD.items()},
+            "gate": {"oi_min": QUAD_OI_MIN, "px_max": QUAD_PX_MAX,
+                     "inflow_oi": INFLOW_OI_MIN, "inflow_px": INFLOW_PX_MAX},
             "tracked": len(G.get("_oi_history") or {}),
             "priced": len(G.get("_TICKER_SNAP") or {}),
             "sample": dict(G.get("_DASH_SAMPLE") or {}),
@@ -413,6 +443,8 @@ _HTML = """<!doctype html>
   .sl label b{color:var(--fg);font-variant-numeric:tabular-nums}
   .sl input{flex:1;accent-color:var(--accent);height:26px}
   .qh{text-transform:none;letter-spacing:0;font-size:13px;font-weight:600}
+  .src{margin-left:auto;align-self:center;font-size:10px;color:var(--dim);
+       border:1px solid var(--line);border-radius:99px;padding:2px 8px}
   .bar{height:6px;background:#0f141c;border-radius:99px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
   .ver{font-size:10px;color:var(--dim);cursor:pointer;padding:3px 8px;border:1px solid var(--line);
@@ -482,9 +514,12 @@ const TABS = [['mkt','篩選器'],['rank','OI 排名'],['pos','持倉'],['coins'
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
 const QCLR = {'多頭建倉':'var(--up)','空頭平倉':'#6fd3a8','空頭建倉':'var(--down)','多頭平倉':'#e08a94'};
-let W = 1, OITH = 2, PXTH = 2;
+// 官方只有 15m / 30m / 1H 三檔（原文：「15m／30m 僅觀察變化，不另產生卡片或通知」）
+const WINS = [[0.25,'15m'],[0.5,'30m'],[1,'1H']];
+let W = 1, OITH = 1, PXTH = 5;   // 預設＝官方象限圖條件：OI ≥ 1%、|價格| ≤ 5%
 try{ const s=JSON.parse(localStorage.getItem('dash')||'{}');
-     if(s.W) W=s.W; if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH; }catch(e){}
+     if(s.W && WINS.some(x=>x[0]===s.W)) W=s.W;      // 舊版存的 4/12 會被丟掉
+     if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH; }catch(e){}
 function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH})); }catch(e){} }
 function setW(w){ W=w; save(); tick(); }
 function setTh(which,v){ v=parseFloat(v); if(which==='oi') OITH=v; else PXTH=v; save(); draw(); }
@@ -515,8 +550,10 @@ function draw(){
 }
 
 function winBar(){
-  return '<div class="wins">' + [[1,'1H'],[4,'4H'],[12,'12H']].map(([w,n])=>
-    `<div class="wb ${W===w?'on':''}" onclick="setW(${w})">${n}</div>`).join('') + '</div>';
+  return '<div class="wins">' + WINS.map(([w,n])=>
+    `<div class="wb ${W===w?'on':''}" onclick="setW(${w})">${n}</div>`).join('')
+    + '<span class="src" title="官方用 OKX+幣安兩所；幣安 fapi 在 Railway 被地理封鎖(HTTP 451)，'
+    + '所以這裡只有 OKX 單一交易所">OKX</span></div>';
 }
 function noData(m){
   const pctDone = Math.min(100, Math.round(m.depth_min/(m.win_h*60)*100)) || 0;
@@ -538,18 +575,19 @@ function scatter(rows){
   const my = Math.max(PXTH*1.6, ...rows.map(r=>Math.abs(r.px*100)))*1.05 || 10;
   const X = v => cx + (v*100/mx)*((x1-x0)/2);
   const Y = v => cy - (v*100/my)*((y1-y0)/2);
-  const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)>=PXTH;
+  const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   let s = `<svg viewBox="0 0 ${Wd} ${Ht}" class="sc">`;
   s += `<rect x="${cx}" y="${y0}" width="${x1-cx}" height="${cy-y0}" fill="#35d07f" opacity=".07"/>`
     +  `<rect x="${x0}" y="${y0}" width="${cx-x0}" height="${cy-y0}" fill="#35d07f" opacity=".03"/>`
     +  `<rect x="${cx}" y="${cy}" width="${x1-cx}" height="${y1-cy}" fill="#ff5c6c" opacity=".07"/>`
     +  `<rect x="${x0}" y="${cy}" width="${cx-x0}" height="${y1-cy}" fill="#ff5c6c" opacity=".03"/>`;
-  // 拉桿門檻框：四角虛線區 = 同時超過 OI 與價格門檻
-  [[1,1],[-1,1],[1,-1],[-1,-1]].forEach(([sx,sy])=>{
-    const bx = sx>0 ? X(OITH/100) : x0, bw = sx>0 ? x1-X(OITH/100) : X(-OITH/100)-x0;
-    const by = sy>0 ? y0 : Y(-PXTH/100), bh = sy>0 ? Y(PXTH/100)-y0 : y1-Y(-PXTH/100);
-    if(bw>0&&bh>0) s += `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="none"
-       stroke="#6aa3ff" stroke-width="1" stroke-dasharray="3 3" opacity=".55"/>`;
+  // ★官方條件：|OI| ≥ 下限 **且** |價格| ≤ 上限 → 命中區是「左右兩塊 × 中央水平帶」，
+  //   不是四個角。要找的是「OI 大動、價格還沒動」＝主力安靜建倉。
+  const byT = Y(PXTH/100), byB = Y(-PXTH/100);
+  [[x0, X(-OITH/100)], [X(OITH/100), x1]].forEach(([bx, bx2])=>{
+    if(bx2>bx && byB>byT) s += `<rect x="${bx}" y="${byT}" width="${bx2-bx}" height="${byB-byT}"
+       fill="#6aa3ff" fill-opacity=".05" stroke="#6aa3ff" stroke-width="1"
+       stroke-dasharray="3 3" opacity=".65"/>`;
   });
   s += `<line x1="${x0}" y1="${cy}" x2="${x1}" y2="${cy}" stroke="#2c3646"/>`
     +  `<line x1="${cx}" y1="${y0}" x2="${cx}" y2="${y1}" stroke="#2c3646"/>`
@@ -571,27 +609,47 @@ function scatter(rows){
   return s + '</svg>';
 }
 
+// 官方「資金注入候選」：1H OI ≥ 4%、|價格| ≤ 3%（他們寫死的，不跟著拉桿動）
+// 官方流程：「先找出 1H 資金注入候選；觀察 15 分鐘後，以 OI 保留、相對 BTC 強弱與 CVD 判斷方向。」
+function inflowCard(){
+  const m=D.mkt, g=(m.gate||{}), rows=(m.rows||[]).filter(r=>r.inflow);
+  if(m.win_h!==1) return '<div class="card"><h2>資金注入候選<span>官方只用 1H</span></h2>'
+    + '<div class="empty">切到 1H 才看得到。</div></div>';
+  return '<div class="card"><h2>◆ 資金注入候選'
+    + `<span>1H OI ≥ ${(g.inflow_oi*100)||4}%、|價格| ≤ ${(g.inflow_px*100)||3}%</span></h2>`
+    + (rows.length ? table('inf', ['幣','OI%','價%','OI/市值'], rows, r=>[
+          r.inst.replace('-USDT-SWAP',''),
+          {v:r.oi, h:pct(r.oi), c:'up'},
+          {v:r.px, h:pct(r.px), c:cls(r.px)},
+          {v:r.oimc||0, h:r.oimc?f(r.oimc*100,2)+'%':'—'},
+        ]) : '<div class="empty">目前沒有：OI 進來 4% 以上、價格卻還壓在 3% 內的幣。</div>')
+    + '<div class="sub" style="margin-top:8px">官方下一步：觀察 15 分鐘後，'
+    + '看 OI 有沒有保留、相對 BTC 強弱、CVD 方向再判斷多空。</div></div>';
+}
+
 function viewMkt(){
   const m=D.mkt, rows=m.rows||[];
   if(!rows.length) return noData(m);
-  const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)>=PXTH;
+  const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   const sel = rows.filter(hit);
   return '<div class="card">' + winBar()
     + `<h2>視覺篩選器<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
     + scatter(rows)
-    + `<div class="sl"><label>OI 變化 ≥ <b>${OITH}%</b></label>
+    + `<div class="sl"><label>OI 變化 <b>≥ ${OITH}%</b></label>
          <input type="range" min="1" max="10" step="0.5" value="${OITH}"
                 oninput="setTh('oi',this.value)"></div>`
-    + `<div class="sl"><label>價格變化 ≥ <b>${PXTH}%</b></label>
+    + `<div class="sl"><label>價格變化 <b>≤ ${PXTH}%</b></label>
          <input type="range" min="1" max="10" step="0.5" value="${PXTH}"
                 oninput="setTh('px',this.value)"></div>`
+    + `<div class="sub">官方固定值：象限圖 OI ≥ 1%、|價格| ≤ 5%。`
+    + `<b>價格是上限</b> —— 找的是「OI 大動、價格還沒動」。</div>`
     + (sel.length ? table('sel', ['幣','OI%','價%','象限'], sel, r=>[
-          r.inst.replace('-USDT-SWAP',''),
+          {v:r.inst, h:(r.inflow?'<span class="star">◆</span>':'')+r.inst.replace('-USDT-SWAP','')},
           {v:r.oi, h:pct(r.oi), c:cls(r.oi)},
           {v:r.px, h:pct(r.px), c:cls(r.px)},
           {v:r.q, h:`<span style="color:${QCLR[r.q]}">${r.q}</span>`},
-        ]) : '<div class="empty">目前沒有同時超過兩個門檻的幣，把拉桿往左拉。</div>')
-    + '</div>';
+        ]) : '<div class="empty">沒有符合的幣：OI 要夠大、價格要夠靜。把 OI 門檻往左拉。</div>')
+    + '</div>' + inflowCard();
 }
 
 // ── OI 異動排名：照官方分四組，組內依「變化金額」排 ────────────────────────
@@ -695,7 +753,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924d';
+const PAGE_VER = '20260924e';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
