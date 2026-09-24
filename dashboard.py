@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925i"
+VER = "20260925j"
 
 
 def _clean(v):
@@ -347,8 +347,23 @@ def _market(G, win_h=1.0, top_n=300):
         # 不然 OI／市值 這個「風險/擁擠度」指標會在不同幣之間不可比。
         mcsrc = G.get("_MCAP_SRC") or {}
         now = time.time()
-        target = now - win_h * 3600
-        target1 = now - 3600.0          # 評分固定用 1H 窗（見下方 _score 呼叫處的說明）
+        # ★★窗的兩端要用**同一個時間基準**。
+        #   原本起點用 `now - win_h*3600` 內插、終點卻直接拿 `hist[-1]`（最後一筆取樣，
+        #   最多可能是 DASH_SAMPLE_SEC 之前）→ 實際量到的是 **win_h 減掉取樣年齡**。
+        #   2026-09-24 與官方逐幣對帳抓到：23 個共同幣，我的 OI 1H 中位比官方低 0.67pt、
+        #   價格 1H 低 0.54pt —— 系統性偏小，不是雜訊。後果不只是數字小一點：
+        #   `oiStrong=|OI|>3` 幾乎踩不到，一堆幣就掉進「OI>0 且 價>0 → OI↑價↑ +12」那格，
+        #   分數整體被墊高（我 68% 為正、官方只有 21%）。
+        #   改成以**最後一筆取樣的時間**為終點反推起點，窗長就真的是 win_h。
+        _t_end = now
+        try:
+            _ends = [h[-1][0] for h in oi_all.values() if h]
+            if _ends:
+                _t_end = max(_ends)      # 取樣是全市場同一輪寫的，取最大即該輪的時間
+        except Exception:
+            pass
+        target = _t_end - win_h * 3600
+        target1 = _t_end - 3600.0       # 評分固定用 1H 窗（見下方 _score 呼叫處的說明）
         # 資費／多空比／CVD：由 bot 在背景取樣好的（原則 2：開網頁不打交易所 API）
         _raw = G.get("_BN_EXTRA") or {}
         _base_fn = G.get("_bn_fund_base")
@@ -1541,7 +1556,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925i';
+const PAGE_VER = '20260925j';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

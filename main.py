@@ -21,6 +21,7 @@ import logging
 import argparse
 import subprocess
 from datetime import datetime, timezone, timedelta
+from concurrent.futures import ThreadPoolExecutor
 from threading import Thread, Lock
 from time import sleep
 from typing import Dict, List, Optional, Tuple, Any
@@ -8740,7 +8741,8 @@ def _bn_get(path: str, params: dict, timeout: int = 8):
 _BN_HOSTS = ["https://www.binance.com", "https://fapi.binance.com",
              "https://fapi1.binance.com", "https://fapi2.binance.com",
              "https://fapi3.binance.com", "https://fapi4.binance.com"]
-DASH_BN_TOP_N = 120                     # 補幣安的幣數上限（一半取自 |OKX 變化| 榜、一半取自成交額榜）
+BN_WORKERS = 6                          # 幣安逐幣端點的併發數（沒有批量版本）
+DASH_BN_TOP_N = 120                     # 補幣安**OI**的幣數上限（一半取自 |OKX 變化| 榜、一半取自成交額榜）
 # ★120 而不是 60：移到背景執行緒之後不再佔用交易主迴圈，成本只剩幣安限流，
 #   而 120 幣／5 分鐘 = 24 權重/分，上限是 2400/分 —— 用掉 1%。
 #   實測 60 幣時 281 個合約只有 46 個拿得到雙所平均（其餘只有 OKX 單腳）。
@@ -9026,20 +9028,24 @@ def _bn_fund_base(inst: str):
 
 
 def _bn_extra_sample(picks: list) -> None:
-    """補**資費**與**多空帳戶比** —— 官方評分公式的兩個因子（資費 ±12、多空比 ±2/±4），
-    字卡要顯示它們、算分也要用它們。跟 OI 一樣跑在背景執行緒裡，網頁端零 API。
+    """補**資費／多空帳戶比／合約 CVD** —— 官方評分公式要用它們，字卡也要顯示。
+    跟 OI 一樣跑在背景執行緒裡，網頁端零 API。
 
-    ★成本不對稱，所以兩個因子的涵蓋範圍不同：
-      · 資費 `/fapi/v1/premiumIndex` **不帶 symbol 就回整個市場**（實測 910 支、0.33s、權重 10）
-        → 全市場都拿得到，一次呼叫。
-      · 多空比 `/futures/data/globalLongShortAccountRatio` **只能逐幣**（無批量端點）
-        → 只補這輪的 picks（同 OI，約 120 幣）。沒補到的幣，字卡顯示「—」而不是猜一個值。
-    ★這是**幣安**的資費，不是 OKX 的。CLAUDE.md 記著兩所符號不一致 36.3%，
-      但這裡的用途是**複刻數據獵手的評分**，而他們用的就是幣安／CoinGlass 聚合 ——
-      所以對齊他們要用幣安。字卡上會標明來源，不要拿它當 OKX 部位的資費依據。
+    ★★2026-09-24 與官方逐幣對帳後大改：原本只補 `picks`(120 幣)，
+      於是 281 個合約裡只有 97 個拿得到 CVD。**沒有 CVD 的幣會掉進
+      `scoreBreakdown` 的粗略分支（只看 OI×價格）**，而那條分支在短線反彈時
+      把一堆幣標成 `OI↑價↑ +12` → 我的分數 68% 為正、官方同時刻只有 21%
+      （官方 185/281 走 CVD 分支，我只有 97）。CVD 是 ±40 的主分，不能只補一部分。
+    ★所以 CVD 與多空比改成**覆蓋整個追蹤池**，並用小執行緒池並行
+      （逐幣端點沒有批量版本；序列跑 281×2 支 × 0.35s ≈ 200 秒，會吃掉整個取樣週期）。
+    ★用量：資費 1 支(全市場) + CVD 281 + 多空比 281 ≈ 563 支／5 分鐘 ≈ 113 權重/分，
+      幣安上限 2400/分 → 約 5%。併發只開 `BN_WORKERS` 條，不打爆對方也不被限流。
+    ★資費是**幣安**的，不是 OKX。這裡的用途是複刻數據獵手的評分（他們用幣安／CoinGlass），
+      字卡會標來源；不要拿它當 OKX 部位的資費依據（CLAUDE.md 記過兩所符號不一致 36.3%）。
     """
     try:
-        r = _bn_get("/fapi/v1/premiumIndex", {}, timeout=10)
+        # ① 資費：不帶 symbol 一次回整個市場（實測 910 支、0.33s、權重 10）
+        r = _bn_get("/fapi/v1/premiumIndex", {}, timeout=12)
         fmap = {}
         if r is not None and r.status_code == 200:
             for x in r.json() or []:
@@ -9048,53 +9054,65 @@ def _bn_extra_sample(picks: list) -> None:
                 except (KeyError, TypeError, ValueError):
                     continue
         now_s = time.time()
-        got = 0
-        for inst in picks:
+
+        # ② 逐幣的兩支：整個追蹤池都補，不再只補 picks
+        targets = [i for i in _oi_history.keys()]
+        if not targets:
+            targets = list(picks or [])
+
+        def _one(inst):
             sym = inst.replace("-USDT-SWAP", "") + "USDT"
-            rec = _BN_EXTRA.get(inst) or {}
-            if sym in fmap:
-                rec["funding"] = fmap[sym]
-                _bn_fund_push(inst, fmap[sym], now_s)
+            out = {}
             try:
-                rr = _bn_get("/futures/data/globalLongShortAccountRatio",
-                             {"symbol": sym, "period": "5m", "limit": 1}, timeout=6)
-                if rr is not None and rr.status_code == 200:
-                    arr = rr.json()
-                    if isinstance(arr, list) and arr:
-                        # ★官方 scoreBreakdown 用的是 longPct（多方**帳戶佔比 %**），門檻 40/45/55/60，
-                        #   不是 longShortRatio（那是倍數）。這裡存 longAccount×100。
-                        rec["long_pct"] = float(arr[-1].get("longAccount") or 0) * 100 or None
-                        rec["ls"] = float(arr[-1].get("longShortRatio") or 0) or None
-            except Exception:
-                pass
-            try:
-                # ★cvd_ratio：官方 `oi-cache` 對 OKX 來源的幣標的是 `binance_taker_ratio`。
-                #   定義已逐筆對回官方值 —— ENSO 官方 −30.45 vs 本式 −28.89（差幾分鐘的快照）：
-                #   **12 根 5m（=1H）的 (buyVol−sellVol)/(buyVol+sellVol)×100**。
-                #   （ETC 對不上是因為它的 cvd_source 是 coinglass_taker_ratio，不同來源，屬預期。）
+                # cvd_ratio：定義已對回官方（`binance_taker_ratio`）——
+                # 12 根 5m(=1H) 的 (buyVol−sellVol)/(buyVol+sellVol)×100。
                 rc = _bn_get("/futures/data/takerlongshortRatio",
-                             {"symbol": sym, "period": "5m", "limit": 12}, timeout=6)
+                             {"symbol": sym, "period": "5m", "limit": 12}, timeout=8)
                 if rc is not None and rc.status_code == 200:
                     arr = rc.json()
                     if isinstance(arr, list) and arr:
                         bv = sum(float(x.get("buyVol") or 0) for x in arr)
                         sv = sum(float(x.get("sellVol") or 0) for x in arr)
                         if bv + sv > 0:
-                            rec["cvd_ratio"] = (bv - sv) / (bv + sv) * 100.0
+                            out["cvd_ratio"] = (bv - sv) / (bv + sv) * 100.0
             except Exception:
                 pass
-            if rec:
-                rec["ts"] = now_s
-                _BN_EXTRA[inst] = rec
-                got += 1
-            time.sleep(0.05)
+            try:
+                # 官方 scoreBreakdown 用的是 longPct（多方**帳戶佔比 %**，門檻 40/45/55/60），
+                # 不是 longShortRatio（那是倍數）。
+                rr = _bn_get("/futures/data/globalLongShortAccountRatio",
+                             {"symbol": sym, "period": "5m", "limit": 1}, timeout=8)
+                if rr is not None and rr.status_code == 200:
+                    arr = rr.json()
+                    if isinstance(arr, list) and arr:
+                        out["long_pct"] = float(arr[-1].get("longAccount") or 0) * 100 or None
+                        out["ls"] = float(arr[-1].get("longShortRatio") or 0) or None
+            except Exception:
+                pass
+            return inst, out
+
+        got = 0
+        with ThreadPoolExecutor(max_workers=BN_WORKERS) as ex:
+            for inst, out in ex.map(_one, targets):
+                rec = _BN_EXTRA.get(inst) or {}
+                sym = inst.replace("-USDT-SWAP", "") + "USDT"
+                if sym in fmap:
+                    rec["funding"] = fmap[sym]
+                    _bn_fund_push(inst, fmap[sym], now_s)
+                rec.update(out)
+                if rec:
+                    rec["ts"] = now_s
+                    _BN_EXTRA[inst] = rec
+                    got += 1
         for k in list(_BN_EXTRA.keys()):
             if k not in _oi_history:
                 del _BN_EXTRA[k]
         _BN_STATE["extra"] = got
+        _BN_STATE["cvd"] = sum(1 for v in _BN_EXTRA.values() if v.get("cvd_ratio") is not None)
         _BN_STATE["fund_all"] = len(fmap)
+        print(f"[DASH] 幣安補值:{got} 幣(CVD {_BN_STATE['cvd']} / 資費源 {len(fmap)})", flush=True)
     except Exception as e:
-        print(f"[DASH] 幣安 資費/多空比 取樣失敗(不影響交易): {e}", flush=True)
+        print(f"[DASH] 幣安 資費/多空比/CVD 取樣失敗(不影響交易): {e}", flush=True)
 
 
 _DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
