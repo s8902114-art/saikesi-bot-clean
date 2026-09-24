@@ -9389,7 +9389,11 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
                 back = k; break
         if back is None or (n - 1 - back) > 4:
             continue
+        # ★★OI 是硬條件：**衰竭＝OI 下降**（官方 161 筆裡 8/8 全是下降，中位 −0.46%；
+        #   對照吸收 55/55 全是上升 +1.80%）。語意：動能耗盡、倉位在平掉。取不到就不發。
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
+        if oi_d is None or oi_d >= 0:
+            continue
         sl = float(lo[p2]) if want_low else float(hi[p2])
         ex = _dhx_cvd(cv, sv, p1, p2)
         ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
@@ -9439,9 +9443,18 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
             continue                     # 做多要：CVD 樞紐低點**降低**（賣方砸盤）
         if (not want_low) and not (c2 > c1):
             continue                     # 做空鏡像：CVD 樞紐高點升高
-        # ★OI 只記錄、**不過濾**：官方吸收/衰竭的 oi_pivot1→oi_pivot2 中位是
-        #   185.1M → 184.7M（**略降**），OI 上升是 TRAP 才有的條件。
+        # ★★OI 是硬條件：**吸收＝OI 上升**。
+        #   2026-09-25 拉官方 161 筆原始紀錄逐筆算 `oi_pivot1→oi_pivot2`：
+        #     吸收 n=55，**55/55 都是上升**，中位 +1.80%
+        #     衰竭 n=8， **0/8 上升**（全部下降），中位 −0.46%
+        #   語意上也對：吸收＝有人在這裡接單建倉（倉位增加）；衰竭＝動能耗盡、倉位在平掉。
+        #   ★我先前在規格裡寫「OI 上升是 TRAP 專屬、吸收/衰竭 OI 略降」是**錯的**——
+        #     那是拿一兩筆樣本亂推，n=55/8 的分佈打臉。用戶 2026-09-25 直接問
+        #     「衰竭應該是搭配 OI 下降吧」才回頭查到。
+        #   取不到 OI 就**不發**（不猜）。
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
+        if oi_d is None or oi_d <= 0:
+            continue
         sl = float(lo[p2]) if want_low else float(hi[p2])   # ★停損＝pivot2 價格
         ex = _dhx_cvd(cv, sv, p1, p2)
         ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
