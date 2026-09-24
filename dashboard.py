@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925d"
+VER = "20260925e"
 
 
 def _clean(v):
@@ -314,6 +314,7 @@ def _market(G, win_h=1.0, top_n=300):
     排序照官方：**依 OI 變化的「金額」**（|ΔOI USD|），不是百分比 —— 小幣百分比會灌水。
     """
     rows = []
+    _mkt_err = None
     try:
         oi_all = G.get("_oi_history") or {}
         px_all = G.get("_PX_HISTORY") or {}
@@ -462,8 +463,19 @@ def _market(G, win_h=1.0, top_n=300):
         # ★官方前端代碼是 `Math.abs(oiChgPct)` 降序取 top20（文案寫「依變化金額」是錯的，
         #   以代碼為準），而且是**全部幣一起排**再分到四組，不是每組各取 N。
         rows.sort(key=lambda r: abs(r.get("oi") or 0), reverse=True)
-    except Exception:
-        pass
+    except Exception as e:
+        # ★不可以 `pass`：這一段出例外時 rows 會變空，頁面只顯示「累積中」，
+        #   看起來跟「資料還不夠」一模一樣 —— 2026-09-24 就這樣白查了半小時
+        #   （OI 排名有 30 筆、depth 760 分鐘，唯獨篩選器 0 筆 = 這裡在爆而不是沒資料）。
+        #   把錯誤帶回 payload + 印進 log，下次一眼就看得到。
+        _mkt_err = f"{type(e).__name__}: {e}"
+        try:
+            import traceback
+            print("[DASH] _market 例外(不影響交易): "
+                  + traceback.format_exc()[-1200:], flush=True)
+        except Exception:
+            pass
+        rows = []
     # 還要等多久：拿「OI 與價格都有」的幣裡最深的那份歷史當進度。
     # 空白畫面要講得出「還差幾分鐘」，不然使用者只會看到一片空，以為壞了。
     depth = 0.0
@@ -478,7 +490,7 @@ def _market(G, win_h=1.0, top_n=300):
     except Exception:
         pass
     _bn = sum(1 for r in rows if r.get("src") == "OKX+BN")
-    return {"win_h": win_h, "quads": {k: list(v) for k, v in _QUAD.items()},
+    return {"win_h": win_h, "err": _mkt_err, "quads": {k: list(v) for k, v in _QUAD.items()},
             "src": ("OKX+BN " + str(_bn)) if _bn else "OKX",
             "gate": {"oi_min": QUAD_OI_MIN, "px_max": QUAD_PX_MAX,
                      "inflow_oi": INFLOW_OI_MIN, "inflow_px": INFLOW_PX_MAX},
@@ -1410,7 +1422,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925d';
+const PAGE_VER = '20260925e';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
