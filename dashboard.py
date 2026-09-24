@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924q"
+VER = "20260924r"
 
 
 def _clean(v):
@@ -726,9 +726,13 @@ function goTV(c){
 function goCG(c){
   // `coinglass://` 實測「無效的網址」→ APP 沒註冊該 scheme，iOS 只能走網頁。
   // ★網址帶 zh-TW 才是繁體中文（官方自己用的就是這個路徑）。
-  const web = 'https://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT?interval=15m';
+  // ★★時框與指標**無法用網址控制**：2026-09-24 實測 `?interval=15m` 送進去會被整個洗掉
+  //   （location.href 回來沒有 query），設定全存在 localStorage
+  //   （`tradingview.chartproperties.mainSeriesProperties.interval`，實測值 "60"）。
+  //   → 正解是在同一個瀏覽器手動設一次 15m + 指標，之後每次從這裡點過去都會沿用。
+  const web = 'https://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT';
   if(/Android/i.test(navigator.userAgent)){
-    location.href = 'intent://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT?interval=15m'
+    location.href = 'intent://www.coinglass.com/tv/zh-TW/Binance_'+c+'USDT'
       + '#Intent;scheme=https;package=com.coinglass.android;S.browser_fallback_url='
       + encodeURIComponent(web) + ';end';
   } else { window.open(web,'_blank'); } }
@@ -929,7 +933,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924q';
+const PAGE_VER = '20260924r';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
