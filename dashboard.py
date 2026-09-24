@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925e"
+VER = "20260925f"
 
 
 def _clean(v):
@@ -614,6 +614,8 @@ def collect(G, win_h=1.0):
         "mkt": _market(G, win_h),
         "dhx": sorted((G.get("_DHX_SIG") or {}).values(),
                       key=lambda r: r.get("ts") or 0, reverse=True)[:30],
+        "whale": sorted((G.get("_WHALE") or {}).values(),
+                        key=lambda r: r.get("first_ts") or 0, reverse=True)[:40],
         "breadth": _breadth(G),
         "anom": sorted((G.get("_ANOM") or {}).values(),
                        key=lambda r: r.get("last_ts") or 0, reverse=True)[:40],
@@ -876,7 +878,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['mkt','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -908,6 +910,7 @@ function draw(){
   const v=document.getElementById('view');
   document.getElementById('card').innerHTML = cardHTML();
   if(TAB==='mkt') v.innerHTML = viewMkt();
+  if(TAB==='whale') v.innerHTML = viewWhale();
   if(TAB==='rank') v.innerHTML = viewRank();
   if(TAB==='dhx') v.innerHTML = viewDhx();
   if(TAB==='anom') v.innerHTML = viewAnom();
@@ -994,6 +997,41 @@ function scatter(rows){
 
 // 官方「資金注入候選」：1H OI ≥ 4%、|價格| ≤ 3%（他們寫死的，不跟著拉桿動）
 // 官方流程：「先找出 1H 資金注入候選；觀察 15 分鐘後，以 OI 保留、相對 BTC 強弱與 CVD 判斷方向。」
+// ── 巨鯨雷達（＝資金注入候選 + 15 分鐘觀察狀態機）──────────────────────────
+// ★跟「視覺篩選器」是兩個東西（用戶 2026-09-24 指正）：
+//   篩選器＝象限散點圖，OI ≥1%、|價格| ≤5%，只描述狀態、不判多空，是**瀏覽工具**；
+//   巨鯨雷達＝1H OI ≥4%、|價格| ≤3% 的候選，**會發卡片/通知**，而且有後續判方向的流程。
+//   官方契約字串就寫得很白：`batch_title: "巨鯨雷達｜資金注入候選 {count} 個"`。
+const WDIR = {bull:['偏多','up'], bear:['偏空','down'],
+              pending:['觀察中','warn'], none:['方向未成立','dim']};
+
+function viewWhale(){
+  const rows = D.whale || [];
+  let h = '<div class="card"><h2>◆ 巨鯨雷達<span>資金注入候選：1H OI ≥4%、|價格| ≤3%</span></h2>'
+    + '<div class="sub" style="margin-bottom:8px">官方流程：先找出候選 →'
+    + ' <b>觀察 15 分鐘</b> → 以「OI 保留、相對 BTC 強弱、CVD」判方向。'
+    + '15m／30m 只看變化，<b>不產生卡片也不通知</b>，所以這裡固定用 1H。</div>';
+  if(!rows.length){
+    h += '<div class="empty">目前沒有候選：要 OI 一小時內進來 4% 以上、'
+       + '價格卻還壓在 3% 以內（＝資金先動、行情還沒啟動）。</div>';
+  } else {
+    h += table('whale', ['幣','狀態','OI 1H','價 1H','判定依據','起算'], rows, r=>[
+      {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+        + r.inst.replace('-USDT-SWAP','') + '</a>'},
+      {v:r.dir, h:(WDIR[r.dir]||[r.dir,''])[0], c:(WDIR[r.dir]||['','dim'])[1]},
+      {v:r.oi, h:pct(r.oi), c:'up'},
+      {v:r.px, h:pct(r.px), c:cls(r.px)},
+      {v:r.note||'', h:r.dir==='pending'
+        ? `<span class="dim">還差 ${Math.max(0, Math.ceil((900-(D.now-r.first_ts))/60))} 分鐘</span>`
+        : `<span class="dim">${r.note||'—'}</span>`},
+      ago(r.first_ts),
+    ]);
+  }
+  return h + '<div class="sub" style="margin-top:8px">★三個判斷因子、15 分鐘、4%／3% 門檻'
+    + '<b>都是官方的</b>；但「三個因子怎麼合成一個方向」官方沒公布（server-side 算好才回傳），'
+    + '所以下面這條合成規則<b>是我訂的</b>：三項各記 ±1，總分 ≥2 偏多、≤−2 偏空，其餘方向未成立。</div></div>';
+}
+
 function inflowCard(){
   const m=D.mkt, g=(m.gate||{}), rows=(m.rows||[]).filter(r=>r.inflow);
   if(m.win_h!==1) return '<div class="card"><h2>資金注入候選<span>官方只用 1H</span></h2>'
@@ -1269,13 +1307,15 @@ function viewMkt(){
   const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   const sel = rows.filter(hit);
   return '<div class="card">' + winBar()
-    + `<h2>巨鯨雷達<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
+    + `<h2>視覺篩選器<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
     // ★官方把這一頁叫「巨鯨雷達」（前端 data-target-tab="visual"），跟「OI 儀表板」(data-target-tab="oi") 是兩個不同分頁。
     //   原話：「用所選週期的持倉變化＋價格變化，觀察資金是否已經注入市場，
     //   找出可能『資金先動、行情還沒完全啟動』的機會」。
-    + '<div class="sub" style="margin-bottom:8px">X＝持倉變化、Y＝價格變化。'
+    + '<div class="sub" style="margin-bottom:8px">X＝持倉變化、Y＝價格變化，'
+      + `門檻 OI ≥${((m.gate||{}).oi_min*100)||1}%、|價格| ≤${((m.gate||{}).px_max*100)||5}%。`
       + '官方原話：<b>「象限只描述持倉與價格，不直接判定多空；方向請以詳細數據綜合判斷」</b>'
-      + ' —— 這跟「OI 排名」那頁不同，那邊的象限有套市場結構覆寫、是帶多空語意的。</div>'
+      + ' —— 這是<b>瀏覽工具</b>；會發警報、會判方向的是<b>巨鯨雷達</b>那一頁（門檻不同）。'
+      + '另外「OI 排名」那頁的象限有套市場結構覆寫、是帶多空語意的，跟這裡不一樣。</div>'
     + scatter(rows)
     + `<div class="sl"><label>OI 變化 <b>≥ ${OITH}%</b></label>
          <input type="range" min="1" max="10" step="0.5" value="${OITH}"
@@ -1292,7 +1332,7 @@ function viewMkt(){
           {v:r.px, h:pct(r.px), c:cls(r.px)},
           {v:r.q, h:`<span style="color:${QCLR[r.q]}">${r.q}</span>`},
         ]) : '<div class="empty">沒有符合的幣：OI 要夠大、價格要夠靜。把 OI 門檻往左拉。</div>')
-    + '</div>' + inflowCard();
+    + '</div>';
 }
 
 // ── OI 異動排名 ─────────────────────────────────────────────────────────────
@@ -1422,7 +1462,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925e';
+const PAGE_VER = '20260925f';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

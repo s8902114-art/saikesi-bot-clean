@@ -8934,7 +8934,11 @@ def _mcap_refresh(now_s: float) -> None:
     ★失敗一定要印出來：先前寫成 `if status != 200: break` 又不記錄，
       429 就成了**沉默失敗**，線上看起來只是「這欄一直沒有值」。
     """
-    gap = MCAP_REFRESH_SEC if _MCAP_STATE.get("src") else MCAP_RETRY_SEC
+    # ★冷卻要看「**CoinGecko** 拿到沒」，不是「有沒有拿到任何東西」。
+    #   CoinGecko 在 Railway 幾乎必 429，但那是共用出口 IP 的速率限制、不是永久封鎖，
+    #   所以只要還沒拿到它，就每 20 分鐘再試一次 —— 哪一輪通了就覆蓋掉 CoinPaprika 的值。
+    #   （原本寫成「CoinPaprika 成功就冷卻 6 小時」＝ 等於直接放棄對齊官方口徑。）
+    gap = MCAP_REFRESH_SEC if _MCAP_STATE.get("cg") else MCAP_RETRY_SEC
     if now_s - _MCAP_STATE["ts"] < gap:
         return
     _MCAP_STATE["ts"] = now_s
@@ -9425,6 +9429,96 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     return None
 
 
+_WHALE: Dict[str, dict] = {}     # 巨鯨雷達：inst -> 資金注入候選事件
+WHALE_OBS_SEC = 900              # ★官方原話：「觀察 **15 分鐘** 後…判斷方向」
+WHALE_VALID_H = 6                # 事件留多久（官方沒公布，這是我設的）
+WHALE_MAX = 40
+
+
+def _whale_scan(now_s: float) -> None:
+    """★巨鯨雷達 —— 跟「視覺篩選器」是**兩個東西**，這是用戶 2026-09-24 指正我的。
+
+    同一個分頁（他們前端 `data-target-tab="visual"`）在主選單叫「巨鯨雷達」、
+    在引導模式選單叫「視覺篩選器」，但頁面裡裝的是**兩套不同門檻的產物**：
+      ·「持倉 × 價格象限圖」＝ 瀏覽/篩選工具，OI ≥1%、|價格| ≤5%，
+        官方明說「**象限只描述持倉與價格，不直接判定多空**」→ 這是「篩選器」那半。
+      ·「資金注入候選」＝ **警報產品**，1H OI ≥4%、|價格| ≤3%，**會產生卡片與通知**，
+        而且有後續流程 → 這是「雷達」那半。
+    決定性證據是他們自己的契約字串：`batch_title: "巨鯨雷達｜資金注入候選 {count} 個"`
+    —— 巨鯨雷達是產品名，資金注入候選是它的產出。
+
+    官方流程（原話）：「先找出 1H 資金注入候選；**觀察 15 分鐘後**，
+    以 **OI 保留、相對 BTC 強弱與 CVD** 判斷方向。15m／30m 僅觀察變化，
+    不另產生卡片或通知。」方向標籤 `direction_labels`：
+    bull=偏多／bear=偏空／pending=觀察中／none=方向未成立。
+
+    ★誠實標記：**三個判斷因子與 15 分鐘、4%/3% 門檻都是官方的**，
+      但「三個因子怎麼合成一個方向」官方沒公布（server-side），
+      下面的合成規則（各記 ±1、總分 ≥2 偏多 / ≤−2 偏空 / 其餘方向未成立）**是我訂的**。
+
+    ★用 `dashboard._at` 做內插，不另寫一份 —— OI 變化的算法只能有一個實作
+      （memory 記過「OI 公式逐行抄、改一邊要改兩邊」的教訓）。
+    """
+    try:
+        gap = max(DASH_SAMPLE_SEC * 4, 1800.0)
+        t1 = now_s - 3600.0
+
+        def _chg1(hist):
+            if not hist or len(hist) < 2:
+                return None
+            b = dashboard._at(hist, t1, gap)
+            if not b or b[1] <= 0:
+                return None
+            return (hist[-1][1] - b[1]) / b[1]
+
+        btc_px = _chg1(_PX_HISTORY.get("BTC-USDT-SWAP"))
+        for inst, h in list(_oi_history.items()):
+            oi1 = _chg1(h)
+            px1 = _chg1(_PX_HISTORY.get(inst))
+            if oi1 is None or px1 is None:
+                continue
+            ev = _WHALE.get(inst)
+            if oi1 >= 0.04 and abs(px1) <= 0.03:          # 官方固定門檻
+                if not ev:
+                    if len(_WHALE) >= WHALE_MAX:
+                        continue
+                    ev = {"inst": inst, "first_ts": now_s, "oi0": oi1, "px0": px1,
+                          "oi_at": h[-1][1], "dir": "pending", "judged_ts": 0.0,
+                          "note": ""}
+                    _WHALE[inst] = ev
+                ev["last_ts"] = now_s
+                ev["oi"] = oi1
+                ev["px"] = px1
+            if not ev:
+                continue
+            # 觀察滿 15 分鐘 → 判方向（只判一次，之後不再變，跟異常警報的狀態機同慣例）
+            if ev["dir"] == "pending" and now_s - ev["first_ts"] >= WHALE_OBS_SEC:
+                score, why = 0, []
+                # ① OI 保留：當初那筆增量還在不在（張數沒有掉回去）
+                keep = h[-1][1] >= ev["oi_at"] * 0.98
+                score += 1 if keep else -1
+                why.append("OI保留✓" if keep else "OI已回吐")
+                # ② 相對 BTC 強弱（1H）
+                if btc_px is not None and px1 is not None:
+                    rel = px1 - btc_px
+                    score += 1 if rel > 0 else -1
+                    why.append(f"對BTC {rel * 100:+.2f}%")
+                # ③ CVD 方向（背景取樣好的幣安 taker 比）
+                cvd = (_BN_EXTRA.get(inst) or {}).get("cvd_ratio")
+                if cvd is not None:
+                    score += 1 if cvd > 0 else -1
+                    why.append(f"CVD {cvd:+.1f}%")
+                ev["dir"] = "bull" if score >= 2 else ("bear" if score <= -2 else "none")
+                ev["score"] = score
+                ev["note"] = "・".join(why)
+                ev["judged_ts"] = now_s
+        cut = now_s - WHALE_VALID_H * 3600
+        for k in [k for k, v in _WHALE.items() if v.get("last_ts", 0) < cut]:
+            del _WHALE[k]
+    except Exception as e:
+        print(f"[WHALE] 掃描例外(不影響交易): {e}", flush=True)
+
+
 _ANOM = {}                       # 異常警報事件池：coin -> 事件 dict
 ANOM_PX_TH = 3.0                 # ★官方門檻：price_15m / price_5m 都是 ≥3.00%（1000 筆實測最小 3.001）
 ANOM_VALID_H = 6                 # 事件有效期（官方有 event_valid_until，實際值沒抓到，這是我設的）
@@ -9655,6 +9749,10 @@ def _oi_sample_tick(force: bool = False) -> bool:
                 _BN_STATE["busy"] = False
         _BN_STATE["busy"] = True
         Thread(target=_bn_bg, daemon=True).start()
+    try:
+        _whale_scan(now_s)              # 巨鯨雷達：資金注入候選 + 15 分鐘觀察狀態機
+    except Exception as _we:
+        print(f"[WHALE] 例外(不影響交易): {_we}", flush=True)
     try:
         _anom_scan(now_s)               # 異常警報（觸發+狀態機，零額外 API）
     except Exception as _ae:
