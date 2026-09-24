@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925b"
+VER = "20260925c"
 
 
 def _clean(v):
@@ -368,7 +368,12 @@ def _market(G, win_h=1.0, top_n=300):
             #   只有一所有資料時就用那一所 —— 官方 CNPY 只有 OKX 時也是直接用 5.20。
             src = "OKX"
             bh = (G.get("_BN_HISTORY") or {}).get(inst)
-            if bh and len(bh) >= 2:
+            # ★★幣安是**輪流取樣**的（每輪只打 DASH_BN_TOP_N 個幣，因為它沒有全市場 OI
+            #   的批量端點）。所以「這個幣有幣安歷史」不等於「它這一輪有被更新」——
+            #   輪出去的幣，`bh[-1]` 會停在幾十分鐘前，拿它當「現在」算出來的**根本不是 1H 變化**，
+            #   而且會被平均進 OI 變化%，安靜地污染排名。OKX 那一腳沒這個問題（每輪全市場都取）。
+            #   → 幣安腳必須自己檢查新鮮度，不新鮮就退回「只用 OKX」。
+            if bh and len(bh) >= 2 and (now - bh[-1][0]) <= max_gap:
                 bb = _at(bh, target, max_gap)
                 if bb and bb[1] > 0:
                     oi_pct = (oi_pct + (bh[-1][1] - bb[1]) / bb[1]) / 2.0
@@ -397,7 +402,8 @@ def _market(G, win_h=1.0, top_n=300):
                 _b1 = _at(hist, target1, max_gap)
                 _p1 = _at(ph, target1, max_gap) if len(ph) >= 2 else None
                 oi1 = ((l_v - _b1[1]) / _b1[1]) if (_b1 and _b1[1] > 0) else None
-                if oi1 is not None and bh and len(bh) >= 2:
+                # 同上：幣安腳輪流取樣，不新鮮就不准混進來（見上面 src 那段的說明）
+                if oi1 is not None and bh and len(bh) >= 2 and (now - bh[-1][0]) <= max_gap:
                     _bb1 = _at(bh, target1, max_gap)
                     if _bb1 and _bb1[1] > 0:
                         oi1 = (oi1 + (bh[-1][1] - _bb1[1]) / _bb1[1]) / 2.0
@@ -1399,7 +1405,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925b';
+const PAGE_VER = '20260925c';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
