@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925m"
+VER = "20260925n"
 
 
 def _clean(v):
@@ -1209,7 +1209,6 @@ function closeCard(){ CARD = null; draw(); }
 function scoreHTML(r){
   const s = r.sc; if(!s) return '';
   const cl = s.total>=20?'up':(s.total<=-20?'down':'dim');
-  const sm = (s2.total!==undefined) ? s2 : s;      // 拆解跟著主顯示（24H）走
   const part = (k,v,extra='') => v===0&&!extra ? ''
     : `<span class="sp"><i>${k}</i><b class="${v>0?'up':(v<0?'down':'dim')}">${v>0?'+':''}${v}</b>${extra}</span>`;
   // 數據訊號（15m 進場觸發）跟象限（1H/24H 狀態）本來就會不同號 —— 講清楚比藏起來好
@@ -1220,6 +1219,10 @@ function scoreHTML(r){
   //   1H 版為正 67%/中位 +5 = 用戶說的「一堆主力建多」）。1H 版留著當「快但吵」的參考。
   const s2 = r.sc24 || {};
   const cl2 = (s2.total>=20?'up':(s2.total<=-20?'down':'dim'));
+  // ★`sm` 必須宣告在 `s2` **之後**：先前放在上面，形成 TDZ
+  //   （ReferenceError: Cannot access 's2' before initialization）→ cardHTML 整個拋例外、
+  //   字卡按不出來。`node --check` 只驗語法抓不到，所以 _chk_dash_js.py 已補成「真的執行」。
+  const sm = (s2.total!==undefined) ? s2 : s;      // 拆解跟著主顯示（24H）走
   return (s2.total!==undefined
           ? `<div class="cr"><span>順籌碼分數 <small class="dim">24H・與官方同尺度</small></span>`
             + `<b class="${cl2}" style="font-size:20px">${s2.total>0?'+':''}${s2.total}</b></div>`
@@ -1589,7 +1592,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925m';
+const PAGE_VER = '20260925n';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
