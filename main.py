@@ -8656,6 +8656,25 @@ def _dash_hist_load() -> None:
 
 _BN_HISTORY: Dict[str, list] = {}       # 幣安 OI（張數）instId -> [(ts, oi)]
 _BN_STATE = {"ok": None, "fail": 0, "n": 0, "host": 0}
+# ★Cloudflare Worker 代理（繞開 Railway 出口 IP 被幣安地理封鎖 HTTP 451）。
+#   設了才啟用；沒設就走原本的直連（會 451 然後自動停用）。
+#   格式：DASH_BN_PROXY=https://xxx.workers.dev   DASH_BN_PROXY_KEY=<Worker 裡的 SECRET>
+#   Worker 程式碼：trading-backtest/_cf_worker_binance_proxy.js
+DASH_BN_PROXY = os.environ.get("DASH_BN_PROXY", "").rstrip("/")
+DASH_BN_PROXY_KEY = os.environ.get("DASH_BN_PROXY_KEY", "")
+
+
+def _bn_get(path: str, params: dict, timeout: int = 8):
+    """打幣安公開端點：有設代理就走代理，沒有就直連。回 requests.Response 或 None。"""
+    try:
+        if DASH_BN_PROXY and DASH_BN_PROXY_KEY:
+            q = dict(params or {})
+            q["path"] = path
+            q["k"] = DASH_BN_PROXY_KEY
+            return requests.get(DASH_BN_PROXY, params=q, timeout=timeout)
+        return requests.get(_BN_HOSTS[_BN_STATE["host"]] + path, params=params, timeout=timeout)
+    except Exception:
+        return None
 # ★Railway 出口 IP 被幣安地理封鎖(451,實測確認)。fapi1~4 是幣安自己的備援網域,
 #   有時封鎖名單不一致 —— 依序試,找到通的就固定用它;全部不通才停用。
 _BN_HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com",
@@ -8688,8 +8707,9 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
         for inst in picks:
             sym = inst.replace("-USDT-SWAP", "") + "USDT"
             try:
-                r = requests.get(_BN_HOSTS[_BN_STATE["host"]] + "/fapi/v1/openInterest",
-                                 params={"symbol": sym}, timeout=6)
+                r = _bn_get("/fapi/v1/openInterest", {"symbol": sym}, timeout=6)
+                if r is None:
+                    continue
                 if r.status_code == 451:
                     # 換下一個備援網域再試；全部試完才算真的不通
                     if _BN_STATE["host"] + 1 < len(_BN_HOSTS):
