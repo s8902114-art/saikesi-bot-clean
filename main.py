@@ -6687,13 +6687,21 @@ class SykesTradingBot:
         # ── 儀表板被動快照：只記「上面已經算完的值」，不多打一次 API、不多算一次指標。
         #    包在 try 裡且 dashboard.put 自己也不拋例外 → 儀表板壞掉不可能影響交易。
         try:
+            _st_sc, _st_lb = 0, ""
+            if tf_id == "1H":
+                # ★官方評分的「結構分」（±22）。只在 1H 算：字卡的 OI／象限脈絡就是 1H，
+                #   而且這裡的 df 是掃描本來就抓好的，不多打 API、不多抓一次 K 線。
+                _st_sc, _st_lb = _struct_score(
+                    df["high"].values[-200:], df["low"].values[-200:],
+                    [float(x) for x in df["close"].values[-200:]], current_close)
             dashboard.put(symbol_item, tf_id,
                           px=float(current_close),
                           atrp=float(current_atr) / float(current_close) if current_close else None,
                           adx=float(current_adx),
                           vg=("大通道上" if current_close > large_top else
                               "大通道內" if current_close >= large_bot else "大通道下"),
-                          trend="bear" if bear_trend else "bull")
+                          trend="bear" if bear_trend else "bull",
+                          **({"struct": _st_sc, "struct_label": _st_lb} if tf_id == "1H" else {}))
         except Exception:
             pass
 
@@ -8799,9 +8807,232 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
         for k in list(_BN_HISTORY.keys()):
             if k not in _oi_history:
                 del _BN_HISTORY[k]
+        _bn_extra_sample(picks)
     except Exception as e:
         _BN_STATE["fail"] += 1
         print(f"[DASH] 幣安 OI 取樣失敗({_BN_STATE['fail']}/3): {e}", flush=True)
+
+
+_BN_EXTRA: Dict[str, dict] = {}   # instId -> {"funding","long_pct","ls","cvd_ratio","ts"}
+_BN_FUND_HIST: Dict[str, list] = {}   # instId -> [(ts, funding)]，算資費常態帶用
+BN_FUND_KEEP_H = 48                   # 留 48 小時（官方 baseline 要 n≥24 才算數）
+
+
+def _bn_fund_push(inst: str, fr: float, now_s: float) -> None:
+    """累積資費樣本，給官方 `getFundingContext` 的 median／MAD 常態帶用。
+
+    ★官方 `fundingBaselineMap` 是他們後端算好的；我們沒有那個端點（`/api/funding-baseline`
+      只回 `{ts,data}`），所以自己累積。官方判準是 **n≥24 才 hasBase**，
+      不足時退回固定門檻（general 0.01 / extreme 0.025）—— 那條 fallback 路徑我們照抄，
+      所以「還沒累積夠」不會算錯，只會比較不靈敏。
+    """
+    try:
+        h = _BN_FUND_HIST.setdefault(inst, [])
+        h.append((now_s, float(fr)))
+        cut = now_s - BN_FUND_KEEP_H * 3600
+        _BN_FUND_HIST[inst] = [(t, v) for (t, v) in h if t >= cut] or [(now_s, float(fr))]
+    except Exception:
+        pass
+
+
+def _struct_score(highs_a, lows_a, closes_a, cur_price):
+    """★官方 `_analyzeStructure` + `_detectSwings` 的忠實移植（±22 分那一項）。
+
+    原始碼是 2026-09-24 從他們前端 `String(window._analyzeStructure)` 直接取下來的
+    （存檔 trading-backtest/_DHX_SCORE_SRC.js、規格 _DHX_SCORE_0924_SPEC.md），
+    不是逆推。★兩個容易抄錯的點：
+      ①`_detectSwings` 的 lb=2，判定用 **>= / <=** 反向淘汰 → 等價於「左右各 2 根嚴格極值」。
+        寫成 `== max(...)` 在平盤上會讓每根都算樞紐（CLAUDE.md 記過這個坑）。
+      ②EMA 的起手是**前 period 根的簡單平均**，不是第一根收盤。
+    回 (score, label)。資料不足一律 (0, "")，不亂猜。
+    """
+    try:
+        n = len(closes_a)
+        if n < 10:
+            return 0, ""
+        lb = 2
+        hi_pts, lo_pts = [], []
+        for i in range(lb, n - lb):
+            h, l = float(highs_a[i]), float(lows_a[i])
+            is_h = is_l = True
+            for j in range(i - lb, i + lb + 1):
+                if j == i:
+                    continue
+                if float(highs_a[j]) >= h:
+                    is_h = False
+                if float(lows_a[j]) <= l:
+                    is_l = False
+            if is_h:
+                hi_pts.append(h)
+            if is_l:
+                lo_pts.append(l)
+        if len(hi_pts) < 2 or len(lo_pts) < 2:
+            return 0, ""
+        h2, h1 = hi_pts[-1], hi_pts[-2]
+        l2, l1 = lo_pts[-1], lo_pts[-2]
+        HH, HL = h2 > h1, l2 > l1
+        LH, LL = h2 < h1, l2 < l1
+        if (HH and LL) or (LH and HL):
+            return 0, "盤整結構"
+
+        def _ema(period):
+            if n < period:
+                return None
+            k = 2.0 / (period + 1)
+            v = sum(closes_a[:period]) / period
+            for i in range(period, n):
+                v = closes_a[i] * k + v * (1 - k)
+            return v
+
+        e20, e50 = _ema(20), _ema(50)
+        cur = float(cur_price)
+        macro_up = e20 is not None and e50 is not None and cur > e20 and e20 > e50
+        macro_dn = e20 is not None and e50 is not None and cur < e20 and e20 < e50
+        if macro_dn and LH and LL:
+            return (22, "CHoCH↑") if cur > h2 else (-15, "下跌結構")
+        if macro_up and HH and HL:
+            return (-22, "CHoCH↓") if cur < l2 else (15, "上漲結構")
+        if HH and HL:
+            return (-22, "CHoCH↓") if cur < l2 else (15, "上漲結構")
+        if LH and LL:
+            return (22, "CHoCH↑") if cur > h2 else (-15, "下跌結構")
+        return 0, ""
+    except Exception:
+        return 0, ""
+
+
+_MCAP_STATE = {"ts": 0.0, "n": 0}
+MCAP_REFRESH_SEC = 6 * 3600           # 市值 6 小時刷一次（幣價會動，7 天太久）
+MCAP_PAGES = 4                        # 250 × 4 = 前 1000 名
+
+
+def _mcap_refresh(now_s: float) -> None:
+    """補全市值 —— 「OI／市值」那一欄要有它才算得出來。
+
+    ★原本 `_MCAP` 只在 `build_dynamic_symbols`（**7 天**一次）裡順手撈**前 100 名**，
+      所以儀表板 476 個合約有 376 個的 OI／市值 永遠是「—」（用戶 2026-09-24 問到）。
+      官方 `/api/crypto-mcap-cache` 有 3219 筆，我們至少要補到前 1000。
+    ★成本：CoinGecko 公開端點免金鑰，4 支 × 6 小時 = 一天 16 支，可忽略。
+      跑在背景執行緒裡（跟幣安取樣同一支），不佔交易主迴圈。
+    ★同一個 symbol 可能對到多個幣（CoinGecko 有同名幣），回應是**市值降序**，
+      所以「先到的不覆蓋」＝ 取市值最大的那個，跟交易所主流標的一致。
+    """
+    if now_s - _MCAP_STATE["ts"] < MCAP_REFRESH_SEC:
+        return
+    _MCAP_STATE["ts"] = now_s
+    try:
+        got = {}
+        for page in range(1, MCAP_PAGES + 1):
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/coins/markets",
+                params={"vs_currency": "usd", "order": "market_cap_desc",
+                        "per_page": 250, "page": page, "sparkline": "false"},
+                headers={"Accept": "application/json"}, timeout=20)
+            if r.status_code != 200:
+                break
+            rows = r.json() or []
+            if not rows:
+                break
+            for c in rows:
+                try:
+                    sym = str(c.get("symbol") or "").upper()
+                    mc = float(c.get("market_cap") or 0)
+                    if sym and mc > 0 and sym not in got:
+                        got[sym] = mc
+                except (TypeError, ValueError):
+                    continue
+            time.sleep(1.5)            # CoinGecko 免費層有每分鐘上限，慢慢來
+        if got:
+            _MCAP.update(got)
+            _MCAP_STATE["n"] = len(_MCAP)
+            print(f"[DASH] 市值刷新:本輪 {len(got)} 幣,累計 {len(_MCAP)}", flush=True)
+    except Exception as e:
+        print(f"[DASH] 市值刷新失敗(不影響交易): {e}", flush=True)
+
+
+def _bn_fund_base(inst: str):
+    """回 (median, mad, n)。n<24 時呼叫端要當成 hasBase=False（照官方）。"""
+    h = _BN_FUND_HIST.get(inst) or []
+    vals = sorted(v for _t, v in h)
+    n = len(vals)
+    if n == 0:
+        return 0.0, 0.0, 0
+    med = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+    dev = sorted(abs(v - med) for v in vals)
+    mad = dev[n // 2] if n % 2 else (dev[n // 2 - 1] + dev[n // 2]) / 2.0
+    return med, mad, n
+
+
+def _bn_extra_sample(picks: list) -> None:
+    """補**資費**與**多空帳戶比** —— 官方評分公式的兩個因子（資費 ±12、多空比 ±2/±4），
+    字卡要顯示它們、算分也要用它們。跟 OI 一樣跑在背景執行緒裡，網頁端零 API。
+
+    ★成本不對稱，所以兩個因子的涵蓋範圍不同：
+      · 資費 `/fapi/v1/premiumIndex` **不帶 symbol 就回整個市場**（實測 910 支、0.33s、權重 10）
+        → 全市場都拿得到，一次呼叫。
+      · 多空比 `/futures/data/globalLongShortAccountRatio` **只能逐幣**（無批量端點）
+        → 只補這輪的 picks（同 OI，約 120 幣）。沒補到的幣，字卡顯示「—」而不是猜一個值。
+    ★這是**幣安**的資費，不是 OKX 的。CLAUDE.md 記著兩所符號不一致 36.3%，
+      但這裡的用途是**複刻數據獵手的評分**，而他們用的就是幣安／CoinGlass 聚合 ——
+      所以對齊他們要用幣安。字卡上會標明來源，不要拿它當 OKX 部位的資費依據。
+    """
+    try:
+        r = _bn_get("/fapi/v1/premiumIndex", {}, timeout=10)
+        fmap = {}
+        if r is not None and r.status_code == 200:
+            for x in r.json() or []:
+                try:
+                    fmap[x["symbol"]] = float(x.get("lastFundingRate") or 0)
+                except (KeyError, TypeError, ValueError):
+                    continue
+        now_s = time.time()
+        got = 0
+        for inst in picks:
+            sym = inst.replace("-USDT-SWAP", "") + "USDT"
+            rec = _BN_EXTRA.get(inst) or {}
+            if sym in fmap:
+                rec["funding"] = fmap[sym]
+                _bn_fund_push(inst, fmap[sym], now_s)
+            try:
+                rr = _bn_get("/futures/data/globalLongShortAccountRatio",
+                             {"symbol": sym, "period": "5m", "limit": 1}, timeout=6)
+                if rr is not None and rr.status_code == 200:
+                    arr = rr.json()
+                    if isinstance(arr, list) and arr:
+                        # ★官方 scoreBreakdown 用的是 longPct（多方**帳戶佔比 %**），門檻 40/45/55/60，
+                        #   不是 longShortRatio（那是倍數）。這裡存 longAccount×100。
+                        rec["long_pct"] = float(arr[-1].get("longAccount") or 0) * 100 or None
+                        rec["ls"] = float(arr[-1].get("longShortRatio") or 0) or None
+            except Exception:
+                pass
+            try:
+                # ★cvd_ratio：官方 `oi-cache` 對 OKX 來源的幣標的是 `binance_taker_ratio`。
+                #   定義已逐筆對回官方值 —— ENSO 官方 −30.45 vs 本式 −28.89（差幾分鐘的快照）：
+                #   **12 根 5m（=1H）的 (buyVol−sellVol)/(buyVol+sellVol)×100**。
+                #   （ETC 對不上是因為它的 cvd_source 是 coinglass_taker_ratio，不同來源，屬預期。）
+                rc = _bn_get("/futures/data/takerlongshortRatio",
+                             {"symbol": sym, "period": "5m", "limit": 12}, timeout=6)
+                if rc is not None and rc.status_code == 200:
+                    arr = rc.json()
+                    if isinstance(arr, list) and arr:
+                        bv = sum(float(x.get("buyVol") or 0) for x in arr)
+                        sv = sum(float(x.get("sellVol") or 0) for x in arr)
+                        if bv + sv > 0:
+                            rec["cvd_ratio"] = (bv - sv) / (bv + sv) * 100.0
+            except Exception:
+                pass
+            if rec:
+                rec["ts"] = now_s
+                _BN_EXTRA[inst] = rec
+                got += 1
+            time.sleep(0.05)
+        for k in list(_BN_EXTRA.keys()):
+            if k not in _oi_history:
+                del _BN_EXTRA[k]
+        _BN_STATE["extra"] = got
+        _BN_STATE["fund_all"] = len(fmap)
+    except Exception as e:
+        print(f"[DASH] 幣安 資費/多空比 取樣失敗(不影響交易): {e}", flush=True)
 
 
 _DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
@@ -9365,6 +9596,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
             _t0 = time.time()
             try:
                 _bn_oi_sample(_ns, _kf)
+                _mcap_refresh(_ns)      # 順便刷市值（自己有 6 小時節流）
             finally:
                 _BN_STATE["ms"] = int((time.time() - _t0) * 1000)
                 _BN_STATE["busy"] = False

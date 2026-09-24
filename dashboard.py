@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924z"
+VER = "20260925a"
 
 
 def _clean(v):
@@ -180,6 +180,132 @@ def _at(hist, target_ts, max_gap):
     return None                              # target 比最新的點還新
 
 
+def _score(oi1, chg1, chg24, btc24, cvd, fr, fr_base, long_pct, liq, struct):
+    """★官方 `scoreBreakdown(ticker)` 的忠實移植（規格＋原始碼：`_DHX_SCORE_0924_SPEC.md`／
+    `_DHX_SCORE_SRC.js`，2026-09-24 從他們前端直接取下來的，不是逆推）。
+
+    ★★順帶解掉「數據訊號和象限對不起來」：官方四象限的分組**有一層 `mktLabel` 覆寫**
+      （`sigKey` 裡的 `m!=='主動做空'` / `m==='主動做多'` 那幾行）。我先前只用
+      OI 方向 × 價格方向，對帳只命中 17/20 —— 差的 3 筆就是被這層覆寫的。
+      所以這裡回傳的 `mkt_label` 要拿去覆寫象限，兩邊才會一致。
+
+    參數單位：oi1/chg1/chg24/btc24 是**百分比數字**（+1.25 表示 +1.25%），
+    fr 是資費百分比，long_pct 是多方帳戶佔比（54.18 表示 54.18%），
+    fr_base=(median, mad, n)，liq=(long_liq, short_liq) 或 None，struct=(分數, 標籤)。
+    """
+    def _clamp(v, lo, hi):
+        return max(lo, min(hi, v))
+
+    mkt, label = 0, ""
+    strong = oi1 is not None and abs(oi1) > 3
+    if oi1 is not None and cvd is not None:
+        oi_up, cvd_up = oi1 > 0, cvd > 0
+        if cvd_up and oi_up and chg1 > 0:
+            label, mkt = "主動做多", (40 if strong else 24)
+        elif cvd_up and oi_up:
+            label, mkt = "OI↑價↓", (-24 if strong else -12)
+        elif (not cvd_up) and oi_up and chg1 < 0:
+            label, mkt = "主動做空", (-40 if strong else -24)
+        elif (not cvd_up) and oi_up:
+            label, mkt = "OI↑價↑", (24 if strong else 12)
+        elif cvd_up and not oi_up:
+            label, mkt = "空頭出場", (16 if strong else 8)
+        else:
+            label, mkt = "多頭出場", (-16 if strong else -8)
+    elif oi1 is not None:
+        if oi1 > 3 and chg1 > 0:
+            label, mkt = "OI↑價↑", 24
+        elif oi1 > 3 and chg1 < 0:
+            label, mkt = "OI↑價↓", -24
+        elif oi1 > 0 and chg1 > 0:
+            label, mkt = "OI↑價↑", 12
+        elif oi1 > 0 and chg1 < 0:
+            label, mkt = "OI↑價↓", -12
+        elif oi1 < -3 and chg1 > 0:
+            label, mkt = "OI↓價↑", 8
+        elif oi1 < -3 and chg1 < 0:
+            label, mkt = "OI↓價↓", -8
+        elif oi1 < 0 and chg1 > 0:
+            label, mkt = "OI↓價↑", 4
+        else:
+            label, mkt = "OI↓價↓", -4
+
+    mom1 = round(_clamp(chg1 * 0.8, -8, 8))
+    mom24 = round(_clamp(chg24 * 0.48, -4, 4)) if chg24 is not None else 0
+
+    # 資費（逆向，±12）——「多方過熱」無條件扣分，「空方過熱」要嘎空已出現才給分（官方不對稱）
+    fr_score, fr_label = 0, "正常"
+    if fr is not None:
+        med, mad, nb = fr_base or (0.0, 0.0, 0)
+        has = nb >= 24
+        general = max(0.01, mad * 2.5) if has else 0.01
+        extreme = max(0.025, mad * 5) if has else 0.025
+        dev = fr - (med if has else 0.0)
+        oi_dn = (oi1 or 0) < 0
+        oi_up2 = (oi1 or 0) > 0
+        px_ok = (chg1 if chg1 is not None else 0) >= -0.2
+        squeeze = (cvd or 0) > 0 and (oi_dn or px_ok or (oi_up2 and px_ok))
+        if dev >= extreme:
+            fr_score, fr_label = -12, "多方過熱"
+        elif dev >= general:
+            fr_score, fr_label = -6, "多方過熱"
+        elif dev <= -extreme:
+            fr_score = 8 if squeeze else 0
+            fr_label = "空方過熱·嘎空確認" if squeeze else "空方過熱"
+        elif dev <= -general:
+            fr_score = 4 if squeeze else 0
+            fr_label = "空方過熱·嘎空確認" if squeeze else "空方過熱"
+
+    ls_score = 0
+    if long_pct is not None:
+        if long_pct > 60:
+            ls_score = -4
+        elif long_pct > 55:
+            ls_score = -2
+        elif long_pct < 40:
+            ls_score = 4
+        elif long_pct < 45:
+            ls_score = 2
+
+    liq_score = 0
+    if liq:
+        ll, sl = liq
+        if sl > 0 and sl > ll * 2:
+            liq_score = 3
+        elif sl > ll:
+            liq_score = 2
+        elif ll > 0 and ll > sl * 2:
+            liq_score = -3
+        elif ll > sl:
+            liq_score = -2
+
+    # BTC 相對強弱（±7）——官方：coin 不是 BTC，且 |BTC 24H| < 5 才套用
+    rel_score, rel_chg = 0, 0.0
+    if chg24 is not None and btc24 is not None and abs(btc24) < 5:
+        rel_chg = round(chg24 - btc24, 2)
+        rel_score = round(_clamp(rel_chg * 1.4, -7, 7))
+
+    st_score, st_label = (struct or (0, ""))
+    total = mkt + mom1 + mom24 + fr_score + ls_score + liq_score + rel_score + st_score
+
+    crash = chg24 is not None and chg24 <= -20
+    if crash:
+        if mkt > 0:
+            mkt, label = 0, "崩跌存疑"
+            total = mkt + mom1 + mom24 + fr_score + ls_score + liq_score + rel_score + st_score
+        floor = -20 - min(60, round((abs(chg24) - 20) * 0.8))
+        if total > floor:
+            total = floor
+
+    return {
+        "total": int(max(-100, min(100, round(total)))),
+        "mkt": mkt, "mkt_label": label, "mom1": mom1, "mom24": mom24,
+        "fr": fr_score, "fr_label": fr_label, "ls": ls_score, "liq": liq_score,
+        "rel": rel_score, "rel_chg": rel_chg, "struct": st_score, "struct_label": st_label,
+        "crash": bool(crash),
+    }
+
+
 def _market(G, win_h=1.0, top_n=300):
     """★四象限（OI 變化 × 價格變化）。兩邊都讀記憶體，零 API。
 
@@ -195,6 +321,35 @@ def _market(G, win_h=1.0, top_n=300):
         mcap = G.get("_MCAP") or {}
         now = time.time()
         target = now - win_h * 3600
+        target1 = now - 3600.0          # 評分固定用 1H 窗（見下方 _score 呼叫處的說明）
+        # 資費／多空比／CVD：由 bot 在背景取樣好的（原則 2：開網頁不打交易所 API）
+        _raw = G.get("_BN_EXTRA") or {}
+        _base_fn = G.get("_bn_fund_base")
+        extra = {}
+        for _k, _v in _raw.items():
+            _f = _v.get("funding")
+            _e = dict(_v)
+            # 幣安 lastFundingRate 是**小數**（0.00003426），官方公式用的是**百分比** → ×100
+            _e["funding_pct"] = (_f * 100.0) if _f is not None else None
+            if _base_fn:
+                try:
+                    _m, _d, _n = _base_fn(_k)
+                    _e["fr_base"] = (_m * 100.0, _d * 100.0, _n)
+                except Exception:
+                    _e["fr_base"] = None
+            extra[_k] = _e
+        # 結構分：掃描迴圈在 1H 那輪算好放進 _DASH 的（同樣不多打 API）
+        dash_sn = {}
+        try:
+            with _LOCK:                       # _DASH 就是本模組的全域，掃描執行緒會寫它
+                _items = [(s, dict(t.get("1H") or {})) for s, t in _DASH.items()]
+            for _sym, _r1 in _items:
+                if "struct" in _r1:
+                    dash_sn[_sym.replace("/USDT", "") + "-USDT-SWAP"] = _r1
+        except Exception:
+            pass
+        _bs = snap.get("BTC-USDT-SWAP") or {}
+        btc24 = (_bs.get("chg24h") * 100.0) if _bs.get("chg24h") is not None else None
         samp = float(G.get("DASH_SAMPLE_SEC") or DASH_SAMPLE_SEC_FALLBACK)
         # 內插允許跨越的最大空洞：正常取樣間隔的 4 倍，且至少 30 分鐘。
         # 超過就是 bot 停過機，那段不內插（給 None，該幣這輪不顯示）。
@@ -227,13 +382,54 @@ def _market(G, win_h=1.0, top_n=300):
                    ("空頭平倉" if px_pct > 0 else "多頭平倉")
             s = snap.get(inst) or {}
             # 排名表的象限：官方 sigKey 用 `d.priceChg`，同時刻對帳 24H 命中 17/20（1H 只有 7/20）。
-            # 另 3 筆是被官方評分系統的 mktLabel 覆寫 —— 我們沒有那套評分，複刻不了，這是已知差異。
+            # 另 3 筆是被官方評分系統的 mktLabel 覆寫 —— ★2026-09-24 已把那套評分抓下來並移植
+            # （見下方 _score 與 mktLabel 覆寫），所以這裡先算「純方向」版，稍後被覆寫。
             c24 = s.get("chg24h")
             quad24 = quad if c24 is None else (
                 ("多頭建倉" if c24 >= 0 else "空頭建倉") if oi_pct >= 0 else
                 ("空頭平倉" if c24 >= 0 else "多頭平倉"))
             mc = mcap.get(inst.replace("-USDT-SWAP", ""))
+            # ★評分一律用 **1H**（官方 scoreBreakdown 就是 1H），跟使用者選的窗無關 ——
+            #   不然切到 12H 窗時分數會跟官方對不上，而且卡片上的「市場結構」會跟著窗漂。
+            if abs(win_h - 1.0) < 1e-9:
+                oi1, px1 = oi_pct, px_pct
+            else:
+                _b1 = _at(hist, target1, max_gap)
+                _p1 = _at(ph, target1, max_gap) if len(ph) >= 2 else None
+                oi1 = ((l_v - _b1[1]) / _b1[1]) if (_b1 and _b1[1] > 0) else None
+                if oi1 is not None and bh and len(bh) >= 2:
+                    _bb1 = _at(bh, target1, max_gap)
+                    if _bb1 and _bb1[1] > 0:
+                        oi1 = (oi1 + (bh[-1][1] - _bb1[1]) / _bb1[1]) / 2.0
+                px1 = ((ph[-1][1] - _p1[1]) / _p1[1]) if (_p1 and _p1[1] > 0) else None
+            ex = extra.get(inst) or {}
+            _stv = (dash_sn.get(inst) or {})
+            sc = _score(
+                oi1 * 100 if oi1 is not None else None,
+                px1 * 100 if px1 is not None else 0.0,
+                (c24 * 100) if c24 is not None else None,
+                btc24,
+                ex.get("cvd_ratio"),
+                ex.get("funding_pct"),
+                ex.get("fr_base"),
+                ex.get("long_pct"),
+                None,                       # 爆倉：沒有免費來源 → 官方 ±3 這項我們一律 0
+                (_stv.get("struct") or 0, _stv.get("struct_label") or ""),
+            )
+            # ★官方 `sigKey` 的 mktLabel 覆寫層（這就是先前對帳只中 17/20 的那 3 筆）
+            _m = sc["mkt_label"]
+            if _m == "主動做多":
+                quad24 = "多頭建倉"
+            elif _m == "主動做空":
+                quad24 = "空頭建倉"
+            elif _m == "空頭出場":
+                quad24 = "空頭平倉"
+            elif _m == "多頭出場":
+                quad24 = "多頭平倉"
             rows.append({
+                "sc": sc, "oi1": oi1, "px1": px1,
+                "fr": ex.get("funding_pct"), "lp": ex.get("long_pct"),
+                "cvd": ex.get("cvd_ratio"),
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
                 "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None, "mcap": mc,
@@ -511,6 +707,10 @@ _HTML = """<!doctype html>
 <meta name="theme-color" content="#0b0e14">
 <title>盤面</title>
 <style>
+  .sps{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
+  .sp{background:var(--card);border:1px solid var(--line);border-radius:6px;
+      padding:3px 7px;font-size:12px;display:flex;gap:5px;align-items:baseline}
+  .sp i{font-style:normal;color:var(--dim)}
   :root{
     --bg:#0b0e14; --card:#141922; --line:#232a36; --fg:#e6edf7; --dim:#8b97ab;
     --up:#35d07f; --down:#ff5c6c; --warn:#ffb74d; --accent:#6aa3ff;
@@ -854,6 +1054,33 @@ function relatedHTML(r){
 let CARD = null;
 function openCard(inst){ CARD = inst; draw(); }
 function closeCard(){ CARD = null; draw(); }
+// ★官方評分拆解（公式與原始碼見 trading-backtest/_DHX_SCORE_0924_SPEC.md）
+function scoreHTML(r){
+  const s = r.sc; if(!s) return '';
+  const cl = s.total>=20?'up':(s.total<=-20?'down':'dim');
+  const part = (k,v,extra='') => v===0&&!extra ? ''
+    : `<span class="sp"><i>${k}</i><b class="${v>0?'up':(v<0?'down':'dim')}">${v>0?'+':''}${v}</b>${extra}</span>`;
+  // 數據訊號（15m 進場觸發）跟象限（1H/24H 狀態）本來就會不同號 —— 講清楚比藏起來好
+  const sig = (D.dhx||[]).find(x=>x.inst===r.inst);
+  return `<div class="cr"><span>順籌碼分數</span>`
+       + `<b class="${cl}" style="font-size:20px">${s.total>0?'+':''}${s.total}</b></div>`
+       + `<div class="sps">`
+       + part('市場結構', s.mkt, s.mkt_label?`<i class="dim">${s.mkt_label}</i>`:'')
+       + part('結構', s.struct, s.struct_label?`<i class="dim">${s.struct_label}</i>`:'')
+       + part('BTC相對', s.rel, s.rel_chg?`<i class="dim">${f(s.rel_chg,1)}%</i>`:'')
+       + part('資費', s.fr, s.fr_label&&s.fr_label!=='正常'?`<i class="dim">${s.fr_label}</i>`:'')
+       + part('動能1H', s.mom1) + part('動能24H', s.mom24) + part('多空比', s.ls)
+       + `<span class="sp"><i>爆倉</i><b class="dim">無資料</b></span>`
+       + `</div>`
+       + (s.crash? '<div class="sub" style="color:var(--warn)">◆ 24H 跌逾 20%：官方會把偏多結構歸零'
+           + '並強制壓到偏空（接刀／插針的假性買盤容易被誤判成「主動做多」）。</div>' : '')
+       + (sig? `<div class="sub" style="margin:6px 0">◆ 數據訊號此刻是「<b>${(KIND[sig.kind]||[sig.kind])[0]}`
+           + `${sig.bias==='LONG'?' 做多':' 做空'}</b>」，跟上面的象限不同號是正常的：`
+           + `<b>象限是 1H／24H 的「狀態」</b>（現在資金站哪邊），`
+           + `<b>數據訊號是 15m 的「進場觸發」</b>（結構剛翻轉）。`
+           + `要進場看訊號，要判斷大環境看象限；兩個同號才是順勢單。</div>` : '');
+}
+
 function cardHTML(){
   if(!CARD || !D.mkt) return '';
   const r = (D.mkt.rows||[]).find(x=>x.inst===CARD);
@@ -875,6 +1102,13 @@ function cardHTML(){
     + row('24H 漲跌', pct(r.chg24h), cls(r.chg24h))
     + row(`動能 ${D.mkt.win_h}H`, pct(r.px), cls(r.px))
     + row(`OI 變化 ${D.mkt.win_h}H`, pct(r.oi), cls(r.oi))
+    + scoreHTML(r)
+    + row('資金費率', r.fr===null||r.fr===undefined? '—' : f(r.fr,4)+'%　<small class="dim">幣安</small>',
+          r.fr>0?'up':(r.fr<0?'down':''))
+    + row('多空帳戶比', r.lp===null||r.lp===undefined? '—'
+          : `多 ${f(r.lp,1)}% / 空 ${f(100-r.lp,1)}%`, r.lp>55?'down':(r.lp<45?'up':''))
+    + row('合約 CVD (1H)', r.cvd===null||r.cvd===undefined? '—' : f(r.cvd,2)+'%',
+          r.cvd>0?'up':(r.cvd<0?'down':''))
     + row('未平倉量', r.oiu? big(r.oiu)+' USDT' : '—')
     + row('市值', r.mcap? big(r.mcap) : '—')
     + row('OI／市值比', r.oimc? f(r.oimc*100,2)+'%' : '—')
@@ -1085,7 +1319,9 @@ function viewCoins(){
   return '<div class="card"><h2>掃描快照</h2>'
     + `<input class="f" id="cq" placeholder="篩選幣種…" value="${q}" oninput="draw();document.getElementById('cq').focus()">`
     + table('coins', ['幣','時框','價格','ATR%','ADX','通道','趨勢','更新'], flt, r=>[
-        r.sym.replace('/USDT',''), r.tf, pf(r.px),
+        {v:r.sym, h:`<a class="cl" onclick="openCard('${r.sym.replace('/USDT','')}-USDT-SWAP')">`
+                  + r.sym.replace('/USDT','') + '</a>'},
+        r.tf, pf(r.px),
         {v:r.atrp, h:r.atrp===undefined?'—':f(r.atrp*100,2)},
         {v:r.adx, h:f(r.adx,1), c:r.adx>=25?'up':(r.adx<15?'dim':'')},
         r.vg||'—',
@@ -1130,7 +1366,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924z';
+const PAGE_VER = '20260925a';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
