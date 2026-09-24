@@ -8941,6 +8941,8 @@ _ANOM = {}                       # 異常警報事件池：coin -> 事件 dict
 ANOM_PX_TH = 3.0                 # ★官方門檻：price_15m / price_5m 都是 ≥3.00%（1000 筆實測最小 3.001）
 ANOM_VALID_H = 6                 # 事件有效期（官方有 event_valid_until，實際值沒抓到，這是我設的）
 ANOM_MAX = 40
+ANOM_CVD_BATCH = 6               # 每輪最多對幾個已觸發的幣打 CVD（逐幣翻頁，很貴）
+_ANOM_CVD = {"n": 0}
 
 
 def _anom_scan(now_s: float) -> None:
@@ -8983,6 +8985,7 @@ def _anom_scan(now_s: float) -> None:
             return (hist[-1][1] - base) / base * 100.0
 
         btc15 = _chg(px_all.get("BTC-USDT-SWAP"), 900) or 0.0
+        _ANOM_CVD["n"] = 0        # 每輪重置 CVD 取用額度
         for inst, ph in list(px_all.items()):
             coin = inst.replace("-USDT-SWAP", "")
             p15 = _chg(ph, 900)
@@ -9018,10 +9021,28 @@ def _anom_scan(now_s: float) -> None:
                 oi15 = _chg(oh, 900)
             rel = (p15 or 0.0) - btc15          # 相對 BTC 強弱
             up = ev["init_dir"] == "bull"
-            oi_hold = (oi15 is not None and (oi15 > 0 if up else oi15 > 0))
+            oi_hold = (oi15 is not None and oi15 > 0)
             strong = (rel > 0) if up else (rel < 0)
+            # ★官方原話是三項：「以 **OI 保留**、**相對 BTC 強弱** 與 **CVD** 判斷方向」。
+            #   前兩項用取樣資料就有；CVD 要逐幣打 rubik，所以只對**已觸發**的幣打
+            #   （一輪最多 ANOM_CVD_BATCH 個），這正是全市場拿不到、但警報數量少就負擔得起的做法。
+            #   官方統計：偏多確認 CVD 中位 +4.83、偏空確認 −8.24、異動觀察 ≈0 → CVD 是方向主軸。
+            if ev.get("cvd_dir") is None and _ANOM_CVD["n"] < ANOM_CVD_BATCH:
+                _ANOM_CVD["n"] += 1
+                try:
+                    _df = fetch_market_candles(inst, "15m")
+                    _cv = _okx_contract_cvd_15m(inst, _df.index) if not _df.empty else None
+                    if _cv is not None and len(_cv) >= 8:
+                        _v = _cv.values.astype(float)
+                        _d = float(_v[-1] - _v[-5])        # 近 5 根(≈1h)的 CVD 變化
+                        ev["cvd_delta"] = _d
+                        ev["cvd_dir"] = 1 if _d > 0 else (-1 if _d < 0 else 0)
+                except Exception:
+                    ev["cvd_dir"] = 0                       # 拿不到就當方向不明，不亂猜
+            cvd_ok = (ev.get("cvd_dir") is not None and
+                      (ev["cvd_dir"] > 0 if up else ev["cvd_dir"] < 0))
             if ev["status"] == "RADAR":
-                if oi_hold and strong and (now_s - ev["first_ts"]) >= 900:
+                if oi_hold and strong and cvd_ok and (now_s - ev["first_ts"]) >= 900:
                     ev["status"] = "CONFIRMED"
                     ev["bias_label"] = "偏多確認" if up else "偏空確認"
                     ev["confirmed_at"] = now_s
@@ -9035,7 +9056,8 @@ def _anom_scan(now_s: float) -> None:
                 if move <= -2.0:
                     ev["status"] = "INVALIDATED"
                     ev["bias_label"] = "偏多失效" if up else "偏空失效"
-                elif not oi_hold or not strong:
+                elif (ev.get("cvd_dir") is not None and not cvd_ok) or not oi_hold or not strong:
+                    # ★官方統計：OI 還正、但 CVD 翻到反向 → 降級「轉弱」（偏多轉弱 CVD 中位 −1.80）
                     ev["status"] = "WEAKENING"
                     ev["bias_label"] = "偏多轉弱" if up else "偏空轉弱"
             ev["p15"] = round(p15, 3) if p15 is not None else None

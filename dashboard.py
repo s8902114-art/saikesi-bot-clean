@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924t"
+VER = "20260924u"
 
 
 def _clean(v):
@@ -858,21 +858,25 @@ function viewAnom(){
     const g = rows.filter(f);
     return `<div class="card"><h2>${title}<span>${g.length}</span></h2>`
       + (note?`<div class="sub" style="margin-bottom:8px">${note}</div>`:'')
-      + (g.length ? table('an'+title, ['幣','階段','15m','OI15m','相對BTC','觸發'], g, r=>[
+      + (g.length ? table('an'+title, ['幣','階段','15m','OI15m','相對BTC','CVD','觸發'], g, r=>[
           {v:r.coin, h:`<a class="cl" onclick="openCard('${r.inst}')">${r.coin}</a>`},
           {v:r.status, h:`${r.bias_label}`, c:(ST[r.status]||['',''])[1]},
           {v:r.p15, h:f2(r.p15), c:cls(r.p15)},
           {v:r.oi15, h:f2(r.oi15), c:cls(r.oi15)},
           {v:r.rel_btc, h:f2(r.rel_btc), c:cls(r.rel_btc)},
+          {v:r.cvd_dir, h:r.cvd_dir==null?'—':(r.cvd_dir>0?'買壓':(r.cvd_dir<0?'賣壓':'中性')),
+           c:r.cvd_dir>0?'up':(r.cvd_dir<0?'down':'dim')},
           {v:r.trigger_count, h:r.trigger_count+' 次'},
         ]) : '<div class="empty">—</div>') + '</div>';
   };
   h += sec('看漲', r=>r.init_dir==='bull', '警報當下資料偏多');
   h += sec('看跌', r=>r.init_dir==='bear', '警報當下資料偏空');
   h += '<div class="card"><div class="sub">'
-    + '★官方用 <b>CVD</b> 當方向主軸（偏多確認 CVD +4.83／偏空 −8.24／觀察中 ≈0）。'
-    + '我全市場沒有 CVD，所以方向判定改用官方那句話的另外兩項：<b>OI 保留</b> 與 '
-    + '<b>相對 BTC 強弱</b> —— <b>與官方不會完全一致</b>。<br>'
+    + '方向判定照官方那句話的三項：<b>OI 保留</b>＋<b>相對 BTC 強弱</b>＋<b>CVD</b>，三項都成立才從'
+    + '「觀察中」升級成「確認」；OI 還在但 CVD 翻向 → 降「轉弱」（官方統計：偏多確認 CVD 中位 +4.83、'
+    + '偏空 −8.24、觀察中 ≈0、偏多轉弱 −1.80）。<br>'
+    + '★差異：官方 CVD 來自幣安 taker（全市場快取），我用 OKX rubik 且<b>只對已觸發的幣</b>打'
+    + '（每輪最多 6 個），所以同一時刻不一定每筆都有 CVD，也不會與官方數值相同。<br>'
     + '官方原話：「警報只代表這個幣正在異動，<b>不等於可以直接進場</b>」；建議槓桿 5 倍。<br>'
     + '另：官方統計純價格觸發有 73~78% 會停在「觀察中」，本來就多半不成方向。'
     + '</div></div>';
@@ -1028,7 +1032,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924t';
+const PAGE_VER = '20260924u';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
