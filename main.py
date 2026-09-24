@@ -9605,7 +9605,13 @@ def _agg_oi_sample(now_s: float, keep_from: float) -> None:
                     a_[1] += _u
                     _FR_AGG[inst] = a_[0] / a_[1] * 100.0
 
-        for inst, usd in agg.items():
+        # ★只留 OKX 有上架的（＝我們追蹤、也是用戶實際交易的標的）。
+        #   不濾的話是四家的**聯集**（實測 1119 幣），多出來的幣沒有 OKX 價格與歷史，
+        #   畫面上用不到，卻會讓落地檔案胖一圈、每 5 分鐘多寫一次。
+        for inst, usd in list(agg.items()):
+            if inst not in _oi_history:
+                del agg[inst]
+                continue
             hh = _AGG_HISTORY.setdefault(inst, [])
             hh.append((now_s, usd))
             _AGG_HISTORY[inst] = [(t, v) for (t, v) in hh if t >= keep_from] or [(now_s, usd)]
