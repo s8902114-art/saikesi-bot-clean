@@ -8702,11 +8702,20 @@ def _bn_get(path: str, params: dict, timeout: int = 8):
         return requests.get(_BN_HOSTS[_BN_STATE["host"]] + path, params=params, timeout=timeout)
     except Exception:
         return None
-# ★Railway 出口 IP 被幣安地理封鎖(451,實測確認)。fapi1~4 是幣安自己的備援網域,
-#   有時封鎖名單不一致 —— 依序試,找到通的就固定用它;全部不通才停用。
-_BN_HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com",
-             "https://fapi2.binance.com", "https://fapi3.binance.com",
-             "https://fapi4.binance.com"]
+# ★★★2026-09-24 破解：幣安的地理封鎖是**按網域**的，不是按 IP 一封到底。
+#   Railway 出口實測（/d/<token>/egress 探針）：
+#     fapi.binance.com  → 451 restricted location
+#     api.binance.com   → 451
+#     www.binance.com   → **200**，同一份 /fapi/v1/* 與 /futures/data/* 路徑照回真實資料
+#   www 走的是網站主 CDN，跟 API 網域不同邊緣節點、不同封鎖名單。
+#   已驗：7 個我們要的端點在 www 前置下全部 200（單幣OI/24h行情/資金費/OI歷史/
+#   多空帳戶比/taker買賣比/合約資訊）；不需要瀏覽器 UA；回應帶 x-mbx-used-weight-1m
+#   = 同一套限流基礎設施（上限 2400/分，我們 60 幣÷5 分鐘毫無壓力）。
+#   ★教訓：先前我只試了 fapi 家族就下「幣安封到底了、只能開 VM」的結論 —— 測得不夠。
+#     「某網域被封」不可外推成「這家全封」，要逐網域實測。
+_BN_HOSTS = ["https://www.binance.com", "https://fapi.binance.com",
+             "https://fapi1.binance.com", "https://fapi2.binance.com",
+             "https://fapi3.binance.com", "https://fapi4.binance.com"]
 DASH_BN_TOP_N = 60                      # 只對「最可能進排名」的前 N 幣補幣安，不打全市場
 
 
@@ -10322,17 +10331,22 @@ if __name__ == "__main__":
 
     print("=" * 70)
     print(f" 賽克斯全功能智慧交易中樞核心引擎系統啟動中... ")
-    # ★2026-09-01 一次性連通性檢查:memory 記載「幣安 fapi 在 Railway 雲端IP被地理封鎖」,
-    #   但那是舊紀錄。回測的合約CVD是用**幣安 taker** 推的,live 目前用 OKX rubik 代替,
-    #   實測兩者12h窗方向一致率只有 79%(約1/5時候相反) → 若幣安其實可用,應改回幣安以對齊回測。
-    try:
-        _bt = requests.get("https://fapi.binance.com/fapi/v1/klines",
-                           params={"symbol": "BTCUSDT", "interval": "15m", "limit": 3}, timeout=8)
-        print(f"[連通性] 幣安 fapi klines → HTTP {_bt.status_code} "
-              f"{'✅可用(可改回幣安CVD對齊回測)' if _bt.status_code == 200 else '❌不可用(維持OKX)'} "
-              f"{_bt.text[:120] if _bt.status_code != 200 else ''}", flush=True)
-    except Exception as _be:
-        print(f"[連通性] 幣安 fapi ❌ {type(_be).__name__}: {str(_be)[:120]} → 維持OKX", flush=True)
+    # ★★2026-09-24 這個檢查原本打 fapi.binance.com 永遠 451,結論被寫成「幣安封到底」。
+    #   實測(/d/<token>/egress 探針)發現封鎖是**按網域**的:fapi/api 被封,**www.binance.com 通**,
+    #   同一份 /fapi/v1/* 路徑照回真實資料。所以這裡改打 _BN_HOSTS[0](=www)。
+    #   回測的合約CVD是用**幣安 taker** 推的,live 用 OKX rubik 代替,
+    #   實測兩者12h窗方向一致率只有 79%(約1/5時候相反) → 幣安既然可用,CVD 源應回頭對齊(待驗)。
+    for _bh in _BN_HOSTS[:3]:
+        try:
+            _bt = requests.get(_bh + "/fapi/v1/klines",
+                               params={"symbol": "BTCUSDT", "interval": "15m", "limit": 3}, timeout=8)
+            print(f"[連通性] 幣安 {_bh} klines → HTTP {_bt.status_code} "
+                  f"{'✅可用' if _bt.status_code == 200 else '❌'} "
+                  f"{_bt.text[:100] if _bt.status_code != 200 else ''}", flush=True)
+            if _bt.status_code == 200:
+                break
+        except Exception as _be:
+            print(f"[連通性] 幣安 {_bh} ❌ {type(_be).__name__}: {str(_be)[:100]}", flush=True)
     print(f" 實盤模式狀態: {'🟢 LIVE 實盤委託對接中' if _LIVE_MODE else '🟡 PAPER 模擬記帳觀察中'}")
     print(f" OKX 環境配置: {'⚠️ 模擬盤 (Sandbox)' if OKX_DEMO else '⚡ 正式實盤節點'}")
     print("=" * 70)
