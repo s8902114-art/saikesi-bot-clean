@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925j"
+VER = "20260925k"
 
 
 def _clean(v):
@@ -475,8 +475,24 @@ def _market(G, win_h=1.0, top_n=300):
                 quad24 = "空頭平倉"
             elif _m == "多頭出場":
                 quad24 = "多頭平倉"
+            # ★同一套公式、只換 `chg` 的時間尺度，兩個都給（回測實測兩者性質不同）：
+            #   `sc`   用真 1H —— 反應快，但相鄰小時翻轉 49.7%（≈丟銅板），方向性較弱
+            #   `sc24` 用 24H  —— 遲鈍，但翻轉只有 37.8%、往後 24H 的多−空價差好 5 倍
+            #   （n=308,069／59 幣／2026 全年，分季 A 49.5%~50.3%、B 37.6%~38.0% 穩定；
+            #     24H 前瞻價差 A +0.027 vs B +0.138，B 在 3/4 季較佳。腳本 _an_score_horizon.py）
+            #   ★官方其實是混的：CoinGlass 有的幣用 1H、沒有的退回 24H，實測他們 281 支裡
+            #     **223 支走 24H fallback** —— 所以他們整頁偏空主要是這個，不是判斷比較準。
+            #   ★兩者量級都很小（最好的 +0.138% vs 往返成本 0.1%）→ 這是掃描器不是訊號源。
+            sc24 = _score(
+                oi1 * 100 if oi1 is not None else None,
+                (c24 * 100) if c24 is not None else 0.0,
+                (c24 * 100) if c24 is not None else None,
+                btc24, ex.get("cvd_ratio"), ex.get("funding_pct"), ex.get("fr_base"),
+                ex.get("long_pct"), None,
+                (_stv.get("struct") or 0, _stv.get("struct_label") or ""),
+            )
             rows.append({
-                "sc": sc, "oi1": oi1, "px1": px1,
+                "sc": sc, "sc24": sc24, "oi1": oi1, "px1": px1,
                 "fr": ex.get("funding_pct"), "lp": ex.get("long_pct"),
                 "cvd": ex.get("cvd_ratio"),
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
@@ -1197,8 +1213,13 @@ function scoreHTML(r){
     : `<span class="sp"><i>${k}</i><b class="${v>0?'up':(v<0?'down':'dim')}">${v>0?'+':''}${v}</b>${extra}</span>`;
   // 數據訊號（15m 進場觸發）跟象限（1H/24H 狀態）本來就會不同號 —— 講清楚比藏起來好
   const sig = (D.dhx||[]).find(x=>x.inst===r.inst);
-  return `<div class="cr"><span>順籌碼分數</span>`
+  const s2 = r.sc24 || {};
+  const cl2 = (s2.total>=20?'up':(s2.total<=-20?'down':'dim'));
+  return `<div class="cr"><span>順籌碼分數 <small class="dim">1H</small></span>`
        + `<b class="${cl}" style="font-size:20px">${s.total>0?'+':''}${s.total}</b></div>`
+       + (s2.total!==undefined
+          ? `<div class="cr"><span>同公式・24H 尺度 <small class="dim">${s2.mkt_label||''}</small></span>`
+            + `<b class="${cl2}">${s2.total>0?'+':''}${s2.total}</b></div>` : '')
        + `<div class="sps">`
        + part('市場結構', s.mkt, s.mkt_label?`<i class="dim">${s.mkt_label}</i>`:'')
        + part('結構', s.struct, s.struct_label?`<i class="dim">${s.struct_label}</i>`:'')
@@ -1207,6 +1228,12 @@ function scoreHTML(r){
        + part('動能1H', s.mom1) + part('動能24H', s.mom24) + part('多空比', s.ls)
        + `<span class="sp"><i>爆倉</i><b class="dim">無資料</b></span>`
        + `</div>`
+       + `<div class="sub">兩個分數是<b>同一套官方公式</b>，只差 <code>chg</code> 用 1H 還是 24H。`
+       + `回測 n=308,069（59 幣/2026 全年）：<b>1H 版相鄰小時翻轉 49.7%</b>（≈丟銅板）、`
+       + `24H 版 37.8%；往後 24H 的多−空價差 1H 版 +0.027% vs 24H 版 +0.138%（3/4 季 24H 版較佳）。`
+       + `<b>反應快的代價就是雜訊多、方向性弱。</b>`
+       + `★兩者量級都遠小於往返成本 0.1% —— 這是<b>掃描器不是進場訊號</b>。`
+       + `（官方 281 支裡有 223 支其實走 24H fallback，所以他們整頁偏空。）</div>`
        + (s.crash? '<div class="sub" style="color:var(--warn)">◆ 24H 跌逾 20%：官方會把偏多結構歸零'
            + '並強制壓到偏空（接刀／插針的假性買盤容易被誤判成「主動做多」）。</div>' : '')
        + (sig? `<div class="sub" style="margin:6px 0">◆ 數據訊號此刻是「<b>${(KIND[sig.kind]||[sig.kind])[0]}`
@@ -1556,7 +1583,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925j';
+const PAGE_VER = '20260925k';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
