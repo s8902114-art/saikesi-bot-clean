@@ -761,6 +761,10 @@ def register(app, G):
             ("Bitget 批量tickers", "https://api.bitget.com/api/v2/mix/market/tickers"
                                    "?productType=usdt-futures"),
             ("Gate 批量contracts", "https://api.gateio.ws/api/v4/futures/usdt/contracts"),
+            # Bybit 的 api.bybit.com 在 Railway 被 CloudFront 403。幣安的教訓是
+            # **封鎖按網域**（fapi 擋、www 通），所以 Bybit 的備援網域也要各試一次。
+            ("Bybit bytick",     "https://api.bytick.com/v5/market/tickers?category=linear"),
+            ("Bybit .nl",        "https://api.bybit.nl/v5/market/tickers?category=linear"),
         ]
         out = []
         for name, url in cands:
