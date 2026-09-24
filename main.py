@@ -8802,12 +8802,16 @@ def _dhx_scan(force: bool = False) -> None:
         return
     _DHX_STATE["ts"] = time.time()
     try:
-        cand = []
-        for inst, h in _oi_history.items():
-            if len(h) >= 2 and h[0][1] > 0:
-                cand.append((abs(h[-1][1] - h[0][1]) / h[0][1], inst))
-        cand.sort(reverse=True)
-        picks = [c[1] for c in cand[:DHX_SCAN_BATCH]]
+        # ★選幣層照官方：`source: "volume_top100"`（63/63 筆全部都是）＝**24h 成交額前 100**。
+        #   原本用「|OI 變化| 最大」是我自己選的，不是他們的做法。
+        #   前 100 每輪只掃得動 DHX_SCAN_BATCH 個（CVD 要逐幣打），所以用游標輪替掃完。
+        pool = sorted(((v.get("volccy_usd") or 0), k) for k, v in (_TICKER_SNAP or {}).items())
+        pool = [k for _, k in pool[::-1][:100]]
+        if not pool:
+            return
+        _i = int(_DHX_STATE.get("i", 0)) % len(pool)
+        picks = [pool[(_i + d) % len(pool)] for d in range(DHX_SCAN_BATCH)]
+        _DHX_STATE["i"] = (_i + DHX_SCAN_BATCH) % len(pool)
         found = {}
         for inst in picks:
             try:
@@ -8832,7 +8836,8 @@ def _dhx_scan(force: bool = False) -> None:
                     sv = None
                 _ts = [int(x.timestamp()) for x in df.index]
                 r = (_dhx_trap(inst, hi, lo, cl, n, cv, sv, _ts)
-                     or _dhx_absorb(inst, hi, lo, cl, n, cv, sv, _ts))
+                     or _dhx_absorb(inst, hi, lo, cl, n, cv, sv, _ts)
+                     or _dhx_exhaust(inst, hi, lo, cl, n, cv, sv, _ts))
                 if r:
                     found[inst] = r
             except Exception:
@@ -8986,6 +8991,65 @@ def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     return None
 
 
+def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
+    """衰竭背離（exhaustion）—— **多空各一邊**。
+
+    ★官方 `cvd_signal` 原話（2026-09-24 從他們 API 直接抓到）：
+        做多「底衰竭：賣方**砸破前低**但 CVD **未創新低**，空方力竭」
+        做空「頂衰竭：買方**突破前高**但 CVD **未創新高**，多方力竭」
+    ★與吸收的差別只有一個：**價格有沒有破前低／前高**
+        吸收＝沒破（低點抬高）＋ CVD 創新低
+        衰竭＝**破了** ＋ CVD **沒有**創新低
+      我第一版把「價創新低但 CVD 沒跟著低」命名成 ABSORPTION —— 那其實就是**衰竭**，名字錯置。
+    """
+    if cv is None:
+        return None
+    for side in ("long", "short"):
+        want_low = (side == "long")
+        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=50, conf=3, skip=12)
+        if p1 is None:
+            continue
+        p2 = None
+        for k in range(n - 4, p1 + 3, -1):
+            if want_low:
+                # ★破前低（與吸收相反）
+                if lo[k] < lo[p1] and all(lo[j] > lo[k] for j in range(k - 2, k + 3) if j != k):
+                    p2 = k; break
+            else:
+                if hi[k] > hi[p1] and all(hi[j] < hi[k] for j in range(k - 2, k + 3) if j != k):
+                    p2 = k; break
+        if p2 is None or len(cv) <= p2:
+            continue
+        c1, c2 = float(cv[p1]), float(cv[p2])
+        if want_low and not (c2 > c1):
+            continue                     # 做多要：CVD **未創新低**（空方力竭）
+        if (not want_low) and not (c2 < c1):
+            continue                     # 做空要：CVD **未創新高**（多方力竭）
+        # 確認：p2 之後有一根往回收
+        back = None
+        for k in range(p2 + 1, n):
+            if want_low and cl[k] > cl[p2] and cl[k] > (hi[k] + lo[k]) / 2:
+                back = k; break
+            if (not want_low) and cl[k] < cl[p2] and cl[k] < (hi[k] + lo[k]) / 2:
+                back = k; break
+        if back is None or (n - 1 - back) > 4:
+            continue
+        oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
+        sl = float(lo[p2]) if want_low else float(hi[p2])
+        ex = _dhx_cvd(cv, sv, p1, p2)
+        ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
+        ex["sl_source"] = "i2_full_wick_" + ("low" if want_low else "high")
+        ex["entry_source"] = "confirm_close"
+        ex["pivot1_price"] = float(lo[p1] if want_low else hi[p1])
+        ex["pivot2_price"] = sl
+        r = _dhx_pack(inst, "EXHAUSTION", "LONG" if want_low else "SHORT",
+                      p1, p2, back, cl, sl, n, ex)
+        if r:
+            r["sl_source"] = ex["sl_source"]
+            return r
+    return None
+
+
 def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     """吸收背離（absorption）—— **多空各一邊**。
 
@@ -9001,7 +9065,7 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         return None
     for side in ("long", "short"):
         want_low = (side == "long")
-        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=80, conf=3, skip=14)
+        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=50, conf=3, skip=14)
         if p1 is None:
             continue
         p2 = None
@@ -9020,9 +9084,9 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
             continue                     # 做多要：CVD 樞紐低點**降低**（賣方砸盤）
         if (not want_low) and not (c2 > c1):
             continue                     # 做空鏡像：CVD 樞紐高點升高
+        # ★OI 只記錄、**不過濾**：官方吸收/衰竭的 oi_pivot1→oi_pivot2 中位是
+        #   185.1M → 184.7M（**略降**），OI 上升是 TRAP 才有的條件。
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
-        if oi_d is not None and oi_d <= 0:
-            continue                     # OI 上升
         sl = float(lo[p2]) if want_low else float(hi[p2])   # ★停損＝pivot2 價格
         ex = _dhx_cvd(cv, sv, p1, p2)
         ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
