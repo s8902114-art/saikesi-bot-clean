@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924y"
+VER = "20260924z"
 
 
 def _clean(v):
@@ -439,6 +439,62 @@ def register(app, G):
         # ★CORS:讓前端可以住在 Railway 以外(claude.ai Artifact / 本機 html),
         #   改版面就不必再推 bot、不必讓 bot 重啟(重啟代價=OI歷史歸零+持倉重新接管)。
         #   安全性不靠來源網域,靠路徑裡的 token —— 沒 token 根本進不到這裡。
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r
+
+    @app.route("/d/<tok>/egress")
+    def _dash_egress(tok):
+        """★出口連通性探針：從 Railway 的出口 IP 打一輪候選網域，回狀態碼。
+
+        為什麼要這支：幣安對雲端出口 IP 回 451，但**不同網域走不同邊緣節點**
+        （fapi.binance.com 被封 ≠ www.binance.com 被封）。要找出還通的那條路，
+        就得反覆試不同端點 —— 每試一個就推一次 bot 太慢（一次部署 1~2 分鐘，
+        而且重啟代價是 OI 歷史歸零＋持倉重新接管）。掛成端點就能隨時重打。
+
+        ★安全：候選清單**寫死在程式裡**，不吃任何 request 參數的網址 →
+          它不會變成開放代理。也不轉發任何 header（全是公開端點，不需要金鑰）。
+        """
+        if not _token_ok(tok):
+            return "", 404
+        import urllib.request
+        import urllib.error
+        cands = [
+            ("fapi 主網域",      "https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"),
+            ("fapi1 備援",       "https://fapi1.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"),
+            ("www 前置 fapi",    "https://www.binance.com/fapi/v1/openInterest?symbol=BTCUSDT"),
+            ("www 前置 OI歷史",  "https://www.binance.com/futures/data/openInterestHist"
+                                 "?symbol=BTCUSDT&period=5m&limit=3"),
+            ("data-api.vision",  "https://data-api.binance.vision/api/v3/ticker/price?symbol=BTCUSDT"),
+            ("data-api fapi",    "https://data-api.binance.vision/fapi/v1/openInterest?symbol=BTCUSDT"),
+            ("api 現貨主網域",   "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+            ("data.vision 檔案", "https://data.binance.vision/?delimiter=/&prefix=data/futures/um/daily/"),
+            ("Bybit OI",         "https://api.bybit.com/v5/market/open-interest"
+                                 "?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=3"),
+            ("Bitget OI",        "https://api.bitget.com/api/v2/mix/market/open-interest"
+                                 "?symbol=BTCUSDT&productType=usdt-futures"),
+        ]
+        out = []
+        for name, url in cands:
+            row = {"name": name, "host": url.split("/")[2]}
+            try:
+                req = urllib.request.Request(
+                    url, headers={"User-Agent": "Mozilla/5.0", "accept": "application/json"})
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    row["code"] = resp.status
+                    row["body"] = resp.read(160).decode("utf-8", "replace")[:160]
+            except urllib.error.HTTPError as e:
+                row["code"] = e.code
+                try:
+                    row["body"] = e.read(160).decode("utf-8", "replace")[:160]
+                except Exception:
+                    row["body"] = ""
+            except Exception as e:
+                row["code"] = None
+                row["body"] = f"{type(e).__name__}: {e}"[:160]
+            out.append(row)
+        r = jsonify({"ver": VER, "probe": out})
+        r.headers["X-Robots-Tag"] = "noindex, nofollow"
+        r.headers["Cache-Control"] = "no-store"
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r
 
@@ -1074,7 +1130,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924y';
+const PAGE_VER = '20260924z';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
