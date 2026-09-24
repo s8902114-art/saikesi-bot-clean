@@ -9429,6 +9429,31 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     return None
 
 
+def _dash_sampler_loop() -> None:
+    """★★取樣自己一條執行緒，不再搭交易主迴圈的便車（2026-09-24 用戶問「1H 為什麼沒資料」查出來的）。
+
+    原本 `_oi_sample_tick()` 是在 `main_polling_loop` 裡呼叫的，而那個迴圈開頭是
+    `synchronise_and_wait_next_candle()` —— 它會**卡住等下一根 15 分 K 收盤**。
+    所以 `DASH_SAMPLE_SEC=300` 根本沒生效，**實際取樣間隔是 15 分鐘**。
+    而內插容差 `max(DASH_SAMPLE_SEC*4, 1800)` = 30 分鐘 = **只有兩個間隔的餘裕**：
+    redeploy 時錯過一兩次取樣就破表 → 歷史開洞 → 起點落在洞裡的那個窗整個算不出來。
+    實測（連推九次之後）洞在 **49~79 分鐘前**，正好吃掉 1H 窗（官方排名與評分用的就是它）。
+
+    ★落地（`_dash_hist_save`）救得了「已經取到的點」，救不了「根本沒去取」的那幾次 ——
+      這是我先前說「資料會記著所以不怕重推」漏掉的那一半。
+    ★改成獨立執行緒後：間隔真的是 `DASH_SAMPLE_SEC`(5 分鐘)，而且**不再受交易迴圈阻塞**，
+      重啟只會損失開機那一小段（約 1~2 分鐘），遠小於 30 分鐘容差。
+    """
+    while True:
+        try:
+            time.sleep(DASH_SAMPLE_SEC)
+            # 自己就是節拍器，不必再靠 DASH_SAMPLE_SEC 節流
+            _oi_sample_tick(force=True)
+        except Exception as e:
+            print(f"[DASH] 取樣執行緒例外(不影響交易): {e}", flush=True)
+            time.sleep(30)
+
+
 _WHALE: Dict[str, dict] = {}     # 巨鯨雷達：inst -> 資金注入候選事件
 WHALE_OBS_SEC = 900              # ★官方原話：「觀察 **15 分鐘** 後…判斷方向」
 WHALE_VALID_H = 6                # 事件留多久（官方沒公布，這是我設的）
@@ -9662,7 +9687,10 @@ def _oi_sample_tick(force: bool = False) -> bool:
     """★儀表板的 OI／價格取樣（**_oi_history / _TICKER_SNAP / _PX_HISTORY 的唯一寫入點**）。
     兩支公開端點，各一次涵蓋全市場約 400 個合約：
       public/open-interest → _oi_history        market/tickers → _TICKER_SNAP + _PX_HISTORY
-    15 分鐘一次 = 96 次/天，跟現役 K 線查詢比可忽略。失敗一律吞掉，不影響交易。"""
+    5 分鐘一次 = 288 次/天，跟現役 K 線查詢比可忽略。失敗一律吞掉，不影響交易。
+    ★節拍器是 `_dash_sampler_loop`（獨立執行緒），而且**只有它一個呼叫者**
+      （啟動那次是一次性的，且在起執行緒之前就跑完）——這裡是三個歷史 dict 的
+      唯一寫入點，不可以有兩個節拍器同時進來寫出重複時間戳。"""
     global _TICKER_SNAP
     if not force and time.time() - _DASH_SAMPLE["ts"] < DASH_SAMPLE_SEC:
         return False
@@ -9764,7 +9792,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
     _DASH_SAMPLE["i"] = int(_DASH_SAMPLE.get("i", 0)) + 1
     if force or _DASH_SAMPLE["i"] % DASH_SAVE_EVERY == 0:
-        _dash_hist_save()      # 每 15 分鐘落地一次,redeploy 不歸零
+        _dash_hist_save()      # 每輪落地,redeploy 只損失開機那一小段
     return True
 
 
@@ -10634,6 +10662,7 @@ def main_polling_loop():
         _dash_hist_load()      # ★先讀回存檔,再取樣 → redeploy 後 1H/12H 窗接得上,不用重等
         _oi_sample_tick(force=True)
         print(f"[DASH] 啟動取樣完成:報價 {len(_TICKER_SNAP)} 幣 / OI 追蹤 {len(_oi_history)} 幣", flush=True)
+        Thread(target=_dash_sampler_loop, daemon=True).start()
     except Exception as _ise:
         print(f"[DASH] 啟動取樣失敗(不影響交易): {_ise}", flush=True)
 
@@ -10692,10 +10721,9 @@ def main_polling_loop():
             # ★2026-09-24 儀表板:OI/價格取樣拉到 15 分鐘一次(原本綁在 1H 的 movers 刷新裡)。
             #   數據獵手的 OI 異動排名看的是 **1H 變化**,取樣 1H 一點的話 1H 窗只有兩點=沒有解析度。
             #   成本:open-interest + tickers 各一支(每支一次涵蓋全市場約400合約),96次/天,可忽略。
-            try:
-                _oi_sample_tick()
-            except Exception as _ose:
-                print(f"[DASH] OI 取樣失敗(不影響交易): {_ose}", flush=True)
+            # ★2026-09-24 取樣已搬到 `_dash_sampler_loop` 獨立執行緒。
+            #   留在這裡的話節拍會被 `synchronise_and_wait_next_candle` 綁成 15 分鐘
+            #   （那正是 1H 窗開洞的原因，說明見該函數的 docstring）。這裡不再呼叫。
 
             # ★★2026-08-27 致命縮排bug修復:原本 `for symbol_item` 迴圈**沒有包在 `for tf` 裡面**
             #   (兩個 for 同一層縮排),導致 `for tf` 只印字,真正的掃描只跑**一次**、且用最後一個 tf。
