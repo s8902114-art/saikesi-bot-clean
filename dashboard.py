@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925g"
+VER = "20260925h"
 
 
 def _clean(v):
@@ -59,6 +59,29 @@ def put(symbol, tf, **kv):
             row = d.setdefault(str(tf), {})
             row.update({str(k): _clean(v) for k, v in kv.items()})
             row["ts"] = time.time()
+    except Exception:
+        pass
+
+
+def snapshot():
+    """把掃描快照倒出來給 main.py 落地（redeploy 後「幣種」那頁才不會整個空白）。永不拋例外。"""
+    try:
+        with _LOCK:
+            return {s: {tf: dict(r) for tf, r in d.items()} for s, d in _DASH.items()}
+    except Exception:
+        return {}
+
+
+def restore(data):
+    """讀回掃描快照。舊版存檔沒有這個鍵 → 傳進來是 None，直接忽略。永不拋例外。"""
+    try:
+        if not isinstance(data, dict):
+            return
+        with _LOCK:
+            for sym, tfs in data.items():
+                if isinstance(tfs, dict):
+                    _DASH.setdefault(str(sym), {}).update(
+                        {str(tf): dict(r) for tf, r in tfs.items() if isinstance(r, dict)})
     except Exception:
         pass
 
@@ -1416,15 +1439,34 @@ function viewOI(){
     + '<div class="card"><h2>OI 降幅</h2>' + tbl('oid', o.down) + '</div>';
 }
 
+// ★搜尋框的狀態存在變數裡，不要每次從 DOM 讀 —— 因為 draw() 會把輸入框整個重建。
+//   原本寫 `oninput="draw();...focus()"`：重建後 focus() 讓**游標回到位置 0**，
+//   下一個字就插在最前面 → 打「BTC」變成「CTB」，看起來像由右到左，過濾當然也對不上
+//   （用戶 2026-09-24 回報「沒辦法搜尋 而且打字會變成由右到左」）。
+let CQ = '';
+function coinSearch(el){
+  CQ = el.value;
+  const pos = el.selectionStart;      // 記住游標，重繪後放回原處
+  draw();
+  const n = document.getElementById('cq');
+  if(n){ n.focus(); try{ n.setSelectionRange(pos, pos); }catch(e){} }
+}
+
 function viewCoins(){
   const rows=[];
   for(const [sym,tfs] of Object.entries(D.coins))
     for(const [tf,r] of Object.entries(tfs)) rows.push({sym,tf,...r});
-  const q=(document.getElementById('cq')||{}).value||'';
+  const q = CQ;
   const flt = q ? rows.filter(r=>r.sym.toLowerCase().includes(q.toLowerCase())) : rows;
-  return '<div class="card"><h2>掃描快照</h2>'
-    + `<input class="f" id="cq" placeholder="篩選幣種…" value="${q}" oninput="draw();document.getElementById('cq').focus()">`
-    + table('coins', ['幣','時框','價格','ATR%','ADX','通道','趨勢','更新'], flt, r=>[
+  if(!rows.length)
+    return '<div class="card"><h2>掃描快照</h2>'
+      + '<div class="empty">還沒有資料：這一頁是<b>掃描迴圈</b>每根 K 收盤時順手記下來的，'
+      + '重新部署後要等下一根 <b>15m 收盤</b>才會出現（最多 15 分鐘）。</div></div>';
+  return '<div class="card">'
+    + `<h2>掃描快照<span>${rows.length} 列`
+    + (q ? `・篩出 ${flt.length}` : '') + '</span></h2>'
+    + `<input class="f" id="cq" placeholder="篩選幣種…" value="${q}" oninput="coinSearch(this)">`
+    + (flt.length ? table('coins', ['幣','時框','價格','ATR%','ADX','通道','趨勢','更新'], flt, r=>[
         {v:r.sym, h:`<a class="cl" onclick="openCard('${r.sym.replace('/USDT','')}-USDT-SWAP')">`
                   + r.sym.replace('/USDT','') + '</a>'},
         r.tf, pf(r.px),
@@ -1434,7 +1476,7 @@ function viewCoins(){
         {v:r.trend||'', h:r.trend==='bear'?'空':(r.trend==='bull'?'多':'—'),
          c:r.trend==='bear'?'down':(r.trend==='bull'?'up':'dim')},
         ago(r.ts),
-      ]) + '</div>';
+      ]) : `<div class="empty">沒有符合「${q}」的幣。</div>`) + '</div>';
 }
 
 function viewDiag(){
@@ -1472,7 +1514,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925g';
+const PAGE_VER = '20260925h';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
@@ -1483,7 +1525,10 @@ async function tick(){
         let done=false; try{ done = sessionStorage.getItem('rl')===D.ver; }catch(e){}
         if(!done){ try{ sessionStorage.setItem('rl', D.ver); }catch(e){} location.reload(); return; }
       }
-      draw();
+      // ★正在搜尋框打字時不要重繪：20 秒的自動刷新會把輸入框重建、游標歸零，
+      //   症狀跟上面那個「由右到左」一模一樣，只是隔 20 秒才發作一次（更難查）。
+      const ae = document.activeElement;
+      if(!(ae && ae.id === 'cq')) draw();
     }
   }catch(e){}
 }

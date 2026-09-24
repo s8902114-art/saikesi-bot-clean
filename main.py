@@ -8660,9 +8660,13 @@ def _dash_hist_save() -> None:
         #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
         #   幣安那一腳都要重等一小時，OI 變化% 會在「OKX 單腳」與「雙所平均」之間跳。
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"v": 2, "ts": int(time.time()),
+            json.dump({"v": 3, "ts": int(time.time()),
                        "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY),
-                       "bn": _pack(_BN_HISTORY)},
+                       "bn": _pack(_BN_HISTORY),
+                       # ★掃描快照也存：它是掃描迴圈每根 K 收盤順手記的，純記憶體 →
+                       #   redeploy 後「幣種」那頁整個空白、要等下一根 15m 收盤才有東西
+                       #   （用戶 2026-09-24 回報「空的」）。每列都有 ts，讀回來會照實顯示幾分鐘前。
+                       "scan": dashboard.snapshot()},
                       f, separators=(",", ":"))
         os.replace(tmp, _DASH_HIST_FILE)      # 原子替換,避免寫到一半被重啟砍成半截檔
     except Exception as e:
@@ -8689,6 +8693,7 @@ def _dash_hist_load() -> None:
         _oi_history.update(_unpack(d.get("oi")))
         _PX_HISTORY = _unpack(d.get("px"))
         _BN_HISTORY.update(_unpack(d.get("bn")))   # v1 舊檔沒這個鍵 → 空 dict，相容
+        dashboard.restore(d.get("scan"))           # v2 以前沒有 scan → restore 自己會忽略
         _depth = 0
         for _k, _h in _oi_history.items():
             if _h:
