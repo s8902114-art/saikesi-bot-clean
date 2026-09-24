@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925k"
+VER = "20260925m"
 
 
 def _clean(v):
@@ -1209,23 +1209,29 @@ function closeCard(){ CARD = null; draw(); }
 function scoreHTML(r){
   const s = r.sc; if(!s) return '';
   const cl = s.total>=20?'up':(s.total<=-20?'down':'dim');
+  const sm = (s2.total!==undefined) ? s2 : s;      // 拆解跟著主顯示（24H）走
   const part = (k,v,extra='') => v===0&&!extra ? ''
     : `<span class="sp"><i>${k}</i><b class="${v>0?'up':(v<0?'down':'dim')}">${v>0?'+':''}${v}</b>${extra}</span>`;
   // 數據訊號（15m 進場觸發）跟象限（1H/24H 狀態）本來就會不同號 —— 講清楚比藏起來好
   const sig = (D.dhx||[]).find(x=>x.inst===r.inst);
+  // ★主顯示改用 24H 尺度：回測說它翻轉率 37.8% vs 1H 版 49.7%（≈丟銅板）、
+  //   往後 24H 的多−空價差好 5 倍（+0.138% vs +0.027%，3/4 季較佳），
+  //   而且跟官方對得上（同時刻：24H 版為正 15%/中位 −21，官方 19%/−18；
+  //   1H 版為正 67%/中位 +5 = 用戶說的「一堆主力建多」）。1H 版留著當「快但吵」的參考。
   const s2 = r.sc24 || {};
   const cl2 = (s2.total>=20?'up':(s2.total<=-20?'down':'dim'));
-  return `<div class="cr"><span>順籌碼分數 <small class="dim">1H</small></span>`
-       + `<b class="${cl}" style="font-size:20px">${s.total>0?'+':''}${s.total}</b></div>`
-       + (s2.total!==undefined
-          ? `<div class="cr"><span>同公式・24H 尺度 <small class="dim">${s2.mkt_label||''}</small></span>`
-            + `<b class="${cl2}">${s2.total>0?'+':''}${s2.total}</b></div>` : '')
+  return (s2.total!==undefined
+          ? `<div class="cr"><span>順籌碼分數 <small class="dim">24H・與官方同尺度</small></span>`
+            + `<b class="${cl2}" style="font-size:20px">${s2.total>0?'+':''}${s2.total}</b></div>`
+          : '')
+       + `<div class="cr"><span>同公式・1H 尺度 <small class="dim">快但翻轉率 50%</small></span>`
+       + `<b class="${cl}">${s.total>0?'+':''}${s.total}</b></div>`
        + `<div class="sps">`
-       + part('市場結構', s.mkt, s.mkt_label?`<i class="dim">${s.mkt_label}</i>`:'')
-       + part('結構', s.struct, s.struct_label?`<i class="dim">${s.struct_label}</i>`:'')
-       + part('BTC相對', s.rel, s.rel_chg?`<i class="dim">${f(s.rel_chg,1)}%</i>`:'')
-       + part('資費', s.fr, s.fr_label&&s.fr_label!=='正常'?`<i class="dim">${s.fr_label}</i>`:'')
-       + part('動能1H', s.mom1) + part('動能24H', s.mom24) + part('多空比', s.ls)
+       + part('市場結構', sm.mkt, sm.mkt_label?`<i class="dim">${sm.mkt_label}</i>`:'')
+       + part('結構', sm.struct, sm.struct_label?`<i class="dim">${sm.struct_label}</i>`:'')
+       + part('BTC相對', sm.rel, sm.rel_chg?`<i class="dim">${f(sm.rel_chg,1)}%</i>`:'')
+       + part('資費', sm.fr, sm.fr_label&&sm.fr_label!=='正常'?`<i class="dim">${sm.fr_label}</i>`:'')
+       + part('動能1H', sm.mom1) + part('動能24H', sm.mom24) + part('多空比', sm.ls)
        + `<span class="sp"><i>爆倉</i><b class="dim">無資料</b></span>`
        + `</div>`
        + `<div class="sub">兩個分數是<b>同一套官方公式</b>，只差 <code>chg</code> 用 1H 還是 24H。`
@@ -1234,7 +1240,7 @@ function scoreHTML(r){
        + `<b>反應快的代價就是雜訊多、方向性弱。</b>`
        + `★兩者量級都遠小於往返成本 0.1% —— 這是<b>掃描器不是進場訊號</b>。`
        + `（官方 281 支裡有 223 支其實走 24H fallback，所以他們整頁偏空。）</div>`
-       + (s.crash? '<div class="sub" style="color:var(--warn)">◆ 24H 跌逾 20%：官方會把偏多結構歸零'
+       + (sm.crash? '<div class="sub" style="color:var(--warn)">◆ 24H 跌逾 20%：官方會把偏多結構歸零'
            + '並強制壓到偏空（接刀／插針的假性買盤容易被誤判成「主動做多」）。</div>' : '')
        + (sig? `<div class="sub" style="margin:6px 0">◆ 數據訊號此刻是「<b>${(KIND[sig.kind]||[sig.kind])[0]}`
            + `${sig.bias==='LONG'?' 做多':' 做空'}</b>」，跟上面的象限不同號是正常的：`
@@ -1456,7 +1462,7 @@ function viewRank(){
           + `<b style="color:${QCLR[q]}">${q}</b>`
           + `<span class="dim" style="margin-left:8px">${meta[0]}</span></td></tr>`;
     g.forEach((r,i)=>{
-      const s = r.sc || {};
+      const s = r.sc24 || r.sc || {};   // 排名上的小分數也用主尺度（24H）
       body += '<tr>'
         + `<td class="dim">${i+1}</td>`
         + `<td><a class="cl" onclick="openCard('${r.inst}')">`
@@ -1583,7 +1589,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925k';
+const PAGE_VER = '20260925m';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

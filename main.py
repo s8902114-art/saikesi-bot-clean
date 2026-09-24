@@ -8661,9 +8661,15 @@ def _dash_hist_save() -> None:
         #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
         #   幣安那一腳都要重等一小時，OI 變化% 會在「OKX 單腳」與「雙所平均」之間跳。
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"v": 3, "ts": int(time.time()),
+            json.dump({"v": 4, "ts": int(time.time()),
                        "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY),
                        "bn": _pack(_BN_HISTORY),
+                       # ★CVD/資費/多空比也要落地：它們是逐幣抓的（幣安沒有批量端點），
+                       #   redeploy 後要一整輪才補得回來。而**沒有 CVD 的幣會掉進
+                       #   scoreBreakdown 的粗略分支**（只看 OI×價格），短線反彈時
+                       #   一堆幣被標成 `OI↑價↑ +12` → 分數整片偏多（用戶 2026-09-24
+                       #   回報「他們也不會一堆什麼主力建多啊」，當下實測 CVD 0/282）。
+                       "ex": {k: v for k, v in _BN_EXTRA.items()},
                        # ★掃描快照也存：它是掃描迴圈每根 K 收盤順手記的，純記憶體 →
                        #   redeploy 後「幣種」那頁整個空白、要等下一根 15m 收盤才有東西
                        #   （用戶 2026-09-24 回報「空的」）。每列都有 ts，讀回來會照實顯示幾分鐘前。
@@ -8695,12 +8701,18 @@ def _dash_hist_load() -> None:
         _PX_HISTORY = _unpack(d.get("px"))
         _BN_HISTORY.update(_unpack(d.get("bn")))   # v1 舊檔沒這個鍵 → 空 dict，相容
         dashboard.restore(d.get("scan"))           # v2 以前沒有 scan → restore 自己會忽略
+        try:                                       # v3 以前沒有 ex → 讀不到就算了
+            for _k, _v in (d.get("ex") or {}).items():
+                if isinstance(_v, dict):
+                    _BN_EXTRA[_k] = dict(_v)
+        except Exception:
+            pass
         _depth = 0
         for _k, _h in _oi_history.items():
             if _h:
                 _depth = max(_depth, int((time.time() - _h[0][0]) / 60))
         print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣 / "
-              f"幣安OI {len(_BN_HISTORY)} 幣,"
+              f"幣安OI {len(_BN_HISTORY)} 幣 / 補值 {len(_BN_EXTRA)} 幣,"
               f"最深 {_depth} 分鐘(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
     except Exception as e:
         print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
