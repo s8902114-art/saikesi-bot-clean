@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925f"
+VER = "20260925g"
 
 
 def _clean(v):
@@ -759,13 +759,20 @@ _HTML = """<!doctype html>
            justify-content:space-between;align-items:baseline;gap:8px}
   .card h2 span{text-transform:none;letter-spacing:0;font-weight:400;font-size:11px}
   .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;margin:0 -12px;padding:0 12px}
-  table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;font-size:13px}
+  /* ★桌機上不要讓表格橫跨整個螢幕：欄位會被拉到兩端、要左右掃視才讀得完。
+     手機寬度本來就小於這個上限，完全不受影響。 */
+  table{border-collapse:collapse;width:100%;max-width:1040px;
+        font-variant-numeric:tabular-nums;font-size:13px}
+  /* 第二欄幾乎都是幣名，靠左才不會跟右邊的數字黏在一起 */
+  th:nth-child(2),td:nth-child(2){text-align:left}
   th,td{text-align:right;padding:6px 8px;white-space:nowrap;border-bottom:1px solid var(--line)}
   th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--card)}
   th{color:var(--dim);font-weight:500;font-size:11px;cursor:pointer;user-select:none}
   th:hover{color:var(--fg)}
   tbody tr:last-child td{border-bottom:none}
-  table.fx{table-layout:fixed}
+  /* 固定欄寬 + 限制總寬：桌機不要把六欄拉開到螢幕兩端，手機照常橫向捲動 */
+  table.fx{table-layout:fixed;max-width:560px}
+  table.fx th:nth-child(2),table.fx td:nth-child(2){text-align:left}
   table.fx td,table.fx th{overflow:hidden;text-overflow:ellipsis}
   tr.sec td{text-align:left;background:#0f141c;font-size:11px;padding:7px 8px;
             border-bottom:1px solid var(--line);position:sticky;left:0}
@@ -1340,7 +1347,10 @@ function viewMkt(){
 //   先前寫成四個象限各一張 <table>，欄寬各自算 → 四塊對不齊（用戶 2026-09-24：「很醜」）。
 //   順便用 colgroup 固定欄寬，數字欄才不會因為位數不同跳來跳去。
 const RANK_COLS = ['#','幣種','價格','OI變化','OI/市值','價24H'];
-const RANK_W    = ['36px','auto','96px','84px','80px','80px'];
+// ★欄寬全部寫死、不留 auto：留 auto 的那一欄會在寬螢幕上把剩餘寬度全吃掉，
+//   加上第二欄以後預設靠右，結果 # 在最左、其他擠在最右，中間一片空白
+//   （用戶 2026-09-24：「這是比目魚才能看嗎 隔那麼遠」）。
+const RANK_W    = ['34px','132px','104px','92px','88px','88px'];
 
 function viewRank(){
   const m=D.mkt, rows=m.rows||[];
@@ -1462,7 +1472,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925f';
+const PAGE_VER = '20260925g';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
