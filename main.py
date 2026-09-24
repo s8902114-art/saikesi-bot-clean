@@ -8722,7 +8722,10 @@ def _bn_get(path: str, params: dict, timeout: int = 8):
 _BN_HOSTS = ["https://www.binance.com", "https://fapi.binance.com",
              "https://fapi1.binance.com", "https://fapi2.binance.com",
              "https://fapi3.binance.com", "https://fapi4.binance.com"]
-DASH_BN_TOP_N = 60                      # 只對「最可能進排名」的前 N 幣補幣安，不打全市場
+DASH_BN_TOP_N = 120                     # 補幣安的幣數上限（一半取自 |OKX 變化| 榜、一半取自成交額榜）
+# ★120 而不是 60：移到背景執行緒之後不再佔用交易主迴圈，成本只剩幣安限流，
+#   而 120 幣／5 分鐘 = 24 權重/分，上限是 2400/分 —— 用掉 1%。
+#   實測 60 幣時 281 個合約只有 46 個拿得到雙所平均（其餘只有 OKX 單腳）。
 
 
 def _bn_oi_sample(now_s: float, keep_from: float) -> None:
@@ -8738,13 +8741,25 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
     if _BN_STATE["fail"] >= 3:
         return
     try:
-        # 挑要補的幣：優先 |OKX 1H 變化| 大的（最可能進排名），不足就用 OI 金額大的補滿
+        # 挑要補的幣：兩份名單取聯集，因為它們回答的是兩個不同的問題——
+        #   ①|OKX 變化| 大的 = 「這輪最可能出現在排名表上的」
+        #   ②24h 成交額大的 = 官方選幣層就是 `volume_top100`，要對齊就得把這群固定補上
+        # 只用①的話，成交量大但這一刻沒在動的幣永遠拿不到幣安腳，
+        # 於是同一個幣的 OI 變化% 會在「雙所平均」與「OKX 單腳」之間來回跳（定義不穩）。
         scored = []
         for inst, h in _oi_history.items():
             if len(h) >= 2 and h[0][1] > 0:
                 scored.append((abs(h[-1][1] - h[0][1]) / h[0][1], h[-1][1], inst))
         scored.sort(reverse=True)
-        picks = [x[2] for x in scored[:DASH_BN_TOP_N]]
+        by_move = [x[2] for x in scored[:DASH_BN_TOP_N // 2]]
+        by_vol = [k for _v, k in sorted(
+            (((v.get("volccy_usd") or 0), k) for k, v in _TICKER_SNAP.items()),
+            reverse=True)[:DASH_BN_TOP_N // 2]]
+        picks, _seen = [], set()
+        for inst in by_move + by_vol:
+            if inst in _oi_history and inst not in _seen:
+                _seen.add(inst)
+                picks.append(inst)
         ok = 0
         for inst in picks:
             sym = inst.replace("-USDT-SWAP", "") + "USDT"
