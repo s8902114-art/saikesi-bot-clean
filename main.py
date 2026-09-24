@@ -8661,7 +8661,7 @@ def _dash_hist_save() -> None:
         #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
         #   幣安那一腳都要重等一小時，OI 變化% 會在「OKX 單腳」與「雙所平均」之間跳。
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"v": 4, "ts": int(time.time()),
+            json.dump({"v": 5, "ts": int(time.time()),
                        "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY),
                        "bn": _pack(_BN_HISTORY),
                        # ★CVD/資費/多空比也要落地：它們是逐幣抓的（幣安沒有批量端點），
@@ -8670,6 +8670,10 @@ def _dash_hist_save() -> None:
                        #   一堆幣被標成 `OI↑價↑ +12` → 分數整片偏多（用戶 2026-09-24
                        #   回報「他們也不會一堆什麼主力建多啊」，當下實測 CVD 0/282）。
                        "ex": {k: v for k, v in _BN_EXTRA.items()},
+                       # ★跨所聚合 OI 與資費也要落地：它們是 3 支批量 + 281 支逐幣換來的，
+                       #   redeploy 後重新累積要等一小時才有 1H 窗。
+                       "agg": _pack(_AGG_HISTORY),
+                       "fr": {k: float(f"{v:.6g}") for k, v in _FR_AGG.items()},
                        # ★掃描快照也存：它是掃描迴圈每根 K 收盤順手記的，純記憶體 →
                        #   redeploy 後「幣種」那頁整個空白、要等下一根 15m 收盤才有東西
                        #   （用戶 2026-09-24 回報「空的」）。每列都有 ts，讀回來會照實顯示幾分鐘前。
@@ -8701,6 +8705,12 @@ def _dash_hist_load() -> None:
         _PX_HISTORY = _unpack(d.get("px"))
         _BN_HISTORY.update(_unpack(d.get("bn")))   # v1 舊檔沒這個鍵 → 空 dict，相容
         dashboard.restore(d.get("scan"))           # v2 以前沒有 scan → restore 自己會忽略
+        _AGG_HISTORY.update(_unpack(d.get("agg")))   # v4 以前沒有 → 空 dict，相容
+        try:
+            for _k, _v in (d.get("fr") or {}).items():
+                _FR_AGG[_k] = float(_v)
+        except Exception:
+            pass
         try:                                       # v3 以前沒有 ex → 讀不到就算了
             for _k, _v in (d.get("ex") or {}).items():
                 if isinstance(_v, dict):
@@ -8712,7 +8722,8 @@ def _dash_hist_load() -> None:
             if _h:
                 _depth = max(_depth, int((time.time() - _h[0][0]) / 60))
         print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣 / "
-              f"幣安OI {len(_BN_HISTORY)} 幣 / 補值 {len(_BN_EXTRA)} 幣,"
+              f"幣安OI {len(_BN_HISTORY)} 幣 / 補值 {len(_BN_EXTRA)} 幣 / "
+              f"聚合 {len(_AGG_HISTORY)} 幣,"
               f"最深 {_depth} 分鐘(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
     except Exception as e:
         print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
@@ -8792,45 +8803,11 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
             if inst in _oi_history and inst not in _seen:
                 _seen.add(inst)
                 picks.append(inst)
-        ok = 0
-        for inst in picks:
-            sym = inst.replace("-USDT-SWAP", "") + "USDT"
-            try:
-                r = _bn_get("/fapi/v1/openInterest", {"symbol": sym}, timeout=6)
-                if r is None:
-                    continue
-                if r.status_code == 451:
-                    # 換下一個備援網域再試；全部試完才算真的不通
-                    if _BN_STATE["host"] + 1 < len(_BN_HOSTS):
-                        _BN_STATE["host"] += 1
-                        print(f"[DASH] 幣安 451 → 改試備援網域 "
-                              f"{_BN_HOSTS[_BN_STATE['host']]}", flush=True)
-                        return
-                    _BN_STATE["fail"] += 1
-                    print(f"[DASH] 幣安 OI:{len(_BN_HOSTS)} 個網域全部被地理封鎖(451) → "
-                          f"停用，OI 變化只用 OKX（第 {_BN_STATE['fail']}/3 次）", flush=True)
-                    return
-                if r.status_code != 200:
-                    continue
-                v = float(r.json().get("openInterest", 0) or 0)
-                if v <= 0:
-                    continue
-                hh = _BN_HISTORY.setdefault(inst, [])
-                hh.append((now_s, v))
-                _BN_HISTORY[inst] = [(t, x) for (t, x) in hh if t >= keep_from] or [(now_s, v)]
-                ok += 1
-            except Exception:
-                continue
-            time.sleep(0.05)            # 節流：60 幣約 3 秒，不影響取樣週期
-        _BN_STATE["ok"] = ok > 0
-        _BN_STATE["n"] = ok
-        if ok == 0:
-            _BN_STATE["fail"] += 1
-        else:
-            _BN_STATE["fail"] = 0
-        for k in list(_BN_HISTORY.keys()):
-            if k not in _oi_history:
-                del _BN_HISTORY[k]
+        # ★原本這裡有一個「逐幣序列打 120 支 openInterest」的迴圈，已移除：
+        #   幣安 OI 改在 `_bn_extra_sample` 的併發 `_one()` 裡跟 CVD／多空比一起抓，
+        #   同一個 symbol 三支比分兩趟省，而且涵蓋整個追蹤池而不是 120 幣。
+        _BN_STATE["ok"] = True
+        _BN_STATE["fail"] = 0
         _bn_extra_sample(picks)
     except Exception as e:
         _BN_STATE["fail"] += 1
@@ -9076,6 +9053,17 @@ def _bn_extra_sample(picks: list) -> None:
             sym = inst.replace("-USDT-SWAP", "") + "USDT"
             out = {}
             try:
+                # ★幣安 OI 也在這一輪順便抓（它沒有全市場批量端點，只能逐幣）。
+                #   原本另有一支 `_bn_oi_sample` 序列打 120 幣，那趟已經取消——
+                #   同一個 symbol 打三支（OI／CVD／多空比）比分兩趟省，而且涵蓋全池。
+                ro = _bn_get("/fapi/v1/openInterest", {"symbol": sym}, timeout=8)
+                if ro is not None and ro.status_code == 200:
+                    v = float((ro.json() or {}).get("openInterest") or 0)
+                    if v > 0:
+                        out["bn_oi"] = v
+            except Exception:
+                pass
+            try:
                 # cvd_ratio：定義已對回官方（`binance_taker_ratio`）——
                 # 12 根 5m(=1H) 的 (buyVol−sellVol)/(buyVol+sellVol)×100。
                 rc = _bn_get("/futures/data/takerlongshortRatio",
@@ -9116,6 +9104,11 @@ def _bn_extra_sample(picks: list) -> None:
                     rec["ts"] = now_s
                     _BN_EXTRA[inst] = rec
                     got += 1
+                if out.get("bn_oi"):
+                    hh = _BN_HISTORY.setdefault(inst, [])
+                    hh.append((now_s, out["bn_oi"]))
+                    _kf = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600
+                    _BN_HISTORY[inst] = [(t, x) for (t, x) in hh if t >= _kf] or [(now_s, out["bn_oi"])]
         for k in list(_BN_EXTRA.keys()):
             if k not in _oi_history:
                 del _BN_EXTRA[k]
@@ -9489,6 +9482,144 @@ def _dash_sampler_loop() -> None:
             time.sleep(30)
 
 
+_AGG_HISTORY: Dict[str, list] = {}   # 跨所聚合 OI（USD）：instId -> [(ts, usd)]
+_AGG_STATE = {"ts": 0.0, "n": 0, "ex": "", "err": ""}
+_FR_AGG: Dict[str, float] = {}      # 資費的 OI 加權跨所平均（%），對齊官方 avg_funding_rate_by_oi
+AGG_EXCHANGES = "OKX+幣安+Bitget+Gate"
+
+
+def _agg_oi_sample(now_s: float, keep_from: float) -> None:
+    """★跨所 OI 聚合 —— 官方排名用的是 CoinGlass 跨所加總，我原本只有 OKX，
+    同一幣金額差 12~45 倍、變化% 甚至方向相反（ZRO 我 +8.2% vs 官方 −0.32%）。
+
+    四家都有**批量**端點（一支回全市場），成本可忽略：
+      OKX     `public/open-interest`        492 支　`oiUsd` 直接是 USD
+      Bitget  `mix/market/tickers`          805 支　`holdingAmount`(幣) × `lastPr`
+      Gate    `futures/usdt/contracts`     1013 支　`position_size`(張) × `quanto_multiplier` × `mark_price`
+      幣安    逐幣（沒有批量），已在 `_bn_extra_sample` 那趟併發裡順手抓，存在 `_BN_HISTORY`
+    ★**Bybit 拿不到**：`api.bybit.com` / `api.bytick.com` / `api.bybit.nl` 從 Railway
+      全部被 CloudFront 擋 403（IP 層，換網域無效）。實測 Bybit 佔這幾家合計的 3~4 成，
+      所以這是「四所聚合」不是全市場，顯示層要標明，不可以假裝等於官方的數字。
+    ★單位是最容易出錯的地方（抄錯會差 10^n 倍又不會報錯）——
+      已用 `trading-backtest/_chk_oi_units.py` 驗過：有「幣」與「USD」兩欄的
+      OKX/Bybit 自洽到 0.05%，四家換算成幣本位的量級差只有 1.6~2.9 倍（＝正常市佔差異）。
+    """
+    global _AGG_HISTORY
+    try:
+        px, agg = {}, {}
+        _fr_acc = {}          # instId -> [資費×權重 累加, 權重 累加]
+
+        def _add(inst, usd):
+            if usd and usd > 0:
+                agg[inst] = agg.get(inst, 0.0) + usd
+
+        def _addfr(inst, fr, w):
+            """OI 加權累加資費。fr 傳小數（0.0001 = 0.01%），w 是該所的 OI(USD)。"""
+            if fr is None or not w or w <= 0:
+                return
+            a_ = _fr_acc.setdefault(inst, [0.0, 0.0])
+            a_[0] += fr * w
+            a_[1] += w
+
+        # OKX：oiUsd 直接可用；順便記價格給另外兩家換算
+        try:
+            r = requests.get("https://www.okx.com/api/v5/public/open-interest",
+                             params={"instType": "SWAP"},
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            for x in (r.json() or {}).get("data") or []:
+                inst = x.get("instId") or ""
+                if not inst.endswith("-USDT-SWAP"):
+                    continue
+                try:
+                    _add(inst, float(x.get("oiUsd") or 0))
+                    c, u = float(x.get("oiCcy") or 0), float(x.get("oiUsd") or 0)
+                    if c > 0 and u > 0:
+                        px[inst.replace("-USDT-SWAP", "")] = u / c
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            _AGG_STATE["err"] = f"okx {type(e).__name__}"
+
+        # Bitget：holdingAmount 是幣本位
+        try:
+            r = requests.get("https://api.bitget.com/api/v2/mix/market/tickers",
+                             params={"productType": "usdt-futures"},
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            for x in (r.json() or {}).get("data") or []:
+                sym = x.get("symbol") or ""
+                if not sym.endswith("USDT"):
+                    continue
+                try:
+                    p = float(x.get("lastPr") or 0) or px.get(sym[:-4], 0)
+                    _u = float(x.get("holdingAmount") or 0) * p
+                    _add(sym[:-4] + "-USDT-SWAP", _u)
+                    _fr = x.get("fundingRate")
+                    _addfr(sym[:-4] + "-USDT-SWAP",
+                           float(_fr) if _fr not in (None, "") else None, _u)
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            _AGG_STATE["err"] += f" bitget {type(e).__name__}"
+
+        # Gate：position_size 是張數，要乘合約乘數再乘價
+        try:
+            r = requests.get("https://api.gateio.ws/api/v4/futures/usdt/contracts",
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            for x in r.json() or []:
+                name = x.get("name") or ""
+                if not name.endswith("_USDT"):
+                    continue
+                try:
+                    p = float(x.get("mark_price") or 0) or px.get(name[:-5], 0)
+                    _u = (float(x.get("position_size") or 0)
+                          * float(x.get("quanto_multiplier") or 0) * p)
+                    _add(name[:-5] + "-USDT-SWAP", _u)
+                    _fr = x.get("funding_rate")
+                    _addfr(name[:-5] + "-USDT-SWAP",
+                           float(_fr) if _fr not in (None, "") else None, _u)
+                except (TypeError, ValueError):
+                    continue
+        except Exception as e:
+            _AGG_STATE["err"] += f" gate {type(e).__name__}"
+
+        # ★資費也一起聚合：官方用的是 CoinGlass `avg_funding_rate_by_oi`＝**OI 加權跨所平均**，
+        #   我原本只有幣安。Bitget／Gate 的批量回應裡本來就帶 `fundingRate`／`funding_rate`，
+        #   為了 OI 已經要打這兩支 → 等於免費多拿兩家。加權用各所自己的 OI（USD）。
+        #   幣安那家在下面補（它的資費來自 premiumIndex，存在 _BN_EXTRA）。
+        for inst, (fr, w) in list(_fr_acc.items()):
+            if w > 0:
+                _FR_AGG[inst] = fr / w * 100.0     # 存成百分比，與官方口徑一致
+
+        # 幣安：逐幣抓的幣量存在 _BN_HISTORY，這裡乘價換成 USD
+        for inst, h in list(_BN_HISTORY.items()):
+            if not h:
+                continue
+            p = px.get(inst.replace("-USDT-SWAP", ""), 0)
+            if p > 0:
+                _u = h[-1][1] * p
+                _add(inst, _u)
+                _f = (_BN_EXTRA.get(inst) or {}).get("funding")
+                if _f is not None and _u > 0:
+                    a_ = _fr_acc.setdefault(inst, [0.0, 0.0])
+                    a_[0] += float(_f) * _u
+                    a_[1] += _u
+                    _FR_AGG[inst] = a_[0] / a_[1] * 100.0
+
+        for inst, usd in agg.items():
+            hh = _AGG_HISTORY.setdefault(inst, [])
+            hh.append((now_s, usd))
+            _AGG_HISTORY[inst] = [(t, v) for (t, v) in hh if t >= keep_from] or [(now_s, usd)]
+        for k in list(_AGG_HISTORY.keys()):
+            if k not in agg and k not in _oi_history:
+                del _AGG_HISTORY[k]
+        _AGG_STATE.update({"ts": now_s, "n": len(agg), "ex": AGG_EXCHANGES})
+        print(f"[DASH] 跨所 OI 聚合:{len(agg)} 幣（{AGG_EXCHANGES}）"
+              + (f" 部分失敗:{_AGG_STATE['err']}" if _AGG_STATE["err"] else ""), flush=True)
+        _AGG_STATE["err"] = ""
+    except Exception as e:
+        print(f"[DASH] 跨所 OI 聚合失敗(不影響交易): {e}", flush=True)
+
+
 _WHALE: Dict[str, dict] = {}     # 巨鯨雷達：inst -> 資金注入候選事件
 WHALE_OBS_SEC = 900              # ★官方原話：「觀察 **15 分鐘** 後…判斷方向」
 WHALE_VALID_H = 6                # 事件留多久（官方沒公布，這是我設的）
@@ -9806,6 +9937,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
             _t0 = time.time()
             try:
                 _bn_oi_sample(_ns, _kf)
+                _agg_oi_sample(_ns, _kf)   # 跨所 OI 聚合（要在幣安 OI 之後，才拿得到新值）
                 _mcap_refresh(_ns)      # 順便刷市值（自己有 6 小時節流）
             finally:
                 _BN_STATE["ms"] = int((time.time() - _t0) * 1000)

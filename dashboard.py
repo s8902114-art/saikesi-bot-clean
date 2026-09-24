@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925q"
+VER = "20260925r"
 
 
 def _clean(v):
@@ -339,7 +339,12 @@ def _market(G, win_h=1.0, top_n=300):
     rows = []
     _mkt_err = None
     try:
-        oi_all = G.get("_oi_history") or {}
+        # ★OI 改用**跨所聚合**（OKX+幣安+Bitget+Gate）。官方排名用的是 CoinGlass 跨所加總，
+        #   只用 OKX 會差 12~45 倍、變化% 甚至方向相反（ZRO 我 +8.2% vs 官方 −0.32%）。
+        #   聚合還沒累積起來（剛部署）就退回 OKX 歷史，不讓畫面整個空掉。
+        _agg_all = G.get("_AGG_HISTORY") or {}
+        _use_agg = len(_agg_all) >= 50
+        oi_all = _agg_all if _use_agg else (G.get("_oi_history") or {})
         px_all = G.get("_PX_HISTORY") or {}
         snap = G.get("_TICKER_SNAP") or {}
         mcap = G.get("_MCAP") or {}
@@ -408,8 +413,9 @@ def _market(G, win_h=1.0, top_n=300):
             # ★官方 `oi_chg_1h` = OKX 與幣安 OI 變化%的**算術平均**（逐筆驗算過：
             #   STABLE (9.29+2.21)/2=5.75、ONE (8.44+0.69)/2=4.56、PYTH (5.4−0.01)/2=2.70）。
             #   只有一所有資料時就用那一所 —— 官方 CNPY 只有 OKX 時也是直接用 5.20。
-            src = "OKX"
-            bh = (G.get("_BN_HISTORY") or {}).get(inst)
+            # 用了聚合就**不可以**再混幣安平均——幣安已經是聚合的一員，會重複計算。
+            src = ("4所聚合" if _use_agg else "OKX")
+            bh = None if _use_agg else (G.get("_BN_HISTORY") or {}).get(inst)
             # ★★幣安是**輪流取樣**的（每輪只打 DASH_BN_TOP_N 個幣，因為它沒有全市場 OI
             #   的批量端點）。所以「這個幣有幣安歷史」不等於「它這一輪有被更新」——
             #   輪出去的幣，`bh[-1]` 會停在幾十分鐘前，拿它當「現在」算出來的**根本不是 1H 變化**，
@@ -452,6 +458,10 @@ def _market(G, win_h=1.0, top_n=300):
                         oi1 = (oi1 + (bh[-1][1] - _bb1[1]) / _bb1[1]) / 2.0
                 px1 = ((ph[-1][1] - _p1[1]) / _p1[1]) if (_p1 and _p1[1] > 0) else None
             ex = extra.get(inst) or {}
+            # 資費優先用 OI 加權跨所平均（對齊官方 avg_funding_rate_by_oi），沒有才退回幣安
+            _fr_agg = (G.get("_FR_AGG") or {}).get(inst)
+            if _fr_agg is not None:
+                ex = dict(ex, funding_pct=_fr_agg)
             _stv = (dash_sn.get(inst) or {})
             sc = _score(
                 oi1 * 100 if oi1 is not None else None,
@@ -549,9 +559,10 @@ def _market(G, win_h=1.0, top_n=300):
     #   兩個都對，只是量的東西不一樣。不把這個對照擺在畫面上，使用者只會覺得數字自相矛盾
     #   （用戶原話：「大部份都偏空 你一堆主力建倉是正常的嗎」）。
     _up_w = sum(1 for r in rows if (r.get("px") or 0) > 0)
-    _bn = sum(1 for r in rows if r.get("src") == "OKX+BN")
+    _bn = sum(1 for r in rows if r.get("src") in ("OKX+BN", "4所聚合"))
     return {"win_h": win_h, "err": _mkt_err, "quads": {k: list(v) for k, v in _QUAD.items()},
-            "src": ("OKX+BN " + str(_bn)) if _bn else "OKX",
+            "src": (("4所聚合 " if _use_agg else "OKX+BN ") + str(_bn)) if _bn else "OKX",
+            "agg": bool(_use_agg), "agg_ex": G.get("AGG_EXCHANGES") or "",
             "gate": {"oi_min": QUAD_OI_MIN, "px_max": QUAD_PX_MAX,
                      "inflow_oi": INFLOW_OI_MIN, "inflow_px": INFLOW_PX_MAX},
             "tracked": len(G.get("_oi_history") or {}),
@@ -1543,10 +1554,12 @@ function viewRank(){
     + '<colgroup>' + RANK_W.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
     + '<thead><tr>' + RANK_COLS.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
     + '<tbody>' + body + '</tbody></table></div>'
-    + '<div class="sub" style="margin-top:8px">★<b>OI 金額是 OKX 單一交易所</b>的，'
-    + '官方那邊是 CoinGlass <b>跨所聚合</b>（實測同一幣差 12~45 倍）。'
-    + '所以變化% 也不可比：OKX 的大單在聚合裡會被稀釋 10~20 倍，'
-    + '甚至方向相反（實測 ZRO 我 +8.2% vs 官方 −0.32%）。'
+    + '<div class="sub" style="margin-top:8px">'
+    + (m.agg ? `★OI 已改為<b>跨所聚合</b>（${m.agg_ex||'OKX+幣安+Bitget+Gate'}）。`
+             + '★<b>拿不到 Bybit</b>：三個網域從雲端都被 CloudFront 擋 403，'
+             + '實測它約佔三到四成 —— 所以這不是全市場，也不會跟官方逐筆相同。'
+             : '★<b>OI 目前只有 OKX</b>（聚合還在累積）：官方是 CoinGlass 跨所加總，'
+             + '同一幣金額差 12~45 倍、變化% 甚至方向相反。')
     + '<b>金額小的（灰字，&lt;5M）一張大單就能推到 +10%，別當成主力建倉。</b><br>'
     + '象限已套用官方的市場結構覆寫層'
     + '（評分裡的「主動做多／主動做空／多頭出場／空頭出場」會蓋過單純的 OI×價格方向）。</div>'
@@ -1665,7 +1678,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925q';
+const PAGE_VER = '20260925r';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
