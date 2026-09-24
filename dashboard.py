@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925h"
+VER = "20260925i"
 
 
 def _clean(v):
@@ -512,6 +512,12 @@ def _market(G, win_h=1.0, top_n=300):
                 depth = max(depth, nowt - max(h[0][0], ph[0][0]))
     except Exception:
         pass
+    # ★短線廣度：同一批幣在**這個窗**內漲的家數。
+    #   為什麼要它：大盤 24H 可能 91% 偏空，但最近 1H 是全面反彈（2026-09-24 實況），
+    #   於是「OI 排名」(用 24H 價格) 一片偏空、「視覺篩選器/評分」(全用 1H) 一片偏多 ——
+    #   兩個都對，只是量的東西不一樣。不把這個對照擺在畫面上，使用者只會覺得數字自相矛盾
+    #   （用戶原話：「大部份都偏空 你一堆主力建倉是正常的嗎」）。
+    _up_w = sum(1 for r in rows if (r.get("px") or 0) > 0)
     _bn = sum(1 for r in rows if r.get("src") == "OKX+BN")
     return {"win_h": win_h, "err": _mkt_err, "quads": {k: list(v) for k, v in _QUAD.items()},
             "src": ("OKX+BN " + str(_bn)) if _bn else "OKX",
@@ -520,6 +526,7 @@ def _market(G, win_h=1.0, top_n=300):
             "tracked": len(G.get("_oi_history") or {}),
             "priced": len(G.get("_TICKER_SNAP") or {}),
             "sample": dict(G.get("_DASH_SAMPLE") or {}),
+            "up_w": _up_w, "n_w": len(rows),
             "depth_min": int(depth / 60),
             "eta_min": max(0, int((win_h * 3600 - depth) / 60)),
             "rows": rows[:top_n]}
@@ -952,6 +959,24 @@ function draw(){
   if(TAB==='sys') v.innerHTML = viewSys();
 }
 
+// ★時間尺度對照：這一頁用的窗 vs 大盤 24H。兩者背離時（例如 24H 大跌、近 1H 反彈）
+//   必須講出來，否則「排名一片偏空、篩選器一片偏多」看起來像自相矛盾。
+function scaleBar(){
+  const m=D.mkt, b=D.breadth||{};
+  if(!m || !m.n_w) return '';
+  const p1 = Math.round(m.up_w / m.n_w * 100);
+  const p24 = 100 - (b.bear_pct===undefined ? 50 : b.bear_pct);
+  const diverge = Math.abs(p1 - p24) >= 25;
+  return `<div class="sub" style="margin-bottom:8px">`
+    + `<b>${m.win_h}H 上漲 ${p1}%</b>（${m.up_w}/${m.n_w}）　·　`
+    + `<b>24H 上漲 ${p24}%</b>（大盤廣度）`
+    + (diverge ? `<span class="warn">　◆ 兩個尺度背離：這一頁的象限與分數算的是 `
+        + `<b>${m.win_h}H</b>，${p1>p24?'短線反彈會讓「多頭建倉／主動做多」大量出現'
+                                   :'短線回落會讓「空頭建倉／主動做空」大量出現'}，`
+        + `不等於趨勢翻${p1>p24?'多':'空'}。OI 排名那頁用的是 24H 價格，所以看起來會相反。</span>` : '')
+    + '</div>';
+}
+
 function winBar(){
   return '<div class="wins">' + WINS.map(([w,n])=>
     `<div class="wb ${W===w?'on':''}" onclick="setW(${w})">${n}</div>`).join('')
@@ -1338,6 +1363,7 @@ function viewMkt(){
   const sel = rows.filter(hit);
   return '<div class="card">' + winBar()
     + `<h2>視覺篩選器<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
+    + scaleBar()
     // ★官方把這一頁叫「巨鯨雷達」（前端 data-target-tab="visual"），跟「OI 儀表板」(data-target-tab="oi") 是兩個不同分頁。
     //   原話：「用所選週期的持倉變化＋價格變化，觀察資金是否已經注入市場，
     //   找出可能『資金先動、行情還沒完全啟動』的機會」。
@@ -1407,6 +1433,7 @@ function viewRank(){
   }
   return '<div class="card">' + winBar()
     + `<h2>OI 異動排名<span>${m.win_h}H 持倉量變化・依 |OI 變化%| 取前 20</span></h2>`
+    + scaleBar()
     + '<div class="scroll"><table class="fx">'
     + '<colgroup>' + RANK_W.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
     + '<thead><tr>' + RANK_COLS.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
@@ -1514,7 +1541,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925h';
+const PAGE_VER = '20260925i';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
