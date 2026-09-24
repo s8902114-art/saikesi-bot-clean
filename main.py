@@ -8830,8 +8830,9 @@ def _dhx_scan(force: bool = False) -> None:
                         sv = _s.values.astype(float)
                 except Exception:
                     sv = None
-                r = (_dhx_trap(inst, hi, lo, cl, n, cv, sv)
-                     or _dhx_diverge(inst, hi, lo, cl, n, cv, sv))
+                _ts = [int(x.timestamp()) for x in df.index]
+                r = (_dhx_trap(inst, hi, lo, cl, n, cv, sv, _ts)
+                     or _dhx_absorb(inst, hi, lo, cl, n, cv, sv, _ts))
                 if r:
                     found[inst] = r
             except Exception:
@@ -8888,9 +8889,60 @@ def _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, extra=None):
     return r
 
 
-def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None):
-    """TRAP：樞紐 → 假突破 → 收盤收回 i1 收盤價。
-    兩個錨點的合約/現貨 CVD 一併記錄（官方每筆都帶 fut_cvd_i1/i2 + spot_cvd_i1/i2）。"""
+
+
+def _dhx_cvd(cv, sv, i1, i2):
+    """把兩個錨點的合約／現貨 CVD 包成官方那四個欄位。拿不到就留 None。"""
+    o = {}
+    try:
+        if cv is not None and len(cv) > max(i1, i2):
+            o["fut_cvd_i1"] = float(cv[i1]); o["fut_cvd_i2"] = float(cv[i2])
+    except Exception:
+        pass
+    try:
+        if sv is not None and len(sv) > max(i1, i2):
+            o["spot_cvd_i1"] = float(sv[i1]); o["spot_cvd_i2"] = float(sv[i2])
+    except Exception:
+        pass
+    return o
+
+
+def _dhx_oi_delta(inst, t1, t2):
+    """兩個錨點之間的 OI 變化%（官方 `oi_delta_pct` / `oi_pivot1`,`oi_pivot2`）。
+    用 `_oi_history`（5 分鐘取樣）線性內插取值；取不到回 None（不猜）。"""
+    h = _oi_history.get(inst)
+    if not h or len(h) < 2:
+        return None
+
+    def _val(ts):
+        prev = None
+        for t, v in h:
+            if t <= ts:
+                prev = (t, v)
+            elif prev is None:
+                return None
+            else:
+                if t - prev[0] > 3600:
+                    return None
+                f = (ts - prev[0]) / (t - prev[0])
+                return prev[1] + (v - prev[1]) * f
+        return h[-1][1] if prev is not None else None
+
+    a1, a2 = _val(t1), _val(t2)
+    if not a1 or not a2 or a1 <= 0:
+        return None
+    return (a2 - a1) / a1 * 100.0
+
+
+def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
+    """TRAP：樞紐 → 假突破 → 收盤收回 i1 收盤價 → **再過數據層**。
+
+    ★數據層是官方的硬條件（400 筆實測 100% 一致，見 _DHX_DATASIG_V2_0924.md）：
+        SHORT_TRAP(做多)：合約 CVD **降** + 現貨 CVD **升**   （實測 0/60、59/60）
+        LONG_TRAP (做空)：合約 CVD **升** + 現貨 CVD **降**   （實測 36/36、0/36）
+      另外兩類的 OI 變化中位都是 **正的**（+1.50% / +1.37%）→ 要求 OI 升。
+    ★第一版我只做價格型態、沒有數據層，等於發一堆他們根本不會發的訊號。
+    """
     for side in ("short_trap", "long_trap"):
         i1 = _dhx_pivot(hi, lo, n, "low" if side == "short_trap" else "high")
         if i1 is None:
@@ -8911,79 +8963,77 @@ def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None):
                 back = k; break
         if back is None or (n - 1 - back) > 4:
             continue
+        # ── 數據層（官方硬條件）：沒有 CVD 就不發，不再「只看型態」
+        if cv is None or sv is None or len(cv) <= i2 or len(sv) <= i2:
+            continue
+        fut_up = float(cv[i2]) > float(cv[i1])
+        spot_up = float(sv[i2]) > float(sv[i1])
+        if side == "short_trap" and not ((not fut_up) and spot_up):
+            continue                     # 做多要：合約降 + 現貨升
+        if side == "long_trap" and not (fut_up and (not spot_up)):
+            continue                     # 做空要：合約升 + 現貨降
+        oi_d = _dhx_oi_delta(inst, ts[i1], ts[i2]) if ts is not None else None
+        if oi_d is not None and oi_d <= 0:
+            continue                     # OI 要升（官方中位 +1.4~1.5%）
         sl = float(lo[i2]) if side == "short_trap" else float(hi[i2])
+        ex = _dhx_cvd(cv, sv, i1, i2)
+        ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
+        ex["entry_source"] = "trigger_market"
         r = _dhx_pack(inst, "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
-                      "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n,
-                      _dhx_cvd(cv, sv, i1, i2))
+                      "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n, ex)
         if r:
             return r
     return None
 
 
-def _dhx_cvd(cv, sv, i1, i2):
-    """把兩個錨點的合約／現貨 CVD 包成官方那四個欄位。拿不到就留 None。"""
-    o = {}
-    try:
-        if cv is not None and len(cv) > max(i1, i2):
-            o["fut_cvd_i1"] = float(cv[i1]); o["fut_cvd_i2"] = float(cv[i2])
-    except Exception:
-        pass
-    try:
-        if sv is not None and len(sv) > max(i1, i2):
-            o["spot_cvd_i1"] = float(sv[i1]); o["spot_cvd_i2"] = float(sv[i2])
-    except Exception:
-        pass
-    return o
+def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
+    """吸收背離（absorption）—— **多空各一邊**。
 
-
-def _dhx_diverge(inst, hi, lo, cl, n, cv, sv=None):
-    """ABSORPTION（吸收）／EXHAUSTION（衰竭）：價格創新極值但 CVD 沒跟上。
-
-    官方命名 `I2_FORMATION_FULL_WICK` → 看的是**第二個錨點成形**，停損用完整影線。
-    ABSORPTION：i2 價格更低、CVD 反而更高 → 賣壓被吸收 → 做多（鏡像則做空）。
-    EXHAUSTION：i2 價格更高、CVD 沒更高 → 買盤衰竭 → 做空（鏡像則做多）。
-    ★沒有 CVD 就不判定（這兩個家族的定義就是 CVD 背離，硬做等於瞎猜）。
+    ★官方 `cvd_signal` 原話：「底背離吸收：**賣方砸盤但價格未破前低**，買方限價單吸收賣壓」
+      實際資料 `pivot1_price 8.821 → pivot2_price 10.331` = **低點抬高**，不是創新低。
+      我第一版寫成「價格創新低但 CVD 沒跟著低」→ **方向完全相反**，已改正。
+    ★這個定義與我自己 memory `project_0830_absorb_long` 早就驗過的一致：
+      兩個樞紐低點**抬高** + **CVD 樞紐低點降低** + OI 上升。
+    ★停損 = **pivot2 的價格**（官方 `sl_price` 就等於 `pivot2_price`，
+      `sl_source: post_i2_structure_low/high` 也是這個意思），不是完整影線。
     """
-    if cv is None or len(cv) < n:
+    if cv is None:
         return None
-    for side in ("absorb_long", "absorb_short"):
-        want_low = (side == "absorb_long")
-        i1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=70, conf=3, skip=10)
-        if i1 is None:
+    for side in ("long", "short"):
+        want_low = (side == "long")
+        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=80, conf=3, skip=14)
+        if p1 is None:
             continue
-        # i2 = i1 之後、最近一個更極端的樞紐（要已收盤確認）
-        i2 = None
-        for k in range(n - 4, i1 + 2, -1):
-            if want_low and lo[k] < lo[i1] and all(lo[j] > lo[k] for j in range(k - 2, k + 3) if j != k):
-                i2 = k; break
-            if (not want_low) and hi[k] > hi[i1] and all(hi[j] < hi[k] for j in range(k - 2, k + 3) if j != k):
-                i2 = k; break
-        if i2 is None:
+        p2 = None
+        for k in range(n - 4, p1 + 3, -1):
+            if want_low:
+                # 低點**抬高**（不是創新低），且是嚴格樞紐低
+                if lo[k] > lo[p1] and all(lo[j] > lo[k] for j in range(k - 2, k + 3) if j != k):
+                    p2 = k; break
+            else:
+                if hi[k] < hi[p1] and all(hi[j] < hi[k] for j in range(k - 2, k + 3) if j != k):
+                    p2 = k; break
+        if p2 is None or len(cv) <= p2:
             continue
-        c1, c2 = float(cv[i1]), float(cv[i2])
-        if want_low:
-            if not (c2 > c1):          # 價更低但 CVD 更高 = 吸收
-                continue
-            kind, bias = "ABSORPTION", "LONG"
-            sl = float(lo[i2])
-        else:
-            if not (c2 < c1):          # 價更高但 CVD 更低 = 衰竭
-                continue
-            kind, bias = "EXHAUSTION", "SHORT"
-            sl = float(hi[i2])
-        # 確認：i2 之後要有一根收盤往回（官方 entry_source 以 engulf_market/confirm_close 為主）
-        back = None
-        for k in range(i2 + 1, n):
-            if bias == "LONG" and cl[k] > cl[i2] and cl[k] > (hi[k] + lo[k]) / 2:
-                back = k; break
-            if bias == "SHORT" and cl[k] < cl[i2] and cl[k] < (hi[k] + lo[k]) / 2:
-                back = k; break
-        if back is None or (n - 1 - back) > 4:
-            continue
-        _ex = _dhx_cvd(cv, sv, i1, i2)
-        _ex["entry_source"] = "confirm_close"
-        r = _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, _ex)
+        c1, c2 = float(cv[p1]), float(cv[p2])
+        if want_low and not (c2 < c1):
+            continue                     # 做多要：CVD 樞紐低點**降低**（賣方砸盤）
+        if (not want_low) and not (c2 > c1):
+            continue                     # 做空鏡像：CVD 樞紐高點升高
+        oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
+        if oi_d is not None and oi_d <= 0:
+            continue                     # OI 上升
+        sl = float(lo[p2]) if want_low else float(hi[p2])   # ★停損＝pivot2 價格
+        ex = _dhx_cvd(cv, sv, p1, p2)
+        ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
+        ex["sl_source"] = "post_i2_structure_" + ("low" if want_low else "high")
+        ex["entry_source"] = "confirm_close"
+        ex["pivot1_price"] = float(lo[p1] if want_low else hi[p1])
+        ex["pivot2_price"] = sl
+        r = _dhx_pack(inst, "ABSORPTION", "LONG" if want_low else "SHORT",
+                      p1, p2, n - 1, cl, sl, n, ex)
         if r:
+            r["sl_source"] = ex["sl_source"]
             return r
     return None
 
