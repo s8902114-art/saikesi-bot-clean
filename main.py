@@ -8878,6 +8878,15 @@ def _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, extra=None):
     entry = float(cl[-1]); risk = abs(entry - sl)
     if risk <= 0 or risk / entry > 0.08 or risk / entry < 0.001:
         return None
+    # ★★停損必須在「會虧錢」的那一側：做多 sl < 進場、做空 sl > 進場。
+    #   2026-09-24 用戶抓到 F 這筆：吸收做空但 sl 0.003673 < entry 0.003703 ——
+    #   價格早就漲過 pivot2 的高點，那個停損等於無效（設在獲利方向）。
+    #   官方 63 筆**停損方向錯的是 0 筆**，所以這確定是我漏掉的檢查。
+    #   同型坑 memory 記過：live 的 `calculate_sl <= close → 跳過`。
+    if bias == "LONG" and sl >= entry:
+        return None
+    if bias == "SHORT" and sl <= entry:
+        return None
     d = 1 if bias == "LONG" else -1
     r = {"inst": inst, "kind": kind, "bias": bias, "tf": "15m", "level": "CONFIRMED",
          "i1_close": float(cl[i1]), "breakout_extreme": float(sl), "close_back": float(cl[back]),
@@ -9006,7 +9015,7 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         return None
     for side in ("long", "short"):
         want_low = (side == "long")
-        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=50, conf=3, skip=12)
+        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=45, conf=3, skip=12)
         if p1 is None:
             continue
         p2 = None
@@ -9065,7 +9074,7 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         return None
     for side in ("long", "short"):
         want_low = (side == "long")
-        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=50, conf=3, skip=14)
+        p1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=45, conf=3, skip=14)
         if p1 is None:
             continue
         p2 = None
