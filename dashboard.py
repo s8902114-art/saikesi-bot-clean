@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925c"
+VER = "20260925d"
 
 
 def _clean(v):
@@ -319,6 +319,9 @@ def _market(G, win_h=1.0, top_n=300):
         px_all = G.get("_PX_HISTORY") or {}
         snap = G.get("_TICKER_SNAP") or {}
         mcap = G.get("_MCAP") or {}
+        # 市值兩家口徑不同（實測 24% 的幣差 >20%，CoinPaprika 系統性偏低）→ 來源要跟著走，
+        # 不然 OI／市值 這個「風險/擁擠度」指標會在不同幣之間不可比。
+        mcsrc = G.get("_MCAP_SRC") or {}
         now = time.time()
         target = now - win_h * 3600
         target1 = now - 3600.0          # 評分固定用 1H 窗（見下方 _score 呼叫處的說明）
@@ -393,7 +396,8 @@ def _market(G, win_h=1.0, top_n=300):
             quad24 = quad if c24 is None else (
                 ("多頭建倉" if c24 >= 0 else "空頭建倉") if oi_pct >= 0 else
                 ("空頭平倉" if c24 >= 0 else "多頭平倉"))
-            mc = mcap.get(inst.replace("-USDT-SWAP", ""))
+            _coin = inst.replace("-USDT-SWAP", "")
+            mc = mcap.get(_coin)
             # ★評分一律用 **1H**（官方 scoreBreakdown 就是 1H），跟使用者選的窗無關 ——
             #   不然切到 12H 窗時分數會跟官方對不上，而且卡片上的「市場結構」會跟著窗漂。
             if abs(win_h - 1.0) < 1e-9:
@@ -438,7 +442,7 @@ def _market(G, win_h=1.0, top_n=300):
                 "cvd": ex.get("cvd_ratio"),
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
-                "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None, "mcap": mc,
+                "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None, "mcap": mc, "mcs": mcsrc.get(_coin),
                 # 官方兩道固定條件（價格是**上限**：要「OI 大動、價格還沒動」）
                 "q24": quad24, "src": src,
                 "inq": abs(oi_pct) >= QUAD_OI_MIN and abs(px_pct) <= QUAD_PX_MAX,
@@ -1121,7 +1125,8 @@ function cardHTML(){
     + row('合約 CVD (1H)', r.cvd===null||r.cvd===undefined? '—' : f(r.cvd,2)+'%',
           r.cvd>0?'up':(r.cvd<0?'down':''))
     + row('未平倉量', r.oiu? big(r.oiu)+' USDT' : '—')
-    + row('市值', r.mcap? big(r.mcap) : '—')
+    + row('市值', r.mcap? big(r.mcap)
+        + (r.mcs&&r.mcs!=='coingecko'? ` <small class="dim">${r.mcs}</small>`:'') : '—')
     + row('OI／市值比', r.oimc? f(r.oimc*100,2)+'%' : '—')
     + row('24H 成交額', r.vol? big(r.vol)+' USDT' : '—')
     + (r.q!==qMain ? row(`同 ${D.mkt.win_h}H 窗象限`,
@@ -1405,7 +1410,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925c';
+const PAGE_VER = '20260925d';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

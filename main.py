@@ -8901,34 +8901,71 @@ def _struct_score(highs_a, lows_a, closes_a, cur_price):
         return 0, ""
 
 
-_MCAP_STATE = {"ts": 0.0, "n": 0}
-MCAP_REFRESH_SEC = 6 * 3600           # 市值 6 小時刷一次（幣價會動，7 天太久）
-MCAP_PAGES = 4                        # 250 × 4 = 前 1000 名
+_MCAP_STATE = {"ts": 0.0, "n": 0, "src": "", "err": "", "cg": 0, "cp": 0}
+_MCAP_SRC: Dict[str, str] = {}        # COIN -> 這個市值是哪家給的（兩家口徑不同，要能查）
+MCAP_REFRESH_SEC = 6 * 3600           # 成功後 6 小時再刷（幣價會動，7 天太久）
+MCAP_RETRY_SEC = 20 * 60              # ★失敗後 20 分鐘就重試，不要等 6 小時
 
 
 def _mcap_refresh(now_s: float) -> None:
     """補全市值 —— 「OI／市值」那一欄要有它才算得出來。
 
-    ★原本 `_MCAP` 只在 `build_dynamic_symbols`（**7 天**一次）裡順手撈**前 100 名**，
-      所以儀表板 476 個合約有 376 個的 OI／市值 永遠是「—」（用戶 2026-09-24 問到）。
-      官方 `/api/crypto-mcap-cache` 有 3219 筆，我們至少要補到前 1000。
-    ★成本：CoinGecko 公開端點免金鑰，4 支 × 6 小時 = 一天 16 支，可忽略。
-      跑在背景執行緒裡（跟幣安取樣同一支），不佔交易主迴圈。
-    ★同一個 symbol 可能對到多個幣（CoinGecko 有同名幣），回應是**市值降序**，
-      所以「先到的不覆蓋」＝ 取市值最大的那個，跟交易所主流標的一致。
+    ★原本 `_MCAP` 只在 `build_dynamic_symbols` 裡順手撈 CoinGecko **前 100 名**，
+      而且那支**本身就常被 429**（線上實測 log：`[SYMBOLS] CoinGecko HTTP 429`
+      → 連幣種列表都退回 OKX 流動性底池）。結果儀表板 476 個合約的 OI／市值
+      幾乎全是「—」（用戶 2026-09-24 問「是沒有的嗎」）。
+
+    ★★**兩個來源的市值不可以混著用而不標記**（CLAUDE.md：「同一個欄名、多個來源」）。
+      實測 361 個共同幣：比值中位數 1.000（多數完全一致），但 **24% 的幣差超過 20%**，
+      而且 CoinPaprika 系統性偏低（p10 = 0.44）—— 例：ZRO CoinPaprika 164M vs
+      CoinGecko 527M（0.31 倍），差在流通量口徑（ZRO 有持續解鎖）。
+      官方 `oi-cache` 的 `market_cap` 站在 **CoinGecko 那一側**（ZRO 549M）。
+      → 所以 **CoinGecko 優先**（對得上官方），CoinPaprika 只補它沒有的長尾。
+
+    ★成本：CoinPaprika `/v1/tickers?limit=2000` 一支就回 ~1900 個幣、免金鑰、實測 0.8s；
+      CoinGecko 要 250 一頁打 4 次。兩者加起來 5 支 × 6 小時 = 一天 20 支，可忽略。
+      兩邊都是市值降序、`symbol` 會重複（CoinPaprika 2000 筆有 108 個重複），
+      「先到的不覆蓋」＝ 取市值最大的那個，才對得到交易所上的主流標的。
+    ★失敗一定要印出來：先前寫成 `if status != 200: break` 又不記錄，
+      429 就成了**沉默失敗**，線上看起來只是「這欄一直沒有值」。
     """
-    if now_s - _MCAP_STATE["ts"] < MCAP_REFRESH_SEC:
+    gap = MCAP_REFRESH_SEC if _MCAP_STATE.get("src") else MCAP_RETRY_SEC
+    if now_s - _MCAP_STATE["ts"] < gap:
         return
     _MCAP_STATE["ts"] = now_s
+    tail, main_, err = {}, {}, ""
+
+    # ① 長尾：CoinPaprika，一支呼叫
     try:
-        got = {}
-        for page in range(1, MCAP_PAGES + 1):
+        r = requests.get("https://api.coinpaprika.com/v1/tickers",
+                         params={"limit": 2000},
+                         headers={"User-Agent": "Mozilla/5.0",
+                                  "Accept": "application/json"}, timeout=25)
+        if r.status_code == 200:
+            for c in r.json() or []:
+                try:
+                    sym = str(c.get("symbol") or "").upper()
+                    mc = float(((c.get("quotes") or {}).get("USD") or {}).get("market_cap") or 0)
+                    if sym and mc > 0 and sym not in tail:
+                        tail[sym] = mc
+                except (TypeError, ValueError, AttributeError):
+                    continue
+        else:
+            err = f"coinpaprika HTTP {r.status_code}"
+    except Exception as e:
+        err = f"coinpaprika {type(e).__name__}: {e}"
+
+    # ② 主來源：CoinGecko（對齊官方口徑）。雲端常 429，拿得到多少算多少。
+    try:
+        for page in (1, 2, 3, 4):
             r = requests.get(
                 "https://api.coingecko.com/api/v3/coins/markets",
                 params={"vs_currency": "usd", "order": "market_cap_desc",
                         "per_page": 250, "page": page, "sparkline": "false"},
-                headers={"Accept": "application/json"}, timeout=20)
+                headers={"User-Agent": "Mozilla/5.0",
+                         "Accept": "application/json"}, timeout=20)
             if r.status_code != 200:
+                err += (" / " if err else "") + f"coingecko p{page} HTTP {r.status_code}"
                 break
             rows = r.json() or []
             if not rows:
@@ -8937,17 +8974,28 @@ def _mcap_refresh(now_s: float) -> None:
                 try:
                     sym = str(c.get("symbol") or "").upper()
                     mc = float(c.get("market_cap") or 0)
-                    if sym and mc > 0 and sym not in got:
-                        got[sym] = mc
+                    if sym and mc > 0 and sym not in main_:
+                        main_[sym] = mc
                 except (TypeError, ValueError):
                     continue
-            time.sleep(1.5)            # CoinGecko 免費層有每分鐘上限，慢慢來
-        if got:
-            _MCAP.update(got)
-            _MCAP_STATE["n"] = len(_MCAP)
-            print(f"[DASH] 市值刷新:本輪 {len(got)} 幣,累計 {len(_MCAP)}", flush=True)
+            time.sleep(2.0)
     except Exception as e:
-        print(f"[DASH] 市值刷新失敗(不影響交易): {e}", flush=True)
+        err += (" / " if err else "") + f"coingecko {type(e).__name__}: {e}"
+
+    merged = dict(tail)
+    merged.update(main_)                # ★CoinGecko 覆蓋 CoinPaprika（口徑對齊官方）
+    if merged:
+        _MCAP.update(merged)
+        _MCAP_SRC.update({k: ("coingecko" if k in main_ else "coinpaprika") for k in merged})
+        _MCAP_STATE.update({"n": len(_MCAP), "cg": len(main_), "cp": len(tail),
+                            "src": "coingecko" if main_ else "coinpaprika", "err": err})
+        print(f"[DASH] 市值刷新:CoinGecko {len(main_)} + CoinPaprika 補 "
+              f"{len(merged) - len(main_)} → 累計 {len(_MCAP)}"
+              + (f"（部分失敗: {err}）" if err else ""), flush=True)
+    else:
+        _MCAP_STATE["err"] = err or "無資料"
+        print(f"[DASH] 市值刷新失敗(不影響交易,{MCAP_RETRY_SEC // 60} 分鐘後重試): "
+              f"{_MCAP_STATE['err']}", flush=True)
 
 
 def _bn_fund_base(inst: str):
