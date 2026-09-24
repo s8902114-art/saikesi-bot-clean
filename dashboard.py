@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924s"
+VER = "20260924t"
 
 
 def _clean(v):
@@ -284,6 +284,33 @@ def _market(G, win_h=1.0, top_n=300):
             "rows": rows[:top_n]}
 
 
+def _breadth(G):
+    """市場廣度：全市場漲／平／跌家數。零額外 API —— `_TICKER_SNAP` 是取樣時順手存的。
+
+    官方首頁顯示的樣子：「89% 偏空　漲 20　平 10　跌 250　共 280 個合約」。
+    對照該筆：250/280 = 89.3% → **偏空% = 跌家數 ÷ 總數**（不是跌/(漲+跌)）。
+    「平」他們只有 10/280≈3.6%，用 |24h 漲跌| < 0.1% 抓得到這個量級。
+    """
+    up = flat = down = 0
+    try:
+        for v in (G.get("_TICKER_SNAP") or {}).values():
+            c = v.get("chg24h")
+            if c is None:
+                continue
+            if abs(c) < 0.001:
+                flat += 1
+            elif c > 0:
+                up += 1
+            else:
+                down += 1
+    except Exception:
+        pass
+    n = up + flat + down
+    return {"up": up, "flat": flat, "down": down, "n": n,
+            "bear_pct": round(down / n * 100) if n else None,
+            "bull_pct": round(up / n * 100) if n else None}
+
+
 def _diags(G):
     """漏斗：累計值 + 距上次開頁的增量。手冊：只能看各 gate 的絕對次數，
     不能拿「無V成型/呼叫」當比例（_VLONG_DIAG 那個尾端無條件 +1 的坑）。"""
@@ -369,6 +396,9 @@ def collect(G, win_h=1.0):
         "mkt": _market(G, win_h),
         "dhx": sorted((G.get("_DHX_SIG") or {}).values(),
                       key=lambda r: r.get("ts") or 0, reverse=True)[:30],
+        "breadth": _breadth(G),
+        "anom": sorted((G.get("_ANOM") or {}).values(),
+                       key=lambda r: r.get("last_ts") or 0, reverse=True)[:40],
         "diag": _diags(G),
         "flags": _flags(G),
         "coins": coins,
@@ -535,6 +565,7 @@ const f = (n,d=2)=> (n===null||n===undefined||isNaN(n)) ? '—' : Number(n).toFi
 const pf = n => (n===null||n===undefined||n===''||isNaN(n)) ? '—'
   : (Math.abs(Number(n))>=1 ? Number(n).toFixed(4) : Number(n).toPrecision(5))
       .replace(/(\\.\\d*?)0+$/,'$1').replace(/\\.$/,'');
+const f2 = n => (n===null||n===undefined||isNaN(n)) ? '—' : (n>=0?'+':'')+Number(n).toFixed(2)+'%';
 const pct = n => (n===null||n===undefined||isNaN(n)) ? '—' : (n*100>=0?'+':'') + (n*100).toFixed(2) + '%';
 const cls = n => n>0 ? 'up' : (n<0 ? 'down' : 'dim');
 const ago = ts => { if(!ts) return '—'; const s=Math.max(0,D.now-ts);
@@ -562,7 +593,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['mkt','篩選器'],['rank','OI 排名'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['mkt','篩選器'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -596,6 +627,7 @@ function draw(){
   if(TAB==='mkt') v.innerHTML = viewMkt();
   if(TAB==='rank') v.innerHTML = viewRank();
   if(TAB==='dhx') v.innerHTML = viewDhx();
+  if(TAB==='anom') v.innerHTML = viewAnom();
   if(TAB==='pos') v.innerHTML = viewPos();
   if(TAB==='oi') v.innerHTML = viewOI();
   if(TAB==='coins') v.innerHTML = viewCoins();
@@ -807,7 +839,47 @@ function cardHTML(){
     + '</div>';
 }
 
-// 數據訊號（TRAP）：規格見 _DHX_DATASIG_0924_SPEC.md
+// 異常警報：官方分「看漲／看跌／觀察中」三區，卡片式
+const ST = {RADAR:['觀察中','dim'], CONFIRMED:['確認','up'],
+            WEAKENING:['轉弱','warn'], INVALIDATED:['失效','down']};
+function viewAnom(){
+  const rows = D.anom||[];
+  const b = D.breadth||{};
+  let h = '<div class="card"><h2>市場廣度<span>全市場 24H</span></h2>'
+    + `<div class="q4">
+         <div class="qc"><b class="down">${b.bear_pct!=null?b.bear_pct+'%':'—'}</b><span>偏空</span></div>
+         <div class="qc"><b class="up">${b.up||0}</b><span>漲</span></div>
+         <div class="qc"><b class="dim">${b.flat||0}</b><span>平</span></div>
+         <div class="qc"><b class="down">${b.down||0}</b><span>跌</span></div>
+       </div><div class="sub">共 ${b.n||0} 個合約。偏空% = 跌家數 ÷ 總數（對齊官方算法）。</div></div>`;
+  if(!rows.length) return h + '<div class="card"><h2>異常警報</h2><div class="empty">'
+    + '目前沒有異動（門檻：15 分鐘或 5 分鐘價格變動 ≥ 3%，官方實測門檻）。</div></div>';
+  const sec = (title, f, note) => {
+    const g = rows.filter(f);
+    return `<div class="card"><h2>${title}<span>${g.length}</span></h2>`
+      + (note?`<div class="sub" style="margin-bottom:8px">${note}</div>`:'')
+      + (g.length ? table('an'+title, ['幣','階段','15m','OI15m','相對BTC','觸發'], g, r=>[
+          {v:r.coin, h:`<a class="cl" onclick="openCard('${r.inst}')">${r.coin}</a>`},
+          {v:r.status, h:`${r.bias_label}`, c:(ST[r.status]||['',''])[1]},
+          {v:r.p15, h:f2(r.p15), c:cls(r.p15)},
+          {v:r.oi15, h:f2(r.oi15), c:cls(r.oi15)},
+          {v:r.rel_btc, h:f2(r.rel_btc), c:cls(r.rel_btc)},
+          {v:r.trigger_count, h:r.trigger_count+' 次'},
+        ]) : '<div class="empty">—</div>') + '</div>';
+  };
+  h += sec('看漲', r=>r.init_dir==='bull', '警報當下資料偏多');
+  h += sec('看跌', r=>r.init_dir==='bear', '警報當下資料偏空');
+  h += '<div class="card"><div class="sub">'
+    + '★官方用 <b>CVD</b> 當方向主軸（偏多確認 CVD +4.83／偏空 −8.24／觀察中 ≈0）。'
+    + '我全市場沒有 CVD，所以方向判定改用官方那句話的另外兩項：<b>OI 保留</b> 與 '
+    + '<b>相對 BTC 強弱</b> —— <b>與官方不會完全一致</b>。<br>'
+    + '官方原話：「警報只代表這個幣正在異動，<b>不等於可以直接進場</b>」；建議槓桿 5 倍。<br>'
+    + '另：官方統計純價格觸發有 73~78% 會停在「觀察中」，本來就多半不成方向。'
+    + '</div></div>';
+  return h;
+}
+
+// 數據訊號（TRAP / ABSORPTION / EXHAUSTION）：規格見 _DHX_DATASIG_0924_SPEC.md
 function viewDhx(){
   const rows = D.dhx||[];
   if(!rows.length) return '<div class="card"><h2>數據訊號<span>TRAP · 15m</span></h2>'
@@ -820,7 +892,8 @@ function viewDhx(){
         r.kind, {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
         pf(r.entry), pf(r.sl), f(r.sl_dist_pct,2)+'%', pf(r.tp1),
       ])
-    + '<div class="sub" style="margin-top:8px">規則抄自官方 rule_version '
+    + '<div class="sub" style="margin-top:8px">TRAP=樞紐假突破收回；ABSORPTION=價創新低但 CVD 沒跟著低(賣壓被吸收)；'
+    + 'EXHAUSTION=價創新高但 CVD 沒跟上(買盤衰竭)。規則抄自官方 rule_version '
     + '<code>TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM</code>：樞紐→假突破→**收盤收回 i1 收盤價**，'
     + '停損放假突破段的完整影線外緣。★官方還有現貨 CVD 確認，我沒有那個來源，所以這版**沒有**，'
     + '不要當成完整複刻。</div></div>';
@@ -955,7 +1028,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924s';
+const PAGE_VER = '20260924t';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

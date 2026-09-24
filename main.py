@@ -8753,26 +8753,28 @@ DHX_SCAN_SEC = 900               # 15 分鐘掃一次（官方全部訊號都是
 DHX_SCAN_BATCH = 8               # 每輪只掃 |OI 變化| 最大的 N 幣（CVD 要逐幣翻頁，很貴）
 
 
-def _dhx_trap_scan(force: bool = False) -> None:
-    """★複刻數據獵手「數據訊號」的 TRAP 家族（規格見 trading-backtest/_DHX_DATASIG_0924_SPEC.md，
-    是從他們 `/api/signals?type=data_hunter` 的 158 筆原始欄位抓到的，不是逆推猜的）。
+def _dhx_scan(force: bool = False) -> None:
+    """★複刻數據獵手「數據訊號」的三個家族（規格 trading-backtest/_DHX_DATASIG_0924_SPEC.md，
+    來自他們 `/api/signals?type=data_hunter` 的 158 筆**原始欄位**，不是逆推猜的）。
 
-    官方 `rule_version` 寫得很白：`TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM_NATIVE_BB_CVD`
-      i1   = 樞紐（pivot）
-      假突破 = 之後跌破/突破 i1 的極值（`breakout_extreme`）
-      確認 = **收盤收回 i1 的收盤價**（`I1_CLOSE_RECLAIM`）→ level=CONFIRMED
-      停損 = `i2_full_wick_low/high`（完整影線）或 `post_i2_structure_low/high`
-      全部 **15m**；`kind` SHORT_TRAP→做多、LONG_TRAP→做空（向下假突破收回＝做多）
-    ★CVD 背離用 bot 既有的 `_okx_contract_cvd_15m`（OKX rubik，翻頁拿 36h）。
-      官方另有**現貨 CVD**（`spot_cvd_i1/i2`），我們沒有來源 → 該欄位標 None，不假裝有。
-    只顯示、不下單。任何例外都吞掉。
+    官方 `rule_version` 把結構寫在名字裡：
+      `TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM_NATIVE_BB_CVD`
+         樞紐 i1 → 假突破(breakout_extreme) → **收盤收回 i1 收盤價** 才 CONFIRMED
+      `ABSORPTION_I2_FORMATION_FULL_WICK_NATIVE_BB_CVD`
+         價格創新低(i2<i1) 但 **CVD 沒跟著創新低** → 賣壓被吸收 → 做多（反之做空）
+      `EXHAUSTION_I2_FORMATION_FULL_WICK_NATIVE_BB_CVD`
+         價格創新高(i2>i1) 但 **CVD 沒跟著創新高** → 買盤衰竭 → 做空（反之做多）
+    共通：全部 **15m**；停損放 i2 的**完整影線**外緣（官方 `sl_source: i2_full_wick_low/high`）。
+
+    ★CVD 用 bot 既有的 `_okx_contract_cvd_15m`（OKX rubik，翻頁拿 36h）。
+      官方另有**現貨 CVD**（`spot_cvd_i1/i2`），我沒有來源 → 欄位給 None，不假裝有。
+    只顯示、不下單；全程 try/except。
     """
     global _DHX_SIG
     if not force and time.time() - _DHX_STATE["ts"] < DHX_SCAN_SEC:
         return
     _DHX_STATE["ts"] = time.time()
     try:
-        # 挑 |OI 1H 變化| 最大的幾個幣（最可能有資金動作），輪替掃描
         cand = []
         for inst, h in _oi_history.items():
             if len(h) >= 2 and h[0][1] > 0:
@@ -8787,85 +8789,269 @@ def _dhx_trap_scan(force: bool = False) -> None:
                     continue
                 hi = df["high"].values; lo = df["low"].values
                 cl = df["close"].values; n = len(cl)
-                for side in ("short_trap", "long_trap"):
-                    # i1 = 最近一個樞紐（左右各 3 根確認），往回找最多 40 根
-                    i1 = None
-                    for k in range(n - 6, n - 46, -1):
-                        if k < 4:
-                            break
-                        if side == "short_trap":
-                            if lo[k] == min(lo[k-3:k+4]):
-                                i1 = k; break
-                        else:
-                            if hi[k] == max(hi[k-3:k+4]):
-                                i1 = k; break
-                    if i1 is None:
-                        continue
-                    # 假突破：i1 之後有一根穿破 i1 的極值
-                    seg = range(i1 + 1, n)
-                    i2 = None
-                    for k in seg:
-                        if side == "short_trap" and lo[k] < lo[i1]:
-                            i2 = k
-                        elif side == "long_trap" and hi[k] > hi[i1]:
-                            i2 = k
-                    if i2 is None or i2 >= n - 1:
-                        continue
-                    # ★確認：**收盤收回 i1 的收盤價**（官方 I1_CLOSE_RECLAIM）
-                    back = None
-                    for k in range(i2 + 1, n):
-                        if side == "short_trap" and cl[k] > cl[i1]:
-                            back = k; break
-                        if side == "long_trap" and cl[k] < cl[i1]:
-                            back = k; break
-                    if back is None or (n - 1 - back) > 4:
-                        continue                       # 只收最近 4 根內確認的
-                    # 停損 = 假突破段的**完整影線**外緣（官方 i2_full_wick_low/high）
-                    sl = float(lo[i2]) if side == "short_trap" else float(hi[i2])
-                    entry = float(cl[-1])
-                    risk = abs(entry - sl)
-                    if risk <= 0 or risk / entry > 0.08:
-                        continue
-                    d = 1 if side == "short_trap" else -1
-                    found[inst] = {
-                        "inst": inst, "kind": "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
-                        "bias": "LONG" if side == "short_trap" else "SHORT",
-                        "tf": "15m", "level": "CONFIRMED",
-                        "i1_close": float(cl[i1]), "breakout_extreme": sl,
-                        "close_back": float(cl[back]), "entry": entry,
-                        "sl": sl, "sl_dist_pct": round(risk / entry * 100, 3),
-                        "sl_source": "i2_full_wick_" + ("low" if d > 0 else "high"),
-                        "tp1": round(entry + d * risk, 8),
-                        "tp2": round(entry + d * risk * 1.5, 8),
-                        "tp3": round(entry + d * risk * 2.0, 8),
-                        "i1_i2_dist": int(i2 - i1), "bars_since": int(n - 1 - back),
-                        "fut_cvd_i1": None, "fut_cvd_i2": None,
-                        "spot_cvd_i1": None, "spot_cvd_i2": None,   # ★現貨 CVD 沒來源，不假裝有
-                        "ts": time.time(),
-                    }
-                    break
+                # CVD 先抓（ABSORPTION/EXHAUSTION 的判定需要它，不能等掃完才補）
+                cv = None
+                try:
+                    _c = _okx_contract_cvd_15m(inst, df.index)
+                    if _c is not None and len(_c) >= 40:
+                        cv = _c.values.astype(float)
+                except Exception:
+                    cv = None
+                r = (_dhx_trap(inst, hi, lo, cl, n)
+                     or _dhx_diverge(inst, hi, lo, cl, n, cv))
+                if r:
+                    found[inst] = r
             except Exception:
                 continue
-        # CVD 背離確認：只對已經成立的候選打（逐幣翻頁很貴，所以放在最後）
-        for inst, r in list(found.items()):
-            try:
-                df = fetch_market_candles(inst, "15m")
-                cvd = _okx_contract_cvd_15m(inst, df.index)
-                if cvd is None or len(cvd) < 20:
-                    continue
-                v = cvd.values.astype(float)
-                r["fut_cvd_i1"] = float(v[-1 - r["i1_i2_dist"]]) if len(v) > r["i1_i2_dist"] else None
-                r["fut_cvd_i2"] = float(v[-1])
-            except Exception:
-                pass
         _DHX_SIG = found
         _DHX_STATE["n"] = len(found)
         if found:
-            print(f"[DHX] 數據訊號(TRAP) 掃到 {len(found)} 筆: "
-                  f"{[x['inst'].replace('-USDT-SWAP','')+':'+x['kind'] for x in found.values()]}",
+            print("[DHX] 數據訊號 %d 筆: %s" % (len(found),
+                  [x["inst"].replace("-USDT-SWAP", "") + ":" + x["kind"] for x in found.values()]),
                   flush=True)
     except Exception as e:
         print(f"[DHX] 數據訊號掃描失敗(不影響交易): {e}", flush=True)
+
+
+def _dhx_pivot(hi, lo, n, side, look=46, conf=3, skip=8):
+    """往回找樞紐（左右各 conf 根確認）。side='low' 找樞紐低、'high' 找樞紐高。
+
+    ★`skip`：**跳過最近 skip 根**才開始找。沒有這個會出大事 ——
+      假突破的那一根（i2）本身就是個樞紐低/高，不跳過就會被當成 i1，
+      接著在「i1 之後」找 i2 自然找不到，整個型態永遠不觸發。
+      （2026-09-24 自己寫的測試抓到，三個家族全都不觸發就是這個原因。）
+    """
+    for k in range(n - conf - skip, n - look, -1):
+        if k < conf + 1:
+            break
+        # ★要**嚴格**極值：用 `== min(...)` 在平盤/平台上會讓「每一根都算樞紐」，
+        #   於是永遠回傳最靠近的那根，後面的型態判定全部落空
+        #   （2026-09-24 測試抓到：三個家族都不觸發就是這個）。
+        #   定義與 bot 既有的 `_find_pivot_low` 一致：左右各 conf 根都要嚴格比它高/低。
+        if side == "low" and all(lo[j] > lo[k] for j in range(k - conf, k + conf + 1) if j != k):
+            return k
+        if side == "high" and all(hi[j] < hi[k] for j in range(k - conf, k + conf + 1) if j != k):
+            return k
+    return None
+
+
+def _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, extra=None):
+    entry = float(cl[-1]); risk = abs(entry - sl)
+    if risk <= 0 or risk / entry > 0.08 or risk / entry < 0.001:
+        return None
+    d = 1 if bias == "LONG" else -1
+    r = {"inst": inst, "kind": kind, "bias": bias, "tf": "15m", "level": "CONFIRMED",
+         "i1_close": float(cl[i1]), "breakout_extreme": float(sl), "close_back": float(cl[back]),
+         "entry": entry, "sl": float(sl), "sl_dist_pct": round(risk / entry * 100, 3),
+         "sl_source": "i2_full_wick_" + ("low" if d > 0 else "high"),
+         "tp1": round(entry + d * risk, 8), "tp2": round(entry + d * risk * 1.5, 8),
+         "tp3": round(entry + d * risk * 2.0, 8),
+         "i1_i2_dist": int(i2 - i1), "bars_since": int(n - 1 - back),
+         "fut_cvd_i1": None, "fut_cvd_i2": None,
+         "spot_cvd_i1": None, "spot_cvd_i2": None,   # ★官方有現貨CVD，我沒有來源
+         "ts": time.time()}
+    if extra:
+        r.update(extra)
+    return r
+
+
+def _dhx_trap(inst, hi, lo, cl, n):
+    """TRAP：樞紐 → 假突破 → 收盤收回 i1 收盤價。"""
+    for side in ("short_trap", "long_trap"):
+        i1 = _dhx_pivot(hi, lo, n, "low" if side == "short_trap" else "high")
+        if i1 is None:
+            continue
+        i2 = None
+        for k in range(i1 + 1, n):
+            if side == "short_trap" and lo[k] < lo[i1]:
+                i2 = k
+            elif side == "long_trap" and hi[k] > hi[i1]:
+                i2 = k
+        if i2 is None or i2 >= n - 1:
+            continue
+        back = None
+        for k in range(i2 + 1, n):
+            if side == "short_trap" and cl[k] > cl[i1]:
+                back = k; break
+            if side == "long_trap" and cl[k] < cl[i1]:
+                back = k; break
+        if back is None or (n - 1 - back) > 4:
+            continue
+        sl = float(lo[i2]) if side == "short_trap" else float(hi[i2])
+        r = _dhx_pack(inst, "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
+                      "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n)
+        if r:
+            return r
+    return None
+
+
+def _dhx_diverge(inst, hi, lo, cl, n, cv):
+    """ABSORPTION（吸收）／EXHAUSTION（衰竭）：價格創新極值但 CVD 沒跟上。
+
+    官方命名 `I2_FORMATION_FULL_WICK` → 看的是**第二個錨點成形**，停損用完整影線。
+    ABSORPTION：i2 價格更低、CVD 反而更高 → 賣壓被吸收 → 做多（鏡像則做空）。
+    EXHAUSTION：i2 價格更高、CVD 沒更高 → 買盤衰竭 → 做空（鏡像則做多）。
+    ★沒有 CVD 就不判定（這兩個家族的定義就是 CVD 背離，硬做等於瞎猜）。
+    """
+    if cv is None or len(cv) < n:
+        return None
+    for side in ("absorb_long", "absorb_short"):
+        want_low = (side == "absorb_long")
+        i1 = _dhx_pivot(hi, lo, n, "low" if want_low else "high", look=70, conf=3, skip=10)
+        if i1 is None:
+            continue
+        # i2 = i1 之後、最近一個更極端的樞紐（要已收盤確認）
+        i2 = None
+        for k in range(n - 4, i1 + 2, -1):
+            if want_low and lo[k] < lo[i1] and all(lo[j] > lo[k] for j in range(k - 2, k + 3) if j != k):
+                i2 = k; break
+            if (not want_low) and hi[k] > hi[i1] and all(hi[j] < hi[k] for j in range(k - 2, k + 3) if j != k):
+                i2 = k; break
+        if i2 is None:
+            continue
+        c1, c2 = float(cv[i1]), float(cv[i2])
+        if want_low:
+            if not (c2 > c1):          # 價更低但 CVD 更高 = 吸收
+                continue
+            kind, bias = "ABSORPTION", "LONG"
+            sl = float(lo[i2])
+        else:
+            if not (c2 < c1):          # 價更高但 CVD 更低 = 衰竭
+                continue
+            kind, bias = "EXHAUSTION", "SHORT"
+            sl = float(hi[i2])
+        # 確認：i2 之後要有一根收盤往回（官方 entry_source 以 engulf_market/confirm_close 為主）
+        back = None
+        for k in range(i2 + 1, n):
+            if bias == "LONG" and cl[k] > cl[i2] and cl[k] > (hi[k] + lo[k]) / 2:
+                back = k; break
+            if bias == "SHORT" and cl[k] < cl[i2] and cl[k] < (hi[k] + lo[k]) / 2:
+                back = k; break
+        if back is None or (n - 1 - back) > 4:
+            continue
+        r = _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n,
+                      {"fut_cvd_i1": c1, "fut_cvd_i2": c2,
+                       "entry_source": "confirm_close"})
+        if r:
+            return r
+    return None
+
+
+_ANOM = {}                       # 異常警報事件池：coin -> 事件 dict
+ANOM_PX_TH = 3.0                 # ★官方門檻：price_15m / price_5m 都是 ≥3.00%（1000 筆實測最小 3.001）
+ANOM_VALID_H = 6                 # 事件有效期（官方有 event_valid_until，實際值沒抓到，這是我設的）
+ANOM_MAX = 40
+
+
+def _anom_scan(now_s: float) -> None:
+    """★複刻「異常警報」的觸發 + 事件狀態機（規格 trading-backtest/_DHX_ALERT_0924_SPEC.md）。
+
+    官方觸發器與門檻（1000 筆實測）：`price_15m` ≥3.00%（700筆）、`price_5m` ≥3.00%（192筆）、
+    `oi_cross`（81筆，定義沒抓到）。★統計還顯示：純價格觸發有 **73~78% 停在「異動觀察」**，
+    只有 `oi_cross` 幾乎都會定出方向（4% 停在觀察）—— 所以價格警報本來就多半只是觀察。
+
+    狀態機（官方 `event_lifecycle_status` / `bias_label`）：
+      RADAR(異動觀察) → CONFIRMED(偏多/偏空確認) → WEAKENING(轉弱) / INVALIDATED(失效)
+    ★官方用 **CVD 當方向主軸**（偏多確認 CVD +4.83、偏空確認 −8.24、觀察中 ≈0），
+      我全市場沒有 CVD → **方向判定用 OI 保留 + 相對 BTC 強弱**（官方那句話的另外兩項），
+      並在畫面標明「沒有 CVD，方向判定與官方不同」，不假裝一致。
+
+    資料全部來自既有的 5 分鐘取樣（`_PX_HISTORY` / `_oi_history`），零額外 API。
+    """
+    try:
+        px_all = _PX_HISTORY
+        if not px_all:
+            return
+        # BTC 當基準（官方「相對 BTC 強弱」）
+        def _chg(hist, secs):
+            if not hist or len(hist) < 2:
+                return None
+            base = None
+            tgt = now_s - secs
+            prev = None
+            for t, v in hist:
+                if t <= tgt:
+                    prev = (t, v)
+                elif prev is not None:
+                    f = (tgt - prev[0]) / (t - prev[0])
+                    base = prev[1] + (v - prev[1]) * f
+                    break
+                else:
+                    return None
+            if base is None or base <= 0:
+                return None
+            return (hist[-1][1] - base) / base * 100.0
+
+        btc15 = _chg(px_all.get("BTC-USDT-SWAP"), 900) or 0.0
+        for inst, ph in list(px_all.items()):
+            coin = inst.replace("-USDT-SWAP", "")
+            p15 = _chg(ph, 900)
+            p5 = _chg(ph, 300)
+            if p15 is None:
+                continue
+            trig = None
+            if abs(p15) >= ANOM_PX_TH:
+                trig = "price_15m"
+            elif p5 is not None and abs(p5) >= ANOM_PX_TH:
+                trig = "price_5m"
+            ev = _ANOM.get(coin)
+            if trig and not ev:
+                _ANOM[coin] = ev = {
+                    "coin": coin, "inst": inst, "trigger_type": trig,
+                    "first_ts": now_s, "last_ts": now_s, "trigger_count": 1,
+                    "trigger_price": ph[-1][1], "init_dir": "bull" if p15 > 0 else "bear",
+                    "status": "RADAR", "bias_label": "異動觀察",
+                    "confirmed_at": None, "confirmed_price": None, "confirmed_dir": "",
+                    "mfe_pct": 0.0, "giveback_pct": 0.0,
+                }
+            elif trig and ev:
+                ev["trigger_count"] += 1
+                ev["last_ts"] = now_s
+                ev["trigger_type"] = trig
+            if not ev:
+                continue
+            # ── 狀態機：用 OI 保留 + 相對 BTC 強弱（官方第三項 CVD 我沒有）
+            last = ph[-1][1]
+            oi15 = None
+            oh = _oi_history.get(inst)
+            if oh:
+                oi15 = _chg(oh, 900)
+            rel = (p15 or 0.0) - btc15          # 相對 BTC 強弱
+            up = ev["init_dir"] == "bull"
+            oi_hold = (oi15 is not None and (oi15 > 0 if up else oi15 > 0))
+            strong = (rel > 0) if up else (rel < 0)
+            if ev["status"] == "RADAR":
+                if oi_hold and strong and (now_s - ev["first_ts"]) >= 900:
+                    ev["status"] = "CONFIRMED"
+                    ev["bias_label"] = "偏多確認" if up else "偏空確認"
+                    ev["confirmed_at"] = now_s
+                    ev["confirmed_price"] = last
+                    ev["confirmed_dir"] = "bull" if up else "bear"
+            elif ev["status"] == "CONFIRMED":
+                ref = ev["confirmed_price"] or last
+                move = (last - ref) / ref * 100.0 * (1 if up else -1)
+                ev["mfe_pct"] = max(ev.get("mfe_pct") or 0.0, move)
+                ev["giveback_pct"] = round((ev["mfe_pct"] - move), 3)
+                if move <= -2.0:
+                    ev["status"] = "INVALIDATED"
+                    ev["bias_label"] = "偏多失效" if up else "偏空失效"
+                elif not oi_hold or not strong:
+                    ev["status"] = "WEAKENING"
+                    ev["bias_label"] = "偏多轉弱" if up else "偏空轉弱"
+            ev["p15"] = round(p15, 3) if p15 is not None else None
+            ev["p5"] = round(p5, 3) if p5 is not None else None
+            ev["oi15"] = round(oi15, 3) if oi15 is not None else None
+            ev["rel_btc"] = round(rel, 3)
+            ev["last_price"] = last
+        # 過期清理
+        for c in list(_ANOM.keys()):
+            if now_s - _ANOM[c]["last_ts"] > ANOM_VALID_H * 3600:
+                del _ANOM[c]
+        if len(_ANOM) > ANOM_MAX:
+            for c in sorted(_ANOM, key=lambda x: _ANOM[x]["last_ts"])[:len(_ANOM) - ANOM_MAX]:
+                del _ANOM[c]
+    except Exception as e:
+        print(f"[ANOM] 異常警報掃描失敗(不影響交易): {e}", flush=True)
 
 
 def _oi_sample_tick(force: bool = False) -> bool:
@@ -8946,7 +9132,11 @@ def _oi_sample_tick(force: bool = False) -> bool:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
     _bn_oi_sample(now_s, keep_from)     # 補幣安 OI（被封就自動停用，見函數內說明）
     try:
-        _dhx_trap_scan()                # 數據訊號(TRAP)，15 分鐘一次、每輪只掃 8 幣
+        _anom_scan(now_s)               # 異常警報（觸發+狀態機，零額外 API）
+    except Exception as _ae:
+        print(f"[ANOM] 例外(不影響交易): {_ae}", flush=True)
+    try:
+        _dhx_scan()                     # 數據訊號(TRAP/ABSORPTION/EXHAUSTION)
     except Exception as _de:
         print(f"[DHX] 掃描例外(不影響交易): {_de}", flush=True)
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
