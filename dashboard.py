@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924p"
+VER = "20260924q"
 
 
 def _clean(v):
@@ -236,7 +236,7 @@ def _market(G, win_h=1.0, top_n=300):
             rows.append({
                 "inst": inst, "oi": oi_pct, "d_usd": d_usd, "px": px_pct, "q": quad,
                 "oiu": l_v, "last": s.get("last"), "chg24h": s.get("chg24h"),
-                "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None,
+                "vol": s.get("volccy_usd"), "oimc": (l_v / mc) if mc else None, "mcap": mc,
                 # 官方兩道固定條件（價格是**上限**：要「OI 大動、價格還沒動」）
                 "q24": quad24, "src": src,
                 "inq": abs(oi_pct) >= QUAD_OI_MIN and abs(px_pct) <= QUAD_PX_MAX,
@@ -492,6 +492,9 @@ _HTML = """<!doctype html>
   .bt{flex:1;min-width:104px;padding:11px 8px;border-radius:9px;border:1px solid var(--line);
       background:#0f141c;color:var(--fg);font-size:13px;cursor:pointer;font-weight:600}
   .bt.bo{background:#16233a;border-color:var(--accent);color:#cfe0ff}
+  .rel{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .rl{font-size:12px;padding:4px 8px;border:1px solid var(--line);border-radius:7px;
+      background:#0f141c;cursor:pointer;font-variant-numeric:tabular-nums}
   .bar{height:6px;background:#0f141c;border-radius:99px;overflow:hidden}
   .bar i{display:block;height:100%;background:var(--accent);border-radius:99px;transition:width .3s}
   .ver{font-size:10px;color:var(--dim);cursor:pointer;padding:3px 8px;border:1px solid var(--line);
@@ -730,6 +733,29 @@ function goCG(c){
       + encodeURIComponent(web) + ';end';
   } else { window.open(web,'_blank'); } }
 
+// 大數字縮寫（官方字卡寫 57.70B USDT / 1.70T 這種格式）
+function big(v){
+  if(v===null||v===undefined||isNaN(v)) return '—';
+  const a=Math.abs(v);
+  if(a>=1e12) return f(v/1e12,2)+'T';
+  if(a>=1e9)  return f(v/1e9,2)+'B';
+  if(a>=1e6)  return f(v/1e6,2)+'M';
+  return f(v,0);
+}
+// 官方字卡有「相關幣種 → 📊 同樣<象限>」一區：同象限、OI 變化最大的其他幣
+function relatedHTML(r){
+  const qm=r.q24||r.q;
+  const g=(D.mkt.rows||[]).filter(x=>(x.q24||x.q)===qm && x.inst!==r.inst && x.inq)
+    .sort((a,b)=>Math.abs(b.oi)-Math.abs(a.oi)).slice(0,8);
+  if(!g.length) return '';
+  return `<div class="sub" style="margin-top:12px">📊 同樣「${qm}」的幣</div>`
+    + '<div class="rel">' + g.map(x=>{
+        const c=x.inst.replace('-USDT-SWAP','');
+        return `<span class="rl" onclick="openCard('${x.inst}')">${c}`
+          + ` <b class="${cls(x.oi)}">${pct(x.oi)}</b></span>`;
+      }).join('') + '</div>';
+}
+
 let CARD = null;
 function openCard(inst){ CARD = inst; draw(); }
 function closeCard(){ CARD = null; draw(); }
@@ -738,20 +764,30 @@ function cardHTML(){
   const r = (D.mkt.rows||[]).find(x=>x.inst===CARD);
   if(!r) return '';
   const c = r.inst.replace('-USDT-SWAP','');
-  const meta = (D.mkt.quads&&D.mkt.quads[r.q]) ? D.mkt.quads[r.q] : ['',''];
+  // ★象限有兩套，不可以混：排名表用 24H 價格分組（對齊官方），散點圖用所選週期。
+  //   之前字卡只顯示同週期那套 → 從排名點進來會看到「排名寫空頭建倉、字卡寫多頭建倉」
+  //   （用戶 2026-09-24 回報）。現在主標題跟排名一致，另外把同週期那套也列出來。
+  const qMain = r.q24 || r.q;
+  const meta = (D.mkt.quads&&D.mkt.quads[qMain]) ? D.mkt.quads[qMain] : ['',''];
   const row=(k,v,cl='')=>`<div class="cr"><span>${k}</span><b class="${cl}">${v}</b></div>`;
   return '<div class="ovl" onclick="closeCard()"></div>'
     + `<div class="card cd" onclick="event.stopPropagation()">`
     + `<h2><span class="qh">${c}</span><span onclick="closeCard()" style="cursor:pointer">✕</span></h2>`
-    + `<div class="cq" style="color:${QCLR[r.q]}">${r.q}　<small>${meta[0]}</small></div>`
+    + `<div class="cq" style="color:${QCLR[qMain]}">${qMain}　<small>${meta[0]}</small></div>`
     + `<div class="sub" style="margin:6px 0 10px">${meta[1]||''}</div>`
+    // 欄位順序與名稱對齊官方字卡（2026-09-24 實際抓到的版面）
     + row('現價', pf(r.last))
-    + row(`OI 變化 (${D.mkt.win_h}H)`, pct(r.oi), cls(r.oi))
-    + row(`價格變化 (${D.mkt.win_h}H)`, pct(r.px), cls(r.px))
-    + row('價格 24H', pct(r.chg24h), cls(r.chg24h))
-    + row('OI／市值', r.oimc? f(r.oimc*100,2)+'%' : '—')
-    + row('OI 名目', r.oiu? '$'+f(r.oiu/1e6,1)+'M' : '—')
-    + row('24H 成交額', r.vol? '$'+f(r.vol/1e6,1)+'M' : '—')
+    + row('24H 漲跌', pct(r.chg24h), cls(r.chg24h))
+    + row(`動能 ${D.mkt.win_h}H`, pct(r.px), cls(r.px))
+    + row(`OI 變化 ${D.mkt.win_h}H`, pct(r.oi), cls(r.oi))
+    + row('未平倉量', r.oiu? big(r.oiu)+' USDT' : '—')
+    + row('市值', r.mcap? big(r.mcap) : '—')
+    + row('OI／市值比', r.oimc? f(r.oimc*100,2)+'%' : '—')
+    + row('24H 成交額', r.vol? big(r.vol)+' USDT' : '—')
+    + (r.q!==qMain ? row(`同 ${D.mkt.win_h}H 窗象限`,
+          `<span style="color:${QCLR[r.q]}">${r.q}</span>`) : '')
+    + row('資料來源', r.src||'OKX', 'dim')
+    + relatedHTML(r)
     + (r.inflow? '<div class="sub" style="color:var(--warn);margin-top:8px">◆ 資金注入候選'
         + '（1H OI ≥ 4%、|價格| ≤ 3%）：官方下一步是觀察 15 分鐘後看 OI 有沒有保留、'
         + '相對 BTC 強弱與 CVD 方向。</div>' : '')
@@ -893,7 +929,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924p';
+const PAGE_VER = '20260924q';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
