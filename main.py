@@ -8635,7 +8635,7 @@ def _dash_hist_save() -> None:
         keep_from = time.time() - (OI_MOVERS_WINDOW_H + 1) * 3600
         def _pack(d):
             out = {}
-            for k, h in d.items():
+            for k, h in list(d.items()):   # ★snapshot:幣安取樣在背景執行緒改這些 dict
                 # 9 位有效數字:OI 的 1H 變化常常只有 1~3%,存成 6 位(1000052→1000050)
                 # 的量化誤差雖小,但沒必要拿精度換那一點檔案大小(實測 476 幣約 1MB)。
                 pts = [[int(t), float(f"{v:.9g}")] for (t, v) in h if t >= keep_from]
@@ -8643,9 +8643,13 @@ def _dash_hist_save() -> None:
                     out[k] = pts
             return out
         tmp = _DASH_HIST_FILE + ".tmp"
+        # ★2026-09-24 加存 bn（幣安 OI）：先前幣安被 451 擋著、這裡沒東西可存所以沒寫，
+        #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
+        #   幣安那一腳都要重等一小時，OI 變化% 會在「OKX 單腳」與「雙所平均」之間跳。
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"v": 1, "ts": int(time.time()),
-                       "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY)},
+            json.dump({"v": 2, "ts": int(time.time()),
+                       "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY),
+                       "bn": _pack(_BN_HISTORY)},
                       f, separators=(",", ":"))
         os.replace(tmp, _DASH_HIST_FILE)      # 原子替換,避免寫到一半被重啟砍成半截檔
     except Exception as e:
@@ -8671,18 +8675,20 @@ def _dash_hist_load() -> None:
             return out
         _oi_history.update(_unpack(d.get("oi")))
         _PX_HISTORY = _unpack(d.get("px"))
+        _BN_HISTORY.update(_unpack(d.get("bn")))   # v1 舊檔沒這個鍵 → 空 dict，相容
         _depth = 0
         for _k, _h in _oi_history.items():
             if _h:
                 _depth = max(_depth, int((time.time() - _h[0][0]) / 60))
-        print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣,"
+        print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣 / "
+              f"幣安OI {len(_BN_HISTORY)} 幣,"
               f"最深 {_depth} 分鐘(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
     except Exception as e:
         print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
 
 
 _BN_HISTORY: Dict[str, list] = {}       # 幣安 OI（張數）instId -> [(ts, oi)]
-_BN_STATE = {"ok": None, "fail": 0, "n": 0, "host": 0}
+_BN_STATE = {"ok": None, "fail": 0, "n": 0, "host": 0, "busy": False, "ms": 0}
 # ★Cloudflare Worker 代理（繞開 Railway 出口 IP 被幣安地理封鎖 HTTP 451）。
 #   設了才啟用；沒設就走原本的直連（會 451 然後自動停用）。
 #   格式：DASH_BN_PROXY=https://xxx.workers.dev   DASH_BN_PROXY_KEY=<Worker 裡的 SECRET>
@@ -9335,7 +9341,20 @@ def _oi_sample_tick(force: bool = False) -> bool:
                         del _PX_HISTORY[k]
     except Exception as e:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
-    _bn_oi_sample(now_s, keep_from)     # 補幣安 OI（被封就自動停用，見函數內說明）
+    # ★★2026-09-24 改成背景執行緒：幣安沒被擋之前這裡 451 一次就 return，成本≈0；
+    #   改走 www.binance.com 之後會真的逐幣打 60 支（幣安沒有全市場 OI 的批量端點），
+    #   同步跑等於每 5 分鐘把**交易主迴圈**卡住十幾秒 —— 掃描時機不能被儀表板拖。
+    #   `_BN_STATE["busy"]` 保證同時只有一個在跑（上一輪沒跑完就跳過這輪，不堆執行緒）。
+    if not _BN_STATE.get("busy"):
+        def _bn_bg(_ns=now_s, _kf=keep_from):
+            _t0 = time.time()
+            try:
+                _bn_oi_sample(_ns, _kf)
+            finally:
+                _BN_STATE["ms"] = int((time.time() - _t0) * 1000)
+                _BN_STATE["busy"] = False
+        _BN_STATE["busy"] = True
+        Thread(target=_bn_bg, daemon=True).start()
     try:
         _anom_scan(now_s)               # 異常警報（觸發+狀態機，零額外 API）
     except Exception as _ae:
