@@ -4205,6 +4205,33 @@ def _okx_contract_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
     return cvd.reindex(idx, method="ffill")
 
 
+def _okx_spot_cvd_15m(okx_swap_symbol: str, idx) -> "pd.Series":
+    """★現貨 CVD（15m）。用 OKX rubik taker-volume 的 **instType=SPOT**。
+
+    ★我一度以為「現貨 CVD 沒有來源」而把官方的 `spot_cvd_i1/i2` 留空 —— 那是錯的。
+      2026-09-24 實測：`instType=SPOT` 一次回 **576 筆 5m（48 小時）**，
+      比 CONTRACTS 的 72 筆（6 小時）還多，**不用翻頁**。
+    官方「數據訊號」每筆都同時帶 `fut_cvd_i1/i2` 與 `spot_cvd_i1/i2`，
+    兩者分開看才是完整的背離判定（合約與現貨可能不同向，那正是資訊所在）。
+    """
+    ccy = okx_swap_symbol.split("-")[0]
+    rows = _fetch_okx_public_data("/api/v5/rubik/stat/taker-volume",
+                                  {"ccy": ccy, "instType": "SPOT", "period": "5m"})
+    if not rows or len(rows) < 60:
+        return pd.Series(dtype=float)
+    recs = []
+    for r in rows:
+        try:
+            recs.append((int(r[0]), float(r[2]) - float(r[1])))   # buy - sell
+        except Exception:
+            continue
+    if len(recs) < 60:
+        return pd.Series(dtype=float)
+    ser = pd.Series({pd.to_datetime(t, unit="ms", utc=True): d for t, d in recs}).sort_index()
+    cvd = ser.resample("15min").sum().cumsum()
+    return cvd.reindex(idx, method="ffill")
+
+
 _VLONG_KL_CACHE: Dict[str, pd.DataFrame] = {}   # inst -> 加深後的15m K線
 _VLONG_DEEP_BUDGET = {"round": 0, "used": 0}   # 每輪最多深抓幾個幣(避免拖慢掃描)
 VLONG_DEEP_BARS = 900          # 目標深度(900根15m ≈ 9.4天)
@@ -8790,15 +8817,21 @@ def _dhx_scan(force: bool = False) -> None:
                 hi = df["high"].values; lo = df["low"].values
                 cl = df["close"].values; n = len(cl)
                 # CVD 先抓（ABSORPTION/EXHAUSTION 的判定需要它，不能等掃完才補）
-                cv = None
+                cv = sv = None
                 try:
                     _c = _okx_contract_cvd_15m(inst, df.index)
                     if _c is not None and len(_c) >= 40:
                         cv = _c.values.astype(float)
                 except Exception:
                     cv = None
-                r = (_dhx_trap(inst, hi, lo, cl, n)
-                     or _dhx_diverge(inst, hi, lo, cl, n, cv))
+                try:
+                    _s = _okx_spot_cvd_15m(inst, df.index)   # ★現貨 CVD（instType=SPOT，48h）
+                    if _s is not None and len(_s) >= 40:
+                        sv = _s.values.astype(float)
+                except Exception:
+                    sv = None
+                r = (_dhx_trap(inst, hi, lo, cl, n, cv, sv)
+                     or _dhx_diverge(inst, hi, lo, cl, n, cv, sv))
                 if r:
                     found[inst] = r
             except Exception:
@@ -8855,8 +8888,9 @@ def _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, extra=None):
     return r
 
 
-def _dhx_trap(inst, hi, lo, cl, n):
-    """TRAP：樞紐 → 假突破 → 收盤收回 i1 收盤價。"""
+def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None):
+    """TRAP：樞紐 → 假突破 → 收盤收回 i1 收盤價。
+    兩個錨點的合約/現貨 CVD 一併記錄（官方每筆都帶 fut_cvd_i1/i2 + spot_cvd_i1/i2）。"""
     for side in ("short_trap", "long_trap"):
         i1 = _dhx_pivot(hi, lo, n, "low" if side == "short_trap" else "high")
         if i1 is None:
@@ -8879,13 +8913,30 @@ def _dhx_trap(inst, hi, lo, cl, n):
             continue
         sl = float(lo[i2]) if side == "short_trap" else float(hi[i2])
         r = _dhx_pack(inst, "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
-                      "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n)
+                      "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n,
+                      _dhx_cvd(cv, sv, i1, i2))
         if r:
             return r
     return None
 
 
-def _dhx_diverge(inst, hi, lo, cl, n, cv):
+def _dhx_cvd(cv, sv, i1, i2):
+    """把兩個錨點的合約／現貨 CVD 包成官方那四個欄位。拿不到就留 None。"""
+    o = {}
+    try:
+        if cv is not None and len(cv) > max(i1, i2):
+            o["fut_cvd_i1"] = float(cv[i1]); o["fut_cvd_i2"] = float(cv[i2])
+    except Exception:
+        pass
+    try:
+        if sv is not None and len(sv) > max(i1, i2):
+            o["spot_cvd_i1"] = float(sv[i1]); o["spot_cvd_i2"] = float(sv[i2])
+    except Exception:
+        pass
+    return o
+
+
+def _dhx_diverge(inst, hi, lo, cl, n, cv, sv=None):
     """ABSORPTION（吸收）／EXHAUSTION（衰竭）：價格創新極值但 CVD 沒跟上。
 
     官方命名 `I2_FORMATION_FULL_WICK` → 看的是**第二個錨點成形**，停損用完整影線。
@@ -8929,9 +8980,9 @@ def _dhx_diverge(inst, hi, lo, cl, n, cv):
                 back = k; break
         if back is None or (n - 1 - back) > 4:
             continue
-        r = _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n,
-                      {"fut_cvd_i1": c1, "fut_cvd_i2": c2,
-                       "entry_source": "confirm_close"})
+        _ex = _dhx_cvd(cv, sv, i1, i2)
+        _ex["entry_source"] = "confirm_close"
+        r = _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, _ex)
         if r:
             return r
     return None

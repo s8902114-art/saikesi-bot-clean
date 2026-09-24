@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924u"
+VER = "20260924w"
 
 
 def _clean(v):
@@ -883,6 +883,31 @@ function viewAnom(){
   return h;
 }
 
+// 型態名稱用中文（官方 kind 是英文代碼，畫面上看不懂）
+const KIND = {
+  SHORT_TRAP:  ['假跌破收回', 'up'],    // 向下假突破後收回 → 做多
+  LONG_TRAP:   ['假突破收回', 'down'],  // 向上假突破後收回 → 做空
+  ABSORPTION:  ['吸收背離', 'up'],      // 價創新低但 CVD 沒跟著低
+  EXHAUSTION:  ['衰竭背離', 'down'],    // 價創新高但 CVD 沒跟上
+};
+// 該幣在 OI 排名的象限（跟數據訊號並排顯示）
+// ★用戶 2026-09-24 指出「數據訊號寫做多、但那個幣是空頭建倉」——
+//   那不是矛盾，是**兩個不同維度**：型態在講進場方向，象限在描述持倉×價格狀態。
+//   官方自己就寫「象限只描述持倉與價格，**不直接判定多空**」。並排顯示才不會各說各話。
+function quadOf(inst){
+  const m = ((D.mkt&&D.mkt.rows)||[]).find(x=>x.inst===inst);
+  if(!m) return {v:'', h:'<span class="dim">—</span>'};
+  const q = m.q24 || m.q;
+  return {v:q, h:`<span style="color:${QCLR[q]}">${q}</span>`};
+}
+// 兩個錨點的 CVD：只顯示「升/降」比數值有用（數值量級各幣差很多）
+function cvdCell(a, b){
+  if(a===null||a===undefined||b===null||b===undefined)
+    return {v:0, h:'<span class="dim">—</span>'};
+  const up = b > a;
+  return {v: up?1:-1, h: up?'升':'降', c: up?'up':'down'};
+}
+
 // 數據訊號（TRAP / ABSORPTION / EXHAUSTION）：規格見 _DHX_DATASIG_0924_SPEC.md
 function viewDhx(){
   const rows = D.dhx||[];
@@ -890,17 +915,26 @@ function viewDhx(){
     + '<div class="empty">目前沒有成立的 TRAP。每 15 分鐘掃一次，'
     + '每輪只掃 OI 變化最大的 8 個幣（CVD 要逐幣翻頁，成本高）。</div></div>';
   return '<div class="card"><h2>數據訊號<span>TRAP · 15m · 假突破收回</span></h2>'
-    + table('dhx', ['幣','型態','方向','進場','停損','停損%','TP1'], rows, r=>[
+    + table('dhx', ['幣','型態','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'], rows, r=>[
         {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
           + r.inst.replace('-USDT-SWAP','')+'</a>'},
-        r.kind, {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
+        {v:r.kind, h:(KIND[r.kind]||[r.kind,''])[0], c:(KIND[r.kind]||['',''])[1]},
+        {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
+        quadOf(r.inst),
         pf(r.entry), pf(r.sl), f(r.sl_dist_pct,2)+'%', pf(r.tp1),
+        cvdCell(r.fut_cvd_i1, r.fut_cvd_i2), cvdCell(r.spot_cvd_i1, r.spot_cvd_i2),
       ])
-    + '<div class="sub" style="margin-top:8px">TRAP=樞紐假突破收回；ABSORPTION=價創新低但 CVD 沒跟著低(賣壓被吸收)；'
-    + 'EXHAUSTION=價創新高但 CVD 沒跟上(買盤衰竭)。規則抄自官方 rule_version '
-    + '<code>TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM</code>：樞紐→假突破→**收盤收回 i1 收盤價**，'
-    + '停損放假突破段的完整影線外緣。★官方還有現貨 CVD 確認，我沒有那個來源，所以這版**沒有**，'
-    + '不要當成完整複刻。</div></div>';
+    + '<div class="sub" style="margin-top:8px">'
+    + '<b>假跌破收回</b>：跌破前低後又收回原本的收盤價 → 掃損陷阱，做多。<br>'
+    + '<b>假突破收回</b>：突破前高後又跌回去 → 做空。<br>'
+    + '<b>吸收背離</b>：價格創新低，但 CVD 沒有跟著創新低 → 賣壓被吃掉，做多。<br>'
+    + '<b>衰竭背離</b>：價格創新高，但 CVD 沒跟上 → 買盤後繼無力，做空。<br>'
+    + '停損一律放假突破那根的<b>完整影線外緣</b>（官方 sl_source）。CVD 欄顯示兩個錨點之間是升是降。<br>'
+    + '<b>「方向」和「象限」會不一樣，那是正常的</b>：方向是這個<b>型態</b>要怎麼進場，'
+    + '象限是這個幣<b>當下持倉×價格</b>的狀態。官方原話：「象限只描述持倉與價格，'
+    + '<b>不直接判定多空</b>」。兩者不同時，代表型態是在跟當下的持倉結構對做（例如假跌破收回做多，'
+    + '但持倉結構還在空頭建倉）——自己判斷要不要跟。'
+    + '</div></div>';
 }
 
 function viewMkt(){
@@ -1032,7 +1066,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924u';
+const PAGE_VER = '20260924w';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
