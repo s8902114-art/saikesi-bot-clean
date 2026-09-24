@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260924r"
+VER = "20260924s"
 
 
 def _clean(v):
@@ -367,6 +367,8 @@ def collect(G, win_h=1.0):
         "trades": _trades(G),
         "oi": _oi_board(G),
         "mkt": _market(G, win_h),
+        "dhx": sorted((G.get("_DHX_SIG") or {}).values(),
+                      key=lambda r: r.get("ts") or 0, reverse=True)[:30],
         "diag": _diags(G),
         "flags": _flags(G),
         "coins": coins,
@@ -560,7 +562,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['mkt','篩選器'],['rank','OI 排名'],['pos','持倉'],['coins','幣種'],
+const TABS = [['mkt','篩選器'],['rank','OI 排名'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -593,6 +595,7 @@ function draw(){
   document.getElementById('card').innerHTML = cardHTML();
   if(TAB==='mkt') v.innerHTML = viewMkt();
   if(TAB==='rank') v.innerHTML = viewRank();
+  if(TAB==='dhx') v.innerHTML = viewDhx();
   if(TAB==='pos') v.innerHTML = viewPos();
   if(TAB==='oi') v.innerHTML = viewOI();
   if(TAB==='coins') v.innerHTML = viewCoins();
@@ -804,6 +807,25 @@ function cardHTML(){
     + '</div>';
 }
 
+// 數據訊號（TRAP）：規格見 _DHX_DATASIG_0924_SPEC.md
+function viewDhx(){
+  const rows = D.dhx||[];
+  if(!rows.length) return '<div class="card"><h2>數據訊號<span>TRAP · 15m</span></h2>'
+    + '<div class="empty">目前沒有成立的 TRAP。每 15 分鐘掃一次，'
+    + '每輪只掃 OI 變化最大的 8 個幣（CVD 要逐幣翻頁，成本高）。</div></div>';
+  return '<div class="card"><h2>數據訊號<span>TRAP · 15m · 假突破收回</span></h2>'
+    + table('dhx', ['幣','型態','方向','進場','停損','停損%','TP1'], rows, r=>[
+        {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+          + r.inst.replace('-USDT-SWAP','')+'</a>'},
+        r.kind, {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
+        pf(r.entry), pf(r.sl), f(r.sl_dist_pct,2)+'%', pf(r.tp1),
+      ])
+    + '<div class="sub" style="margin-top:8px">規則抄自官方 rule_version '
+    + '<code>TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM</code>：樞紐→假突破→**收盤收回 i1 收盤價**，'
+    + '停損放假突破段的完整影線外緣。★官方還有現貨 CVD 確認，我沒有那個來源，所以這版**沒有**，'
+    + '不要當成完整複刻。</div></div>';
+}
+
 function viewMkt(){
   const m=D.mkt, rows=m.rows||[];
   if(!rows.length) return noData(m);
@@ -933,7 +955,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260924r';
+const PAGE_VER = '20260924s';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});

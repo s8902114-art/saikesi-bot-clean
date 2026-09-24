@@ -8727,6 +8727,127 @@ def _bn_oi_sample(now_s: float, keep_from: float) -> None:
         print(f"[DASH] 幣安 OI 取樣失敗({_BN_STATE['fail']}/3): {e}", flush=True)
 
 
+_DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
+_DHX_STATE = {"ts": 0.0, "i": 0, "n": 0}
+DHX_SCAN_SEC = 900               # 15 分鐘掃一次（官方全部訊號都是 15m 時框）
+DHX_SCAN_BATCH = 8               # 每輪只掃 |OI 變化| 最大的 N 幣（CVD 要逐幣翻頁，很貴）
+
+
+def _dhx_trap_scan(force: bool = False) -> None:
+    """★複刻數據獵手「數據訊號」的 TRAP 家族（規格見 trading-backtest/_DHX_DATASIG_0924_SPEC.md，
+    是從他們 `/api/signals?type=data_hunter` 的 158 筆原始欄位抓到的，不是逆推猜的）。
+
+    官方 `rule_version` 寫得很白：`TRAP_CONFIRMED_PIVOT_I1_CLOSE_RECLAIM_NATIVE_BB_CVD`
+      i1   = 樞紐（pivot）
+      假突破 = 之後跌破/突破 i1 的極值（`breakout_extreme`）
+      確認 = **收盤收回 i1 的收盤價**（`I1_CLOSE_RECLAIM`）→ level=CONFIRMED
+      停損 = `i2_full_wick_low/high`（完整影線）或 `post_i2_structure_low/high`
+      全部 **15m**；`kind` SHORT_TRAP→做多、LONG_TRAP→做空（向下假突破收回＝做多）
+    ★CVD 背離用 bot 既有的 `_okx_contract_cvd_15m`（OKX rubik，翻頁拿 36h）。
+      官方另有**現貨 CVD**（`spot_cvd_i1/i2`），我們沒有來源 → 該欄位標 None，不假裝有。
+    只顯示、不下單。任何例外都吞掉。
+    """
+    global _DHX_SIG
+    if not force and time.time() - _DHX_STATE["ts"] < DHX_SCAN_SEC:
+        return
+    _DHX_STATE["ts"] = time.time()
+    try:
+        # 挑 |OI 1H 變化| 最大的幾個幣（最可能有資金動作），輪替掃描
+        cand = []
+        for inst, h in _oi_history.items():
+            if len(h) >= 2 and h[0][1] > 0:
+                cand.append((abs(h[-1][1] - h[0][1]) / h[0][1], inst))
+        cand.sort(reverse=True)
+        picks = [c[1] for c in cand[:DHX_SCAN_BATCH]]
+        found = {}
+        for inst in picks:
+            try:
+                df = fetch_market_candles(inst, "15m")
+                if df.empty or len(df) < 80:
+                    continue
+                hi = df["high"].values; lo = df["low"].values
+                cl = df["close"].values; n = len(cl)
+                for side in ("short_trap", "long_trap"):
+                    # i1 = 最近一個樞紐（左右各 3 根確認），往回找最多 40 根
+                    i1 = None
+                    for k in range(n - 6, n - 46, -1):
+                        if k < 4:
+                            break
+                        if side == "short_trap":
+                            if lo[k] == min(lo[k-3:k+4]):
+                                i1 = k; break
+                        else:
+                            if hi[k] == max(hi[k-3:k+4]):
+                                i1 = k; break
+                    if i1 is None:
+                        continue
+                    # 假突破：i1 之後有一根穿破 i1 的極值
+                    seg = range(i1 + 1, n)
+                    i2 = None
+                    for k in seg:
+                        if side == "short_trap" and lo[k] < lo[i1]:
+                            i2 = k
+                        elif side == "long_trap" and hi[k] > hi[i1]:
+                            i2 = k
+                    if i2 is None or i2 >= n - 1:
+                        continue
+                    # ★確認：**收盤收回 i1 的收盤價**（官方 I1_CLOSE_RECLAIM）
+                    back = None
+                    for k in range(i2 + 1, n):
+                        if side == "short_trap" and cl[k] > cl[i1]:
+                            back = k; break
+                        if side == "long_trap" and cl[k] < cl[i1]:
+                            back = k; break
+                    if back is None or (n - 1 - back) > 4:
+                        continue                       # 只收最近 4 根內確認的
+                    # 停損 = 假突破段的**完整影線**外緣（官方 i2_full_wick_low/high）
+                    sl = float(lo[i2]) if side == "short_trap" else float(hi[i2])
+                    entry = float(cl[-1])
+                    risk = abs(entry - sl)
+                    if risk <= 0 or risk / entry > 0.08:
+                        continue
+                    d = 1 if side == "short_trap" else -1
+                    found[inst] = {
+                        "inst": inst, "kind": "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
+                        "bias": "LONG" if side == "short_trap" else "SHORT",
+                        "tf": "15m", "level": "CONFIRMED",
+                        "i1_close": float(cl[i1]), "breakout_extreme": sl,
+                        "close_back": float(cl[back]), "entry": entry,
+                        "sl": sl, "sl_dist_pct": round(risk / entry * 100, 3),
+                        "sl_source": "i2_full_wick_" + ("low" if d > 0 else "high"),
+                        "tp1": round(entry + d * risk, 8),
+                        "tp2": round(entry + d * risk * 1.5, 8),
+                        "tp3": round(entry + d * risk * 2.0, 8),
+                        "i1_i2_dist": int(i2 - i1), "bars_since": int(n - 1 - back),
+                        "fut_cvd_i1": None, "fut_cvd_i2": None,
+                        "spot_cvd_i1": None, "spot_cvd_i2": None,   # ★現貨 CVD 沒來源，不假裝有
+                        "ts": time.time(),
+                    }
+                    break
+            except Exception:
+                continue
+        # CVD 背離確認：只對已經成立的候選打（逐幣翻頁很貴，所以放在最後）
+        for inst, r in list(found.items()):
+            try:
+                df = fetch_market_candles(inst, "15m")
+                cvd = _okx_contract_cvd_15m(inst, df.index)
+                if cvd is None or len(cvd) < 20:
+                    continue
+                v = cvd.values.astype(float)
+                r["fut_cvd_i1"] = float(v[-1 - r["i1_i2_dist"]]) if len(v) > r["i1_i2_dist"] else None
+                r["fut_cvd_i2"] = float(v[-1])
+            except Exception:
+                pass
+        _DHX_SIG = found
+        _DHX_STATE["n"] = len(found)
+        if found:
+            print(f"[DHX] 數據訊號(TRAP) 掃到 {len(found)} 筆: "
+                  f"{[x['inst'].replace('-USDT-SWAP','')+':'+x['kind'] for x in found.values()]}",
+                  flush=True)
+    except Exception as e:
+        print(f"[DHX] 數據訊號掃描失敗(不影響交易): {e}", flush=True)
+
+
 def _oi_sample_tick(force: bool = False) -> bool:
     """★儀表板的 OI／價格取樣（**_oi_history / _TICKER_SNAP / _PX_HISTORY 的唯一寫入點**）。
     兩支公開端點，各一次涵蓋全市場約 400 個合約：
@@ -8804,6 +8925,10 @@ def _oi_sample_tick(force: bool = False) -> bool:
     except Exception as e:
         print(f"[DASH] tickers 取樣失敗: {e}", flush=True)
     _bn_oi_sample(now_s, keep_from)     # 補幣安 OI（被封就自動停用，見函數內說明）
+    try:
+        _dhx_trap_scan()                # 數據訊號(TRAP)，15 分鐘一次、每輪只掃 8 幣
+    except Exception as _de:
+        print(f"[DHX] 掃描例外(不影響交易): {_de}", flush=True)
     _DASH_SAMPLE["n"] = len(_TICKER_SNAP)
     _DASH_SAMPLE["i"] = int(_DASH_SAMPLE.get("i", 0)) + 1
     if force or _DASH_SAMPLE["i"] % DASH_SAVE_EVERY == 0:
