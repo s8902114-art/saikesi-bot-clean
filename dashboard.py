@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925n"
+VER = "20260925p"
 
 
 def _clean(v):
@@ -1446,11 +1446,15 @@ function viewMkt(){
 // ★版面照官方：**一張表、表頭只出現一次**，四個象限當「分段標題列」插在表身裡。
 //   先前寫成四個象限各一張 <table>，欄寬各自算 → 四塊對不齊（用戶 2026-09-24：「很醜」）。
 //   順便用 colgroup 固定欄寬，數字欄才不會因為位數不同跳來跳去。
-const RANK_COLS = ['#','幣種','價格','OI變化','OI/市值','價24H'];
+// ★加「OI 金額」欄：官方的 OI 是 CoinGlass **跨所聚合**、我的只有 OKX，
+//   金額差 12~45 倍（實測 SUI 857.8M vs 37.0M、VVV 190M vs 4.2M）。
+//   不把金額擺出來的話，OKX 上只有 $1M 未平倉的小幣（一張大單就 +10%）
+//   會跟 $800M 的大幣在榜上長得一樣大 —— 那不是「主力建倉」。
+const RANK_COLS = ['#','幣種','價格','OI變化','OI金額','OI/市值','價24H'];
 // ★欄寬全部寫死、不留 auto：留 auto 的那一欄會在寬螢幕上把剩餘寬度全吃掉，
 //   加上第二欄以後預設靠右，結果 # 在最左、其他擠在最右，中間一片空白
 //   （用戶 2026-09-24：「這是比目魚才能看嗎 隔那麼遠」）。
-const RANK_W    = ['34px','132px','104px','92px','88px','88px'];
+const RANK_W    = ['32px','120px','92px','84px','86px','78px','78px'];
 
 function viewRank(){
   const m=D.mkt, rows=m.rows||[];
@@ -1477,6 +1481,7 @@ function viewRank(){
         + '</td>'
         + `<td>${pf(r.last)}</td>`
         + `<td class="${cls(r.oi)}">${pct(r.oi)}</td>`
+        + `<td class="${(r.oiu||0)<5e6?'dim':''}">${r.oiu?big(r.oiu):'—'}</td>`
         + `<td>${r.oimc?f(r.oimc*100,2)+'%':'—'}</td>`
         + `<td class="${cls(r.chg24h)}">${pct(r.chg24h)}</td>`
         + '</tr>';
@@ -1489,7 +1494,12 @@ function viewRank(){
     + '<colgroup>' + RANK_W.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
     + '<thead><tr>' + RANK_COLS.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
     + '<tbody>' + body + '</tbody></table></div>'
-    + '<div class="sub" style="margin-top:8px">象限已套用官方的市場結構覆寫層'
+    + '<div class="sub" style="margin-top:8px">★<b>OI 金額是 OKX 單一交易所</b>的，'
+    + '官方那邊是 CoinGlass <b>跨所聚合</b>（實測同一幣差 12~45 倍）。'
+    + '所以變化% 也不可比：OKX 的大單在聚合裡會被稀釋 10~20 倍，'
+    + '甚至方向相反（實測 ZRO 我 +8.2% vs 官方 −0.32%）。'
+    + '<b>金額小的（灰字，&lt;5M）一張大單就能推到 +10%，別當成主力建倉。</b><br>'
+    + '象限已套用官方的市場結構覆寫層'
     + '（評分裡的「主動做多／主動做空／多頭出場／空頭出場」會蓋過單純的 OI×價格方向）。</div>'
     + '</div>';
 }
@@ -1592,7 +1602,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925n';
+const PAGE_VER = '20260925p';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
