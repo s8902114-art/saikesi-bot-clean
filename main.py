@@ -9120,10 +9120,86 @@ def _bn_extra_sample(picks: list) -> None:
         print(f"[DASH] 幣安 資費/多空比/CVD 取樣失敗(不影響交易): {e}", flush=True)
 
 
+def _bn_dhx_data(coin: str, limit: int = 300):
+    """★★一支幣安 K 線呼叫同時拿到「K 線 ＋ 合約 CVD」——`_dhx_scan` 的資料源。
+
+    2026-09-25 換掉原本的（OKX K 線 ＋ OKX rubik CVD），理由是**實測**不是偏好：
+
+    ①**官方標的就是幣安**。官方紀錄的 `rule_version` 寫 `NATIVE_BB_CVD`、欄位叫
+      `binance_taker_ratio`。拿 161 筆原始紀錄裡的 63 筆吸收/衰竭，用**他們自己標的
+      兩個樞紐時間**，以幣安 K 線第 10 欄 `takerBuyBase` 算 CVD 差
+      （net = 2×takerBuy − vol，端點 `(p1, p2]`）：
+        **符合官方判準 59/63 = 94%**（吸收 51/55、衰竭 8/8）。
+      端點四種取法對照：`(p1,p2]` 94% ／ `[p1,p2]` 84% ／ `(p1,p2)` 86% ／ `[p1,p2)` 71%
+      → 端點定義同時也被這批資料釘死了。腳本 `trading-backtest/_chk_dhx_replay.py`。
+    ②**OKX rubik 根本無法被驗證**：只有 48h 歷史（2026-09-16 起一頁剩 72 筆／6h），
+      官方紀錄跨 2026-08-01~09-23，拿不回來。而 `_chk_cvd_src.py` 實測兩個來源在
+      「兩點誰高誰低」（＝吸收/衰竭真正用到的那個判斷）上**只一致 53.8%**
+      → 用 OKX 等於在測另一套規格。
+    ③**成本**：幣安一支呼叫回 300 根 15m（75 小時）、0.33 秒；OKX rubik 要翻 3 頁。
+      這就是原本只能每輪掃 8 幣（游標輪替、訊號延遲最多 3.2 小時）的原因，換掉之後
+      100 幣全掃 ≈ 12 秒，延遲降到 15 分鐘。
+    ④K 線也一起換成幣安：官方樞紐價與**幣安 15m K 棒的 high/low 誤差中位 0.0535%**
+      （offset 掃描次佳 0.347%，差 6.5 倍 → 單一乾淨極小值），等於他們的樞紐就是
+      幣安 K 棒極值。同源取 K 線與 CVD 還順便消掉 reindex/ffill 的對齊誤差。
+
+    ★時區坑（又踩一次，記在這）：這批紀錄的 `pivot*_time` 是 **UTC**，不是台北。
+      當成 UTC+8 算，命中率從 94% 掉到 **68%** —— 而且 68% 看起來「還可以」，
+      差點被我當成「CVD 定義有出入」報出去。驗法照 memory `project_0903_ts_timezone`：
+      用紀錄自帶的 pivot 價格掃 offset 找誤差極小值，一分鐘搞定。
+
+    現貨 CVD（官方 `spot_cvd_i1/i2`）同樣改用幣安 `/api/v3/klines`
+    （`www.binance.com` 前置下現貨路徑也是 200）。它只進顯示欄位、不是硬條件。
+    回 None 代表這幣在幣安沒有（官方用 `binance_taker_ratio`，那種幣他們也不會發訊號）。
+    """
+    def _kl(path, sym):
+        r = _bn_get(path, {"symbol": sym, "interval": "15m", "limit": limit}, timeout=10)
+        if r is None or getattr(r, "status_code", 0) != 200:
+            return None
+        try:
+            d = r.json()
+        except Exception:
+            return None
+        return d if isinstance(d, list) and len(d) >= 80 else None
+
+    # ★迷因幣在幣安是 **1000 倍合約**（OKX 的 PEPE/SHIB/BONK/FLOKI… = 幣安 1000PEPE…）。
+    #   不補這個 fallback，前 100 名會少掉 6 幣（實測 PEPE/SHIB/BONK 都在榜上）。
+    #   價格要除回 1000 才跟 OKX 同尺度（儀表板顯示的進場/停損價才不會差三個零）；
+    #   CVD 是**比高低**的相對量，尺度會自己消掉，不用動。
+    sym, scale = coin + "USDT", 1.0
+    k = _kl("/fapi/v1/klines", sym)
+    if not k:
+        sym, scale = "1000" + coin + "USDT", 1000.0
+        k = _kl("/fapi/v1/klines", sym)
+    if not k:
+        return None
+    try:
+        ts = [int(x[0]) // 1000 for x in k]
+        hi = np.array([float(x[2]) for x in k], dtype=float) / scale
+        lo = np.array([float(x[3]) for x in k], dtype=float) / scale
+        cl = np.array([float(x[4]) for x in k], dtype=float) / scale
+        # ★CVD 是**累積**序列（`_dhx_absorb` 比的是 cv[p1] vs cv[p2]），與 OKX 版語意一致
+        cv = np.cumsum([2.0 * float(x[9]) - float(x[5]) for x in k])
+    except Exception:
+        return None
+    sv = None
+    try:
+        s = _kl("/api/v3/klines", sym)       # 現貨；1000 倍合約在現貨沒有對應，取不到就 None
+        if s:
+            m = {int(x[0]) // 1000: 2.0 * float(x[9]) - float(x[5]) for x in s}
+            if sum(1 for t in ts if t in m) >= len(ts) * 0.8:
+                sv = np.cumsum([m.get(t, 0.0) for t in ts])
+    except Exception:
+        sv = None
+    return {"ts": ts, "hi": hi, "lo": lo, "cl": cl, "cv": cv, "sv": sv}
+
+
 _DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
-_DHX_STATE = {"ts": 0.0, "i": 0, "n": 0}
+_DHX_STATE = {"ts": 0.0, "i": 0, "n": 0, "miss": 0, "ms": 0}
 DHX_SCAN_SEC = 900               # 15 分鐘掃一次（官方全部訊號都是 15m 時框）
-DHX_SCAN_BATCH = 8               # 每輪只掃 |OI 變化| 最大的 N 幣（CVD 要逐幣翻頁，很貴）
+DHX_SCAN_POOL = 100              # 選幣層＝24h 成交額前 100（官方 source: volume_top100）
+DHX_WORKERS = 6                  # 併發（幣安限流上限 2400 權重/分，我們用不到 1%）
+DHX_SHOW_N = 15                  # ★顯示上限（偵測器仍比官方多發，原因見 _dhx_mag_ok）
 
 
 def _dhx_scan(force: bool = False) -> None:
@@ -9139,61 +9215,75 @@ def _dhx_scan(force: bool = False) -> None:
          價格創新高(i2>i1) 但 **CVD 沒跟著創新高** → 買盤衰竭 → 做空（反之做多）
     共通：全部 **15m**；停損放 i2 的**完整影線**外緣（官方 `sl_source: i2_full_wick_low/high`）。
 
-    ★CVD 用 bot 既有的 `_okx_contract_cvd_15m`（OKX rubik，翻頁拿 36h）。
-      官方另有**現貨 CVD**（`spot_cvd_i1/i2`），我沒有來源 → 欄位給 None，不假裝有。
+    ★K 線與 CVD 都用 `_bn_dhx_data`（幣安 15m klines，第 10 欄 takerBuyBase）——
+      2026-09-25 從 OKX(K線)+OKX rubik(CVD) 換過來，證據見 `_bn_dhx_data` 的說明：
+      拿官方 63 筆紀錄的樞紐點重放，**94% 重現官方判準**；OKX rubik 只有 48h 歷史、
+      連測都測不了，且與幣安在同一判斷上只一致 53.8%。
+    ★換源同時解掉了覆蓋率：原本 CVD 要逐幣翻頁，每輪只掃得動 8 幣（游標輪替），
+      前 100 名要 **3.2 小時**才輪完一圈 —— 訊號最慢慢官方 3 小時。
+      幣安一支呼叫就夠，改成**每輪全部 100 幣併發**，延遲 = 掃描週期 15 分鐘。
     只顯示、不下單；全程 try/except。
     """
     global _DHX_SIG
     if not force and time.time() - _DHX_STATE["ts"] < DHX_SCAN_SEC:
         return
     _DHX_STATE["ts"] = time.time()
+    _t0 = time.time()
     try:
         # ★選幣層照官方：`source: "volume_top100"`（63/63 筆全部都是）＝**24h 成交額前 100**。
-        #   原本用「|OI 變化| 最大」是我自己選的，不是他們的做法。
-        #   前 100 每輪只掃得動 DHX_SCAN_BATCH 個（CVD 要逐幣打），所以用游標輪替掃完。
         pool = sorted(((v.get("volccy_usd") or 0), k) for k, v in (_TICKER_SNAP or {}).items())
-        pool = [k for _, k in pool[::-1][:100]]
+        pool = [k for _, k in pool[::-1][:DHX_SCAN_POOL]]
         if not pool:
             return
-        _i = int(_DHX_STATE.get("i", 0)) % len(pool)
-        picks = [pool[(_i + d) % len(pool)] for d in range(DHX_SCAN_BATCH)]
-        _DHX_STATE["i"] = (_i + DHX_SCAN_BATCH) % len(pool)
-        found = {}
-        for inst in picks:
+
+        def _one(inst):
             try:
-                df = fetch_market_candles(inst, "15m")
-                if df.empty or len(df) < 80:
-                    continue
-                hi = df["high"].values; lo = df["low"].values
-                cl = df["close"].values; n = len(cl)
-                # CVD 先抓（ABSORPTION/EXHAUSTION 的判定需要它，不能等掃完才補）
-                cv = sv = None
-                try:
-                    _c = _okx_contract_cvd_15m(inst, df.index)
-                    if _c is not None and len(_c) >= 40:
-                        cv = _c.values.astype(float)
-                except Exception:
-                    cv = None
-                try:
-                    _s = _okx_spot_cvd_15m(inst, df.index)   # ★現貨 CVD（instType=SPOT，48h）
-                    if _s is not None and len(_s) >= 40:
-                        sv = _s.values.astype(float)
-                except Exception:
-                    sv = None
-                _ts = [int(x.timestamp()) for x in df.index]
-                r = (_dhx_trap(inst, hi, lo, cl, n, cv, sv, _ts)
-                     or _dhx_absorb(inst, hi, lo, cl, n, cv, sv, _ts)
-                     or _dhx_exhaust(inst, hi, lo, cl, n, cv, sv, _ts))
-                if r:
-                    found[inst] = r
+                d = _bn_dhx_data(inst.split("-")[0])
+                if not d:
+                    return inst, None, True      # 幣安沒這個幣 → 記 miss，不是錯誤
+                cl = d["cl"]; n = len(cl)
+                r = (_dhx_trap(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
+                     or _dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
+                     or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"]))
+                return inst, r, False
             except Exception:
-                continue
+                return inst, None, False
+
+        found = {}
+        miss = 0
+        with ThreadPoolExecutor(DHX_WORKERS) as _ex:
+            for inst, r, m in _ex.map(_one, pool):
+                if m:
+                    miss += 1
+                elif r:
+                    found[inst] = r
+        raw_n = len(found)
+        # ★★顯示層上限：偵測器實測比官方多發 ~127 倍（見 `_dhx_mag_ok` 的說明），
+        #   幅度閘只壓掉一部分，剩下的差距是**結構條件我還沒找到**。
+        #   把全部塞上儀表板 = 幾十筆同時亮著，跟沒篩一樣、而且會讓人以為複刻好了。
+        #   → 依「品質」排序後只顯示前 DHX_SHOW_N 筆，**真實筆數照樣印進 log 與狀態列**，
+        #     不用少顯示去假裝頻率對得上。排序鍵取官方分布裡中位最高的三個量：
+        #     擺動振幅 ／ OI 幅度 ／ CVD 佔比（都已標準化成「相對官方中位的倍數」）。
+        def _q(r):
+            # _dhx_pack 已把 extra 併進回傳 dict，欄位直接讀
+            amp = float(r.get("swing_amp_pct") or 0) / 4.00       # 官方中位 4.00%
+            oip = abs(float(r.get("oi_delta_pct") or 0)) / 1.66   # 官方中位 1.66%
+            return amp + oip
+        if raw_n > DHX_SHOW_N:
+            def _qkey(item):
+                return -_q(item[1])
+            found = dict(sorted(found.items(), key=_qkey)[:DHX_SHOW_N])
         _DHX_SIG = found
         _DHX_STATE["n"] = len(found)
-        if found:
-            print("[DHX] 數據訊號 %d 筆: %s" % (len(found),
-                  [x["inst"].replace("-USDT-SWAP", "") + ":" + x["kind"] for x in found.values()]),
-                  flush=True)
+        _DHX_STATE["raw"] = raw_n            # ★過閘後的**真實**筆數（未截斷）
+        _DHX_STATE["i"] = len(pool)          # 掃描涵蓋幣數（不再是游標）
+        _DHX_STATE["miss"] = miss
+        _DHX_STATE["ms"] = int((time.time() - _t0) * 1000)
+        print("[DHX] 掃 %d 幣(幣安無 %d)/%.1fs → %d 筆%s%s" % (
+            len(pool), miss, time.time() - _t0, raw_n,
+            ("，顯示前 %d" % len(found)) if raw_n > len(found) else "",
+            (": " + ", ".join(x["inst"].replace("-USDT-SWAP", "") + ":" + x["kind"]
+                              for x in found.values())) if found else ""), flush=True)
     except Exception as e:
         print(f"[DHX] 數據訊號掃描失敗(不影響交易): {e}", flush=True)
 
@@ -9242,7 +9332,7 @@ def _dhx_pack(inst, kind, bias, i1, i2, back, cl, sl, n, extra=None):
          "tp3": round(entry + d * risk * 2.0, 8),
          "i1_i2_dist": int(i2 - i1), "bars_since": int(n - 1 - back),
          "fut_cvd_i1": None, "fut_cvd_i2": None,
-         "spot_cvd_i1": None, "spot_cvd_i2": None,   # ★官方有現貨CVD，我沒有來源
+         "spot_cvd_i1": None, "spot_cvd_i2": None,   # 由 _dhx_cvd 覆寫（幣安現貨 klines）
          "ts": time.time()}
     if extra:
         r.update(extra)
@@ -9346,6 +9436,55 @@ def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     return None
 
 
+# ★★★幅度閘（2026-09-25）——我的偵測器三道閘原本**只判符號、沒有幅度**
+#   （`lo[p2] > lo[p1]`、`cv[p2] < cv[p1]`、`oi_d > 0`，任何一丁點都算）。
+#   把每輪掃描從 8 幣（游標輪替）提到 97 幣之後這件事立刻現形：97 幣裡 58 幣同時有訊號。
+#   ★逐根重放實測（`_chk_dhx_freq.py`，20 幣 × 30 天 × 真幣安 OI）：
+#       我 **530 筆/天** vs 官方近 7 天 **2.86 筆/天** ＝ **185 倍**。
+#     （官方 63 筆逐日分布：近 7 天 2.86/天、更早 0.91/天 → 早期是 API 保留上限截斷的，
+#       基準必須用近 7 天，不能用全期平均的 1.17。）
+#   手冊：頻率差 3 倍以上 ＝ 有 bug／門檻抄漏，不是市場差異。
+# ★下面的門檻**全部**是從官方 63 筆的實際分布讀出來的（`_an_dhx_thresh.py`），不是我挑的：
+#     OI 幅度：官方吸收 n=55 的**最小值就是 0.50%**（乾淨地板＝硬門檻的指紋）
+#     兩樞紐間隔：官方最小 5 根、最大 45 根
+#     擺動振幅（p1→p2 之間反向走了多少）：官方 p10 = 1.62%、中位 4.00%
+#       —— 這一道是 memory `project_0830_absorb_long` 早就記過的「吸收要用 ZigZag 擺動版」，
+#          我 09-24 抄規格時漏了。
+# ★★誠實紀錄：**這些閘沒有把 185 倍補回來。** 掃描結果（`_an_dhx_gates.py`，
+#   每格都同時量「砍我多少」與「留住官方多少」）：
+#     oi≥0.5 單獨          → 127x，官方留存 92%
+#     ＋amp≥1.0（採用）     → **117x**（重放實測 335 筆/天），留存 ~87%
+#     ＋amp≥1.6           →  74x，留存 84%
+#     ＋px/cvd/S1 一起上   →  23x，留存只剩 63%（＝門檻抄過頭，開始砍官方真的在發的訊號）
+#   也就是說**差距不在幅度、在結構**，我還沒找到那個結構條件。
+#   （已排除的結構假說：官方樞紐**不**比我顯著——p1 左強度 p10 只有 1 根、最小 0；
+#     官方 p2 也**不是**區間極值，只有 21% 是 → 不是「單調結構」那種條件。）
+#   所以這裡只採用「留存 ≥ 87%」的保守組合，並在 `_dhx_scan` 限制顯示筆數；
+#   **不可以**把這個偵測器當成「已複刻數據獵手」使用。
+DHX_MIN_OI_PCT = 0.5      # 官方吸收 55 筆的最小值
+DHX_MIN_GAP = 5           # 官方兩樞紐間隔最小 5 根
+DHX_MAX_GAP = 45          # 官方最大 45 根
+DHX_MIN_AMP_PCT = 1.0     # 擺動振幅（官方 p10 1.62；取 1.0 保留 95% 官方樣本）
+
+
+def _dhx_mag_ok(hi, lo, p1, p2, want_low, oi_d):
+    """幅度閘：回 (是否通過, 擺動振幅%)。振幅同時回傳給顯示層排序用。"""
+    gap = p2 - p1
+    if gap < DHX_MIN_GAP or gap > DHX_MAX_GAP:
+        return False, 0.0
+    if oi_d is None or abs(float(oi_d)) < DHX_MIN_OI_PCT:
+        return False, 0.0
+    p1p = float(lo[p1] if want_low else hi[p1])
+    if p1p <= 0:
+        return False, 0.0
+    seg = hi[p1:p2 + 1] if want_low else lo[p1:p2 + 1]
+    if len(seg) == 0:
+        return False, 0.0
+    amp = ((float(np.max(seg)) / p1p - 1.0) * 100.0 if want_low
+           else (1.0 - float(np.min(seg)) / p1p) * 100.0)
+    return bool(amp >= DHX_MIN_AMP_PCT), round(amp, 3)
+
+
 def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     """衰竭背離（exhaustion）—— **多空各一邊**。
 
@@ -9394,8 +9533,12 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
         if oi_d is None or oi_d >= 0:
             continue
+        _mok, _amp = _dhx_mag_ok(hi, lo, p1, p2, want_low, oi_d)   # ★幅度閘
+        if not _mok:
+            continue
         sl = float(lo[p2]) if want_low else float(hi[p2])
         ex = _dhx_cvd(cv, sv, p1, p2)
+        ex["swing_amp_pct"] = _amp
         ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
         ex["sl_source"] = "i2_full_wick_" + ("low" if want_low else "high")
         ex["entry_source"] = "confirm_close"
@@ -9455,8 +9598,12 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
         if oi_d is None or oi_d <= 0:
             continue
+        _mok, _amp = _dhx_mag_ok(hi, lo, p1, p2, want_low, oi_d)   # ★幅度閘
+        if not _mok:
+            continue
         sl = float(lo[p2]) if want_low else float(hi[p2])   # ★停損＝pivot2 價格
         ex = _dhx_cvd(cv, sv, p1, p2)
+        ex["swing_amp_pct"] = _amp
         ex["oi_delta_pct"] = None if oi_d is None else round(oi_d, 3)
         ex["sl_source"] = "post_i2_structure_" + ("low" if want_low else "high")
         ex["entry_source"] = "confirm_close"

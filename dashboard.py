@@ -686,6 +686,9 @@ def collect(G, win_h=1.0):
         "mkt": _market(G, win_h),
         "dhx": sorted((G.get("_DHX_SIG") or {}).values(),
                       key=lambda r: r.get("ts") or 0, reverse=True)[:30],
+        # 掃描統計：涵蓋幣數／幣安沒有的幾個／**過閘後真實筆數**（未被顯示上限截斷）
+        "dhxq": {k: (G.get("_DHX_STATE") or {}).get(k)
+                 for k in ("i", "miss", "raw", "n", "ms")},
         "whale": sorted((G.get("_WHALE") or {}).values(),
                         key=lambda r: r.get("first_ts") or 0, reverse=True)[:40],
         "breadth": _breadth(G),
@@ -915,6 +918,8 @@ _HTML = """<!doctype html>
        color:var(--dim);cursor:pointer;white-space:nowrap;font-size:13px}
   .tab.on{color:var(--fg);border-color:var(--accent);background:#16233a}
   .empty{color:var(--dim);font-size:12px;padding:8px 0}
+  .note{color:var(--dim);font-size:11px;line-height:1.5;padding:6px 8px;margin:4px 0 8px;
+        border-left:2px solid var(--warn,#c90);background:rgba(200,150,0,.07);border-radius:3px}
   .sub{color:var(--dim);font-size:11px}
   input.f{background:#0f141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;
           padding:6px 10px;font-size:13px;width:100%;margin-bottom:10px}
@@ -1396,9 +1401,10 @@ function cvdCell(a, b){
 // 數據訊號（TRAP / ABSORPTION / EXHAUSTION）：規格見 _DHX_DATASIG_0924_SPEC.md
 function viewDhx(){
   const rows = D.dhx||[];
-  if(!rows.length) return '<div class="card"><h2>數據訊號<span>TRAP · 15m</span></h2>'
-    + '<div class="empty">目前沒有成立的 TRAP。每 15 分鐘掃一次，'
-    + '每輪只掃 OI 變化最大的 8 個幣（CVD 要逐幣翻頁，成本高）。</div></div>';
+  const q = D.dhxq||{};
+  if(!rows.length) return '<div class="card"><h2>數據訊號<span>15m</span></h2>'
+    + `<div class="empty">目前沒有成立的訊號。每 15 分鐘掃一次，涵蓋成交額前 `
+    + `${q.i||0} 幣（幣安沒有 ${q.miss||0} 個）。</div></div>`;
   // 依型態分組：四個家族的判準完全不同，混在一張平表看不出誰是誰
   const order = ['SHORT_TRAP','LONG_TRAP','ABSORPTION','EXHAUSTION'];
   const by = {}; rows.forEach(r=>{ (by[r.kind]=by[r.kind]||[]).push(r); });
@@ -1410,8 +1416,15 @@ function viewDhx(){
   });
   Object.keys(by).filter(k=>order.indexOf(k)<0).forEach(k=>groups.push([k,'',by[k]]));
   const nLong = rows.filter(r=>r.bias==='LONG').length;
+  // ★誠實標示：偵測器實測比官方多發約 127 倍（幅度閘只壓掉一部分，
+  //   剩下的差距是結構條件還沒找到）→ 這裡顯示的是**品質排序後的前段**，不是全部。
+  const capped = (q.raw||0) > rows.length;
   return '<div class="card">'
-    + `<h2>數據訊號<span>15m・${rows.length} 筆・做多 ${nLong}／做空 ${rows.length-nLong}</span></h2>`
+    + `<h2>數據訊號<span>15m・掃 ${q.i||0} 幣・${q.raw||rows.length} 筆`
+    + `${capped ? `（顯示前 ${rows.length}）` : ''}・做多 ${nLong}／做空 ${rows.length-nLong}</span></h2>`
+    + (capped ? '<div class="note">⚠ 偵測器仍比官方多發（實測 117 倍，門檻只從官方 63 筆'
+        + '反推到幅度層，結構條件未解）→ 依擺動振幅與 OI 幅度排序後只顯示前段。'
+        + '<b>不要當成「已複刻數據獵手」使用。</b></div>' : '')
     + secTable('dhx', ['幣','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'],
         ['104px','56px','86px','92px','92px','70px','92px','92px','92px'], groups, r=>[
         {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
