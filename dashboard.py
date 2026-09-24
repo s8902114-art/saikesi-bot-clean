@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925p"
+VER = "20260925q"
 
 
 def _clean(v):
@@ -753,6 +753,14 @@ def register(app, G):
                                  "?category=linear&symbol=BTCUSDT&intervalTime=5min&limit=3"),
             ("Bitget OI",        "https://api.bitget.com/api/v2/mix/market/open-interest"
                                  "?symbol=BTCUSDT&productType=usdt-futures"),
+            # ★跨所 OI 聚合可行性：官方的 OI 是 CoinGlass 跨所加總，我只有 OKX，
+            #   同一幣金額差 12~45 倍。這四家都有**批量**端點（一支回全市場），
+            #   所以只要 Railway 打得通就能自己聚合。本機實測：
+            #   Bybit 891 支 0.4s／Bitget 805 支 0.4s／Gate 1013 支 1.1s／OKX 492 支 0.3s。
+            ("Bybit 批量tickers", "https://api.bybit.com/v5/market/tickers?category=linear"),
+            ("Bitget 批量tickers", "https://api.bitget.com/api/v2/mix/market/tickers"
+                                   "?productType=usdt-futures"),
+            ("Gate 批量contracts", "https://api.gateio.ws/api/v4/futures/usdt/contracts"),
         ]
         out = []
         for name, url in cands:
@@ -1376,11 +1384,23 @@ function viewDhx(){
   if(!rows.length) return '<div class="card"><h2>數據訊號<span>TRAP · 15m</span></h2>'
     + '<div class="empty">目前沒有成立的 TRAP。每 15 分鐘掃一次，'
     + '每輪只掃 OI 變化最大的 8 個幣（CVD 要逐幣翻頁，成本高）。</div></div>';
-  return '<div class="card"><h2>數據訊號<span>TRAP · 15m · 假突破收回</span></h2>'
-    + table('dhx', ['幣','型態','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'], rows, r=>[
+  // 依型態分組：四個家族的判準完全不同，混在一張平表看不出誰是誰
+  const order = ['SHORT_TRAP','LONG_TRAP','ABSORPTION','EXHAUSTION'];
+  const by = {}; rows.forEach(r=>{ (by[r.kind]=by[r.kind]||[]).push(r); });
+  const groups = order.filter(k=>by[k]).map(k=>{
+    const lab = (KIND[k]||[k,''])[0], cl = (KIND[k]||['',''])[1];
+    const g = by[k].slice().sort((a,b)=>(b.ts||0)-(a.ts||0));
+    const nL = g.filter(x=>x.bias==='LONG').length;
+    return [`${lab}　<span class="dim">多 ${nL}／空 ${g.length-nL}</span>`, cl, g];
+  });
+  Object.keys(by).filter(k=>order.indexOf(k)<0).forEach(k=>groups.push([k,'',by[k]]));
+  const nLong = rows.filter(r=>r.bias==='LONG').length;
+  return '<div class="card">'
+    + `<h2>數據訊號<span>15m・${rows.length} 筆・做多 ${nLong}／做空 ${rows.length-nLong}</span></h2>`
+    + secTable('dhx', ['幣','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'],
+        ['104px','56px','86px','92px','92px','70px','92px','92px','92px'], groups, r=>[
         {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
           + r.inst.replace('-USDT-SWAP','')+'</a>'},
-        {v:r.kind, h:(KIND[r.kind]||[r.kind,''])[0], c:(KIND[r.kind]||['',''])[1]},
         {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
         quadOf(r.inst),
         pf(r.entry), pf(r.sl), f(r.sl_dist_pct,2)+'%', pf(r.tp1),
@@ -1455,6 +1475,31 @@ const RANK_COLS = ['#','幣種','價格','OI變化','OI金額','OI/市值','價2
 //   加上第二欄以後預設靠右，結果 # 在最左、其他擠在最右，中間一片空白
 //   （用戶 2026-09-24：「這是比目魚才能看嗎 隔那麼遠」）。
 const RANK_W    = ['32px','120px','92px','84px','86px','78px','78px'];
+
+// ★通用分段表：一張 <table>、表頭只出現一次，分組當標題列插在表身。
+//   訊號類的頁面原本是一張平表全部擠在一起（用戶 2026-09-24：「全都擠在一起很難看」）。
+//   不用「每組一張表」是因為那樣欄寬各自算、組跟組之間會對不齊（OI 排名踩過）。
+function secTable(id, cols, widths, groups, render){
+  const total = groups.reduce((n,g)=>n+g[2].length, 0);
+  if(!total) return '<div class="empty">沒有資料</div>';
+  let body = '';
+  for(const [label, cls_, rows] of groups){
+    if(!rows.length) continue;
+    body += `<tr class="sec"><td colspan="${cols.length}">`
+          + `<b class="${cls_||''}">${label}</b>`
+          + `<span class="dim" style="margin-left:8px">${rows.length}</span></td></tr>`;
+    rows.forEach((r,i)=>{
+      body += '<tr>' + render(r,i).map(c=>{
+        const v = (c&&c.v!==undefined) ? (c.h!==undefined?c.h:c.v) : c;
+        return `<td class="${(c&&c.c)||''}">${v}</td>`;
+      }).join('') + '</tr>';
+    });
+  }
+  return '<div class="scroll"><table class="fx">'
+    + '<colgroup>' + widths.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
+    + '<thead><tr>' + cols.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
+    + '<tbody>' + body + '</tbody></table></div>';
+}
 
 function viewRank(){
   const m=D.mkt, rows=m.rows||[];
@@ -1580,11 +1625,25 @@ function viewDiag(){
 }
 
 function viewSig(){
-  return '<div class="card"><h2>最近訊號</h2>'
-    + table('sig', ['幣','時框','方向','策略','價格','時間'], D.signals, s=>[
-        (s.symbol||'').replace('/USDT',''), s.tf,
-        {v:s.dir==='long'?'多':'空', c:s.dir==='long'?'up':'down'},
-        s.strat||'—', pf(s.price), ago(s.ts),
+  const all = (D.signals||[]).slice().sort((a,b)=>b.ts-a.ts);
+  const nL = all.filter(s=>s.dir==='long').length;
+  // 依**策略**分組（要掃「哪支策略在發單」比逐筆看有用），組內按時間新到舊；
+  // 組的順序用「最近一次發訊」排，最近在動的策略在最上面。
+  const by = {};
+  all.forEach(s=>{ (by[s.strat||'—'] = by[s.strat||'—'] || []).push(s); });
+  const groups = Object.entries(by)
+    .sort((a,b)=>b[1][0].ts - a[1][0].ts)
+    .map(([k,v])=>[k, (v.filter(x=>x.dir==='long').length >= v.length/2) ? 'up':'down', v]);
+  return '<div class="card">'
+    + `<h2>最近訊號<span>${all.length} 筆・多 ${nL}／空 ${all.length-nL}`
+    + `・${groups.length} 支策略</span></h2>`
+    + secTable('sig', ['幣','時框','方向','價格','停損','時間'],
+        ['110px','64px','56px','100px','100px','76px'], groups, s=>[
+        {v:s.symbol, h:`<a class="cl" onclick="openCard('${(s.symbol||'').replace('/USDT','')}-USDT-SWAP')">`
+           + (s.symbol||'').replace('/USDT','') + '</a>'},
+        s.tf,
+        {v:s.dir, h:s.dir==='long'?'多':'空', c:s.dir==='long'?'up':'down'},
+        pf(s.price), s.sl?pf(s.sl):'—', ago(s.ts),
       ]) + '</div>';
 }
 
@@ -1602,7 +1661,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925p';
+const PAGE_VER = '20260925q';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
