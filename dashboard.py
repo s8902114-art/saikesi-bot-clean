@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925a"
+VER = "20260925b"
 
 
 def _clean(v):
@@ -741,6 +741,11 @@ _HTML = """<!doctype html>
   th{color:var(--dim);font-weight:500;font-size:11px;cursor:pointer;user-select:none}
   th:hover{color:var(--fg)}
   tbody tr:last-child td{border-bottom:none}
+  table.fx{table-layout:fixed}
+  table.fx td,table.fx th{overflow:hidden;text-overflow:ellipsis}
+  tr.sec td{text-align:left;background:#0f141c;font-size:11px;padding:7px 8px;
+            border-bottom:1px solid var(--line);position:sticky;left:0}
+  .scp{margin-left:6px;font-size:11px;font-variant-numeric:tabular-nums}
   .up{color:var(--up)} .down{color:var(--down)} .dim{color:var(--dim)} .warn{color:var(--warn)}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px}
   .q4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px}
@@ -849,7 +854,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['mkt','篩選器'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['mkt','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -1241,7 +1246,13 @@ function viewMkt(){
   const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   const sel = rows.filter(hit);
   return '<div class="card">' + winBar()
-    + `<h2>視覺篩選器<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
+    + `<h2>巨鯨雷達<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
+    // ★官方把這一頁叫「巨鯨雷達」（前端 data-target-tab="visual"），跟「OI 儀表板」(data-target-tab="oi") 是兩個不同分頁。
+    //   原話：「用所選週期的持倉變化＋價格變化，觀察資金是否已經注入市場，
+    //   找出可能『資金先動、行情還沒完全啟動』的機會」。
+    + '<div class="sub" style="margin-bottom:8px">X＝持倉變化、Y＝價格變化。'
+      + '官方原話：<b>「象限只描述持倉與價格，不直接判定多空；方向請以詳細數據綜合判斷」</b>'
+      + ' —— 這跟「OI 排名」那頁不同，那邊的象限有套市場結構覆寫、是帶多空語意的。</div>'
     + scatter(rows)
     + `<div class="sl"><label>OI 變化 <b>≥ ${OITH}%</b></label>
          <input type="range" min="1" max="10" step="0.5" value="${OITH}"
@@ -1261,30 +1272,52 @@ function viewMkt(){
     + '</div>' + inflowCard();
 }
 
-// ── OI 異動排名：照官方分四組，組內依「變化金額」排 ────────────────────────
+// ── OI 異動排名 ─────────────────────────────────────────────────────────────
+// ★版面照官方：**一張表、表頭只出現一次**，四個象限當「分段標題列」插在表身裡。
+//   先前寫成四個象限各一張 <table>，欄寬各自算 → 四塊對不齊（用戶 2026-09-24：「很醜」）。
+//   順便用 colgroup 固定欄寬，數字欄才不會因為位數不同跳來跳去。
+const RANK_COLS = ['#','幣種','價格','OI變化','OI/市值','價24H'];
+const RANK_W    = ['36px','auto','96px','84px','80px','80px'];
+
 function viewRank(){
   const m=D.mkt, rows=m.rows||[];
   if(!rows.length) return noData(m);
-  let h = '<div class="card">' + winBar()
-    + `<h2>OI 異動排名<span>${m.win_h}H 持倉量變化・依變化金額排序</span></h2></div>`;
   const top20 = rows.slice(0,20);      // ★官方：全部一起排取前 20，再分四組
+  let body = '';
   for(const q of QUADS){
     const g = top20.filter(r=>(r.q24||r.q)===q);
     if(!g.length) continue;
     const meta = (m.quads&&m.quads[q]) ? m.quads[q] : ['',''];
-    h += `<div class="card"><h2><span class="qh" style="color:${QCLR[q]}">${q}</span>`
-      +  `<span title="${meta[1]}">${meta[0]}</span></h2>`
-      + table('rk'+q, ['#','幣種','價格','OI變化','OI/市值','價24H'], g, r=>[
-          {v:g.indexOf(r)+1, h:String(g.indexOf(r)+1), c:'dim'},
-          {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
-            + (r.an===2?'<span class="star">★</span>':'')+r.inst.replace('-USDT-SWAP','')+'</a>'},
-          pf(r.last),
-          {v:r.oi, h:pct(r.oi), c:cls(r.oi)},
-          {v:r.oimc||0, h:r.oimc?f(r.oimc*100,2)+'%':'—'},
-          {v:r.chg24h, h:pct(r.chg24h), c:cls(r.chg24h)},
-        ]) + '</div>';
+    body += `<tr class="sec"><td colspan="${RANK_COLS.length}">`
+          + `<b style="color:${QCLR[q]}">${q}</b>`
+          + `<span class="dim" style="margin-left:8px">${meta[0]}</span></td></tr>`;
+    g.forEach((r,i)=>{
+      const s = r.sc || {};
+      body += '<tr>'
+        + `<td class="dim">${i+1}</td>`
+        + `<td><a class="cl" onclick="openCard('${r.inst}')">`
+          + (r.an===2?'<span class="star">★</span>':'')
+          + r.inst.replace('-USDT-SWAP','') + '</a>'
+          + (s.total!==undefined
+             ? `<span class="scp ${s.total>=20?'up':(s.total<=-20?'down':'dim')}">`
+               + `${s.total>0?'+':''}${s.total}</span>` : '')
+        + '</td>'
+        + `<td>${pf(r.last)}</td>`
+        + `<td class="${cls(r.oi)}">${pct(r.oi)}</td>`
+        + `<td>${r.oimc?f(r.oimc*100,2)+'%':'—'}</td>`
+        + `<td class="${cls(r.chg24h)}">${pct(r.chg24h)}</td>`
+        + '</tr>';
+    });
   }
-  return h;
+  return '<div class="card">' + winBar()
+    + `<h2>OI 異動排名<span>${m.win_h}H 持倉量變化・依 |OI 變化%| 取前 20</span></h2>`
+    + '<div class="scroll"><table class="fx">'
+    + '<colgroup>' + RANK_W.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
+    + '<thead><tr>' + RANK_COLS.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
+    + '<tbody>' + body + '</tbody></table></div>'
+    + '<div class="sub" style="margin-top:8px">象限已套用官方的市場結構覆寫層'
+    + '（評分裡的「主動做多／主動做空／多頭出場／空頭出場」會蓋過單純的 OI×價格方向）。</div>'
+    + '</div>';
 }
 
 function viewPos(){
@@ -1366,7 +1399,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925a';
+const PAGE_VER = '20260925b';
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
