@@ -58,7 +58,7 @@ from flask import Flask, request, jsonify
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-COINALYZE_API_KEY = “82087740-b30d-479f-8846-5ffb51540b19”
+COINALYZE_API_KEY = “”
 
 # Discord Bot 配置
 

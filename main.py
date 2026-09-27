@@ -132,7 +132,9 @@ def tflow_z(symbol):
 
 # ══════════════════════════════════════════════════════════════════════════════
 
-COINALYZE_API_KEY = "82087740-b30d-479f-8846-5ffb51540b19"
+# ★2026-09-27 從寫死改成讀環境變數（原本明文寫在這裡、已推上 GitHub）。Railway 已設 COINALYZE_API_KEY。
+#   沒設 → 空字串 → `_execute_coinalyze_request` 直接回空（功能降級，不會炸）。
+COINALYZE_API_KEY = os.environ.get("COINALYZE_API_KEY", "")
 
 # Discord Bot 配置
 
