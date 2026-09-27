@@ -13,6 +13,7 @@ import io
 import os
 import time
 import math
+import bisect
 import json
 import hmac
 import base64
@@ -9832,6 +9833,114 @@ _WHALE: Dict[str, dict] = {}     # 巨鯨雷達：inst -> 資金注入候選事�
 WHALE_OBS_SEC = 900              # ★官方原話：「觀察 **15 分鐘** 後…判斷方向」
 WHALE_VALID_H = 6                # 事件留多久（官方沒公布，這是我設的）
 WHALE_MAX = 40
+# ★2026-09-27 從官方前端 `_whaleRadarSharedContract` 抄到的**正式候選**兩道門檻（我先前漏了）：
+#   「原始候選為 1H OI ≥4%、價格絕對變化 ≤3%；**成交量達自身30日15m分位80%以上且15m OI ≤2%**，
+#     才列為正式資金注入候選。」 契約欄位 volume_percentile_threshold=0.8、oi_15m_max=2.0，
+#   判定式 `_whaleRadarIsLongCandidate`：oi1h≥4 && |px1h|≤3 && volPct≥0.8 && oi15≤2。
+#   量能來源是他們的 `okxVolumePct15m30dMap` → **OKX** 15m 成交量、自身 30 天分位。
+WHALE_OI_1H = 0.04
+WHALE_PX_1H = 0.03
+WHALE_VOL_PCT = 0.80
+WHALE_OI15_MAX = 0.02
+WHALE_VOL_DAYS = 30
+WHALE_VOL_TTL = 6 * 3600         # 30 天分布 6 小時重抓一次（分布變很慢；「當根量」每輪另抓）
+WHALE_STABLE = {"USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD", "USDS", "USDE", "USDD", "USDY",
+                "USDG", "USDF", "USDTB", "RLUSD", "PYUSD", "BFUSD", "USDB", "FRAX", "LUSD",
+                "SUSD", "GUSD", "USD0"}   # 官方 WHALE_RADAR_EXCLUDED_COINS 原樣
+_WHALE_VOL: Dict[str, dict] = {}  # inst -> {"ts", "dist"(已排序 30 天已收盤 15m 量), "bar_ts", "vol", "pct"}
+_WHALE_STATE = {"busy": False, "raw": 0, "formal": 0, "err": "", "ms": 0}
+
+
+def _okx_get_rl(path: str, params: dict, tries: int = 5):
+    """OKX 公開端點 GET，★限流要顯式判斷（手冊 2026-09-27：429/50011 被 except 吃掉 = 靜默少資料）。
+    拿不到回 None（呼叫端一律當失敗，不可當成空資料）。"""
+    for a in range(tries):
+        try:
+            r = requests.get(f"{OKX_BASE}{path}", params=params, timeout=12)
+        except Exception:
+            time.sleep(0.5 * (2 ** a))
+            continue
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        if r.status_code == 429 or str(j.get("code")) == "50011":
+            time.sleep(0.5 * (2 ** a))
+            continue
+        if r.status_code != 200 or str(j.get("code")) != "0":
+            return None
+        return j.get("data") or []
+    return None
+
+
+def _whale_vol_refresh(insts: list) -> None:
+    """背景執行緒：替原始候選補「OKX 15m 成交量在自身 30 天的分位」。
+    ★不放主迴圈：30 天 15m = 2880 根、history-candles 一頁 100 根 → 每幣約 29 支呼叫。
+    ★分位 = 30 天內「量 ≤ 最新已收盤那根」的比例（用已收盤根：未收盤根在棒內前段必然偏小）。
+      「用哪一根」官方沒寫，這是我的選擇。資料不到 25 天份 → pct=None（不准當成通過）。"""
+    _t0 = time.time()
+    now_s = time.time()
+
+    def _one(inst):
+        try:
+            _whale_vol_one(inst, now_s)
+        except Exception as e:                    # 單幣失敗不拖垮其他幣
+            _WHALE_VOL[inst] = {"ts": now_s, "dist": [], "pct": None, "err": str(e)[:60]}
+
+    try:
+        # 2 併發：history-candles 限流 20 次/2 秒，每支執行緒約 3 次/秒 → 留一倍餘裕
+        with ThreadPoolExecutor(2) as _ex:
+            list(_ex.map(_one, insts))
+        for k in [k for k, v in _WHALE_VOL.items() if now_s - v.get("ts", 0) > 2 * WHALE_VOL_TTL]:
+            del _WHALE_VOL[k]
+    except Exception as e:
+        _WHALE_STATE["err"] = str(e)[:80]
+    finally:
+        _WHALE_STATE["ms"] = int((time.time() - _t0) * 1000)
+        _WHALE_STATE["busy"] = False
+
+
+def _whale_vol_one(inst: str, now_s: float) -> None:
+    """單幣：30 天分布（過期才重抓）＋ 最新已收盤那根的量 → 分位寫進 `_WHALE_VOL`。"""
+    c = _WHALE_VOL.get(inst) or {}
+    if not c.get("dist") or now_s - c.get("ts", 0) > WHALE_VOL_TTL:
+        rows, after, ok = [], None, True
+        oldest_need = (now_s - WHALE_VOL_DAYS * 86400) * 1000
+        for _ in range(35):
+            q = {"instId": inst, "bar": "15m", "limit": "100"}
+            if after:
+                q["after"] = after
+            d = _okx_get_rl("/api/v5/market/history-candles", q)
+            if d is None:
+                ok = False
+                break
+            if not d:
+                break
+            rows += d
+            after = d[-1][0]
+            if float(after) <= oldest_need:
+                break
+            time.sleep(0.15)
+        vols = sorted(float(x[5]) for x in rows
+                      if str(x[8]) == "1" and float(x[0]) >= oldest_need)
+        if not ok or len(vols) < 25 * 96:
+            _WHALE_VOL[inst] = {"ts": now_s, "dist": [], "pct": None,
+                                "err": "限流" if not ok else f"只有 {len(vols)} 根"}
+            return
+        c = {"ts": now_s, "dist": vols}
+    # 最新已收盤那根（每輪都重抓：分布可以舊，當根量不行）
+    d = _okx_get_rl("/api/v5/market/candles", {"instId": inst, "bar": "15m", "limit": "3"})
+    last = [x for x in (d or []) if str(x[8]) == "1"]
+    if not last:
+        c["pct"] = None
+        c["err"] = "當根量拿不到"
+    else:
+        v = float(last[0][5])
+        c["bar_ts"] = float(last[0][0]) / 1000.0
+        c["vol"] = v
+        c["pct"] = bisect.bisect_right(c["dist"], v) / len(c["dist"])
+        c["err"] = ""
+    _WHALE_VOL[inst] = c
 
 
 def _whale_scan(now_s: float) -> None:
@@ -9870,26 +9979,62 @@ def _whale_scan(now_s: float) -> None:
                 return None
             return (hist[-1][1] - b[1]) / b[1]
 
+        def _chg15(hist):
+            if not hist or len(hist) < 2:
+                return None
+            b = dashboard._at(hist, now_s - 900.0, max(DASH_SAMPLE_SEC * 2, 600.0))
+            if not b or b[1] <= 0:
+                return None
+            return (hist[-1][1] - b[1]) / b[1]
+
+        # ★OI 來源跟視覺篩選器同一條規則（dashboard._market）：聚合累積夠了用 4 所聚合，否則 OKX。
+        #   官方 `getVisualFilterOiChange` 也是先讀跨所聚合 `oiAggMap`、沒有才退回單所。
+        _use_agg = len(_AGG_HISTORY) >= 50
+        oi_src = _AGG_HISTORY if _use_agg else _oi_history
         btc_px = _chg1(_PX_HISTORY.get("BTC-USDT-SWAP"))
-        for inst, h in list(_oi_history.items()):
+        raw, formal, need_vol = 0, 0, []
+        for inst, h in list(oi_src.items()):
+            if inst.split("-")[0] in WHALE_STABLE:
+                continue
             oi1 = _chg1(h)
             px1 = _chg1(_PX_HISTORY.get(inst))
             if oi1 is None or px1 is None:
                 continue
             ev = _WHALE.get(inst)
-            if oi1 >= 0.04 and abs(px1) <= 0.03:          # 官方固定門檻
-                if not ev:
-                    if len(_WHALE) >= WHALE_MAX:
-                        continue
-                    ev = {"inst": inst, "first_ts": now_s, "oi0": oi1, "px0": px1,
-                          "oi_at": h[-1][1], "dir": "pending", "judged_ts": 0.0,
-                          "note": ""}
-                    _WHALE[inst] = ev
-                ev["last_ts"] = now_s
-                ev["oi"] = oi1
-                ev["px"] = px1
+            if oi1 >= WHALE_OI_1H and abs(px1) <= WHALE_PX_1H:     # 原始候選（官方固定門檻）
+                raw += 1
+                need_vol.append((oi1, inst))
+                oi15 = _chg15(h)
+                vp = (_WHALE_VOL.get(inst) or {}).get("pct")
+                # ★正式候選：量能分位與 15m OI 缺一不可；**拿不到值 = 不通過**（不可當成過）
+                is_formal = (vp is not None and vp >= WHALE_VOL_PCT
+                             and oi15 is not None and oi15 <= WHALE_OI15_MAX)
+                if is_formal:
+                    formal += 1
+                    if not ev:
+                        if len(_WHALE) >= WHALE_MAX:
+                            continue
+                        ev = {"inst": inst, "first_ts": now_s, "oi0": oi1, "px0": px1,
+                              "oi_at": h[-1][1], "dir": "pending", "judged_ts": 0.0,
+                              "note": "", "src": "agg" if _use_agg else "okx"}
+                        _WHALE[inst] = ev
+                if ev:
+                    ev["last_ts"] = now_s
+                    ev["oi"] = oi1
+                    ev["px"] = px1
+                    ev["oi15"] = oi15
+                    ev["vpct"] = vp
+                    ev["formal"] = bool(is_formal)
+            elif ev:
+                ev["formal"] = False
             if not ev:
                 continue
+            # 部署初期聚合還沒累積夠 → 事件是用 OKX 張數起算的；中途換成聚合（USD）後
+            #   「OI 保留」拿兩種單位比會亂判 → 換源就把基準重設成新源的當下值。
+            _src = "agg" if _use_agg else "okx"
+            if ev.get("src") != _src:
+                ev["src"] = _src
+                ev["oi_at"] = h[-1][1]
             # 觀察滿 15 分鐘 → 判方向（只判一次，之後不再變，跟異常警報的狀態機同慣例）
             if ev["dir"] == "pending" and now_s - ev["first_ts"] >= WHALE_OBS_SEC:
                 score, why = 0, []
@@ -9914,6 +10059,13 @@ def _whale_scan(now_s: float) -> None:
         cut = now_s - WHALE_VALID_H * 3600
         for k in [k for k, v in _WHALE.items() if v.get("last_ts", 0) < cut]:
             del _WHALE[k]
+        _WHALE_STATE.update({"raw": raw, "formal": formal, "src": "4所聚合" if _use_agg else "OKX",
+                             "ts": now_s})
+        # 量能分位在背景補（下一輪才用得到 = 最多慢 5 分鐘；同時只跑一支，不堆執行緒）
+        if need_vol and not _WHALE_STATE.get("busy"):
+            _go = [i for _, i in sorted(need_vol, reverse=True)[:20]]
+            _WHALE_STATE["busy"] = True
+            Thread(target=_whale_vol_refresh, args=(_go,), daemon=True).start()
     except Exception as e:
         print(f"[WHALE] 掃描例外(不影響交易): {e}", flush=True)
 
