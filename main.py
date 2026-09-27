@@ -9249,7 +9249,19 @@ def _bn_dhx_data(coin: str, limit: int = 300):
                 sv = np.cumsum([m.get(t, 0.0) for t in ts])
     except Exception:
         sv = None
-    return {"ts": ts, "op": op, "hi": hi, "lo": lo, "cl": cl, "cv": cv, "sv": sv}
+    # ★v3 要幣數 OI（官方 oi_source = coin_basis）：跟 K 線同一個合約（含 1000 倍迷因幣）
+    oi = None
+    try:
+        ro = _bn_get("/futures/data/openInterestHist", {"symbol": sym, "period": "15m", "limit": 60},
+                     timeout=10)
+        if ro is not None and ro.status_code == 200:
+            arr = ro.json()
+            if isinstance(arr, list) and arr:
+                oi = sorted({int(x["timestamp"]) // 1000: float(x["sumOpenInterest"]) * scale
+                             for x in arr}.items())
+    except Exception:
+        oi = None
+    return {"ts": ts, "op": op, "hi": hi, "lo": lo, "cl": cl, "cv": cv, "sv": sv, "oi": oi}
 
 
 _DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
@@ -9373,11 +9385,14 @@ def _dhx_scan(force: bool = False) -> None:
                 if not d:
                     return inst, None, True, None   # 幣安沒這個幣 → 記 miss，不是錯誤
                 cl = d["cl"]; n = len(cl)
-                r = (_dhx_trap(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
-                     or _dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
-                                    op=d.get("op"))
-                     or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
-                                     op=d.get("op")))
+                r = _dhx_trap(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
+                if not r and DHX_V3:
+                    r = _dhx_v3(inst, d["ts"], d.get("op"), d["hi"], d["lo"], cl, d["cv"], d.get("oi"))
+                elif not r:
+                    r = (_dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
+                                     op=d.get("op"))
+                         or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
+                                         op=d.get("op")))
                 if r:
                     r["bar_ts"] = float(d["ts"][-1])   # 進場那根的開盤時間（事件追蹤從下一根起算）
                 # 近 100 根高低順便帶回去，給事件池判止盈/止損（不多打任何 API）
@@ -9755,6 +9770,126 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None, op=None):
         if r:
             r["sl_source"] = ex["sl_source"]
             return r
+    return None
+
+
+DHX_V3 = True              # 吸收/衰竭改用 v3（照官方順序）；False = 退回舊的 _dhx_absorb/_dhx_exhaust
+DHX_V3_MAX_SL_PCT = 18.0   # 官方停損距最大 17.71%
+
+
+def _dhx_v3_oi_at(hist, t):
+    """幣數 OI 線性內插（前後點距 >1h → None，不猜）。"""
+    prev = None
+    for a, b in hist or []:
+        if a <= t:
+            prev = (a, b)
+        else:
+            if prev is None or a - prev[0] > 3600:
+                return None
+            return prev[1] + (b - prev[1]) * (t - prev[0]) / (a - prev[0])
+    return prev[1] if prev else None
+
+
+def _dhx_v3(inst, ts, op, hi, lo, cl, cv, oi_hist):
+    """★吸收/衰竭 v3（2026-09-27）——照官方的**順序**偵測：先吞噬 K → pivot2 → 再找 pivot1。
+    為什麼換：同 20 幣、同 20 天、同一份官方 43 筆紀錄（`_bt_dhx_v3c.py` 2×2 對照，幣安輸入）：
+        舊版（先找樞紐、最後才看吞噬）召回 28%、頻率 11.8 倍
+        v3                          召回 **47%**、頻率 14.0 倍（我的單裡屬於官方的比例 2.4%→3.4%，兩邊都改善）
+    規格（官方原始欄位，`_DHX_ABSORB_0925_SPEC.md` 三之二）：
+      ·吞噬 K = 最後一根已收盤或前一根（官方「發訊−吞噬收盤」雙峰 28/36）；同向 K、
+        反向段 1~5 根可夾 1 根十字、收盤穿過反向段極值
+      ·pivot2 = 反向段內的極值、落在窗內 idx 40~47（官方 i2_age 2~9）、影線左1右0 樞紐、距吞噬 1~8 根
+      ·pivot1 = 左1樞紐、距 p2 ≥5、吸收：比 p2 更極端（p2 墊高）／衰竭：p2 破它；CVD 方向；
+        **沒被吃**（p1 之後到 p2 前價格沒再破它，官方 p1 從未被吃）裡**最遠**的那個
+        （選法仍未完全解：這一步只對上官方 ~42%，見 `_an_dhx_p1_*.py`）
+      ·OI（幣數）：吸收升 ≥0.5%、衰竭降 ≥0.5%；停損 = p2 價、停損距 1.5%~18%
+    ★CVD 用幣安就夠：官方 `pivot*_futures_cvd` 以幣安+Bybit 精準重現（誤差 1.2%），但在官方樞紐上
+      幣安單獨的方向判斷也是 28/28、候選池完全相同 → 不必為了 Bybit 接 Coinalyze。
+    陣列最後一根 (n−1) 是**未收盤**那根（幣安 klines 形狀）。回 dict 或 None。"""
+    n = len(cl)
+    if n < 52 or op is None or not oi_hist:
+        return None
+    for E in (n - 2, n - 3):
+        w0 = E - 48
+        if w0 < 0:
+            continue
+        for up in (True, False):
+            same = (lambda j: cl[j] > op[j]) if up else (lambda j: cl[j] < op[j])
+            rev = (lambda j: cl[j] < op[j]) if up else (lambda j: cl[j] > op[j])
+            if not same(E):
+                continue
+            j = E - 1
+            while j > w0 and same(j):
+                j -= 1
+            end, cnt, neu = j, 0, 0
+            while j >= w0:
+                if rev(j):
+                    cnt += 1; j -= 1; continue
+                if cl[j] == op[j] and neu < DHX_NEU_MAX:
+                    neu += 1; j -= 1; continue
+                break
+            start = j + 1
+            if cnt < 1 or cnt > DHX_REV_MAX or end < start:
+                continue
+            if up and not (cl[E] > float(np.max(hi[start:end + 1]))):
+                continue
+            if (not up) and not (cl[E] < float(np.min(lo[start:end + 1]))):
+                continue
+            arr = lo if up else hi
+            bt = (lambda a, b: a < b) if up else (lambda a, b: a > b)
+            a_, b_ = max(w0 + 40, start), min(w0 + 47, E - 1)
+            if a_ > b_:
+                continue
+            sub = arr[a_:b_ + 1]
+            p2 = a_ + int(np.argmin(sub) if up else np.argmax(sub))
+            if bt(arr[p2 - 1], arr[p2]):
+                continue
+            if not (1 <= E - p2 <= DHX_ENGULF_MAX_GAP):
+                continue
+            for kind in ("ABSORPTION", "EXHAUSTION"):
+                absorb = kind == "ABSORPTION"
+                cb = (lambda a, b: a < b) if (up == absorb) else (lambda a, b: a > b)
+                p1 = None
+                for k in range(w0 + 1, p2 - 5 + 1):          # 由遠往近 → 第一個合格的就是「最遠」
+                    if bt(arr[k - 1], arr[k]) or bt(arr[k], arr[p2]) != absorb or not cb(cv[p2], cv[k]):
+                        continue
+                    if any(bt(arr[m], arr[k]) for m in range(k + 1, p2)):
+                        continue
+                    p1 = k
+                    break
+                if p1 is None:
+                    continue
+                a1, a2 = _dhx_v3_oi_at(oi_hist, ts[p1]), _dhx_v3_oi_at(oi_hist, ts[p2])
+                if not a1 or not a2:
+                    continue
+                d = (a2 / a1 - 1) * 100
+                if (absorb and d < DHX_MIN_OI_PCT) or ((not absorb) and d > -DHX_MIN_OI_PCT):
+                    continue
+                entry, sl = float(cl[-1]), float(arr[p2])
+                if entry <= 0 or ((sl >= entry) if up else (sl <= entry)):
+                    continue
+                sld = abs(entry - sl) / entry * 100
+                if not (DHX_MIN_SL_PCT <= sld <= DHX_V3_MAX_SL_PCT):
+                    continue
+                dd = 1 if up else -1
+                risk = abs(entry - sl)
+                seg = (hi if up else lo)[p1:p2 + 1]
+                amp = ((float(np.max(seg)) / float(arr[p1]) - 1) * 100 if up
+                       else (1 - float(np.min(seg)) / float(arr[p1])) * 100)
+                r = {"inst": inst, "kind": kind, "bias": "LONG" if up else "SHORT", "tf": "15m",
+                     "level": "CONFIRMED", "entry": entry, "sl": sl, "sl_dist_pct": round(sld, 3),
+                     "sl_source": "post_i2_structure_" + ("low" if up else "high"),
+                     "entry_source": "engulf_market",
+                     "tp1": round(entry + dd * risk, 8), "tp2": round(entry + dd * risk * 1.5, 8),
+                     "tp3": round(entry + dd * risk * 2.0, 8),
+                     "i1_close": float(cl[p1]), "breakout_extreme": sl, "close_back": float(cl[E]),
+                     "i1_i2_dist": int(p2 - p1), "bars_since": int(n - 1 - p2),
+                     "pivot1_price": float(arr[p1]), "pivot2_price": sl,
+                     "oi_delta_pct": round(d, 3), "swing_amp_pct": round(amp, 3),
+                     "fut_cvd_i1": float(cv[p1]), "fut_cvd_i2": float(cv[p2]),
+                     "spot_cvd_i1": None, "spot_cvd_i2": None, "engulf_idx": int(E - w0),
+                     "ts": time.time()}
+                return r
     return None
 
 
