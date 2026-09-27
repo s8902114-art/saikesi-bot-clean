@@ -1621,6 +1621,13 @@ function dhxR(e){          // 持倉中：以現價算浮動 R（R = 停損距�
   if(!e.last || !risk) return null;
   return (e.bias==='LONG' ? (e.last - e.entry) : (e.entry - e.last)) / risk;
 }
+// 已結單（止盈/止損）扣往返手續費 0.10% 後的平均 R：±1R − 0.10/停損距%。過期單不算（沒有 1R 結果）。
+function dhxNetR(list){
+  const d = list.filter(e=>e.status==='止盈'||e.status==='止損');
+  if(!d.length) return null;
+  return d.reduce((s,e)=>s + (e.status==='止盈'?1:-1) - 0.10/Math.max(e.sl_dist_pct||0,1e-6), 0) / d.length;
+}
+function fmtR(r){ return r==null ? '—' : (r>=0?'+':'') + f(r,2) + 'R'; }
 function dhxRows(list, id){
   return table(id, ['時間','幣','方向','類型','進場','停損','TP1','停損%','狀態'], list, e=>{
     const r = dhxR(e), st = e.status||'';
@@ -1671,8 +1678,13 @@ function viewDhx(){
   h += `<h3 class="sech">入場訊號 <span class="dim">${open.length}</span></h3>`
     + (open.length ? dhxRows(open, 'dhxo') : '<div class="empty">暫無入場訊號</div>');
   h += `<h3 class="sech">已結單區 <span class="dim">止盈 ${nTp}・止損 ${nSl}・過期 ${nEx}`
-    + (nDec ? `・勝率 ${f(nTp/nDec*100,0)}%（n=${nDec}${nDec<20?'，⚠ 樣本太少不能下結論':''}）` : '')
+    + (nDec ? `・勝率 ${f(nTp/nDec*100,0)}%・<b>扣費後平均 ${fmtR(dhxNetR(done))}</b>`
+        + `（n=${nDec}${nDec<20?'，⚠ 樣本太少不能下結論':''}）` : '')
     + '</span></h3>'
+    // ★目標 1R、停損 1R → 勝率 50% 只是打平；停損距很近時手續費吃掉一大塊 R，勝率會騙人。
+    //   2026-09-28 實測：頁面勝率 62% 扣費後只剩 +0.02R；v3 回測 50%／官方自己 52%，扣費後都 ≈0。
+    + '<div class="sub">1R 目標：勝率 50% ＝打平。扣費用往返 0.10%（停損距越近、每筆扣的 R 越多）。'
+    + '回測（20 幣 20 天）v3 勝率 50%、官方自己的訊號 52%，扣費後都約 0R。</div>'
     + (done.length ? dhxRows(done, 'dhxc') : '<div class="empty">暫無紀錄</div>');
   return h + '<details class="sub" style="margin-top:8px"><summary>判定規則與狀態怎麼算</summary>'
     + '<b>狀態</b>：進場＝偵測當下價格。之後用幣安 15m 高低（從下一根起算）加上 5 分鐘取樣價判定：'
