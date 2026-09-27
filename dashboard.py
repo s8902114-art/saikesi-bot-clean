@@ -338,6 +338,7 @@ def _market(G, win_h=1.0, top_n=300):
     """
     rows = []
     _mkt_err = None
+    _use_agg = False      # ★先給預設：下面 try 外的 depth/keep_h/return 都依賴它
     try:
         # ★OI 改用**跨所聚合**（OKX+幣安+Bitget+Gate）。官方排名用的是 CoinGlass 跨所加總，
         #   只用 OKX 會差 12~45 倍、變化% 甚至方向相反（ZRO 我 +8.2% vs 官方 −0.32%）。
@@ -544,7 +545,11 @@ def _market(G, win_h=1.0, top_n=300):
     # 空白畫面要講得出「還差幾分鐘」，不然使用者只會看到一片空，以為壞了。
     depth = 0.0
     try:
-        oi_all = G.get("_oi_history") or {}
+        # ★★要用市場視圖**實際吃的那份** OI 算深度（2026-09-27）。
+        #   原本固定讀 `_oi_history` —— 那份是交易用、刻意只留 13h（見 main.py `DASH_HIST_KEEP_H`），
+        #   而 4 所聚合開著時市場視圖吃的是 `_AGG_HISTORY`（留 25h）。
+        #   讀錯份的後果：24H 窗明明已經有資料，頁面還是永遠顯示「還要約 660 分鐘」。
+        oi_all = (G.get("_AGG_HISTORY") if _use_agg else G.get("_oi_history")) or {}
         px_all = G.get("_PX_HISTORY") or {}
         nowt = time.time()
         for inst, h in oi_all.items():
@@ -571,6 +576,10 @@ def _market(G, win_h=1.0, top_n=300):
             "up_w": _up_w, "n_w": len(rows),
             "depth_min": int(depth / 60),
             "eta_min": max(0, int((win_h * 3600 - depth) / 60)),
+            # ★保留期上限：窗比它長就**永遠**等不到，前端要改說實話，不能給一個跑不完的倒數。
+            #   聚合開著 → 儀表板保留期；沒開 → 退回交易那份（13h）。
+            "keep_h": (G.get("DASH_HIST_KEEP_H") or 25) if _use_agg
+                      else ((G.get("OI_MOVERS_WINDOW_H") or 12) + 1),
             "rows": rows[:top_n]}
 
 
@@ -1043,15 +1052,26 @@ function winBar(){
        幣安 fapi 若被 Railway 地理封鎖(451)就只剩 OKX。">${(D&&D.mkt&&D.mkt.src)||'OKX'}</span></div>`;
 }
 function noData(m){
+  // ★窗比保留期長 = **永遠**等不到。2026-09-27 前就是這樣：保留期被寫死 13h，
+  //   24H 窗卻一直顯示「還要約 660 分鐘」—— 一個永遠跑不完的倒數等於在騙人，改成直說。
+  if(m.keep_h && m.win_h > m.keep_h - 0.5)
+    return '<div class="card">' + winBar()
+      + `<h2>${m.win_h}H 窗無法使用<span>保留期只有 ${m.keep_h} 小時</span></h2>`
+      + `<div class="sub" style="margin-top:8px">目前只保留最近 ${m.keep_h} 小時的取樣，`
+      + `這個窗需要 ${m.win_h} 小時，<b>等再久也不會出現</b>。`
+      + (m.agg ? '' : '（跨所聚合還沒累積到 50 幣以上，暫時退回 OKX 單所歷史，那份只留 13 小時。）')
+      + ' 先看較短的窗。</div></div>';
   const pctDone = Math.min(100, Math.round(m.depth_min/(m.win_h*60)*100)) || 0;
   return '<div class="card">' + winBar()
     + `<h2>${m.win_h}H 窗累積中<span>${m.depth_min} / ${m.win_h*60} 分鐘</span></h2>`
     + `<div class="bar"><i style="width:${pctDone}%"></i></div>`
     + `<div class="sub" style="margin-top:8px">`
     + `已取樣 ${m.depth_min} 分鐘，還要約 <b>${m.eta_min} 分鐘</b>`
-    + `（每 15 分鐘取樣一次，追蹤 ${m.tracked} 個合約、報價 ${m.priced} 個）。`
+    // ★取樣間隔：2026-09-24 改成獨立執行緒後實測 [328, 301] 秒 ≈ 5 分鐘（原文寫 15 分鐘已過期）
+    + `（約每 5 分鐘取樣一次，追蹤 ${m.tracked} 個合約、報價 ${m.priced} 個）。`
     + (m.win_h > 1 ? ' 先看 1H 那格，它最快滿。' : '')
-    + ' bot 每次重新部署會歸零重算。</div></div>';
+    // ★歷史已落地到 Railway volume（v5），重新部署不會歸零（原文寫「會歸零」已過期）
+    + ' 取樣會存檔，重新部署不會歸零。</div></div>';
 }
 
 // ── 視覺篩選器：X=OI 變化%，Y=價格變化%，四象限 + 拉桿門檻框 ─────────────────

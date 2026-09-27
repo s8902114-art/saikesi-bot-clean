@@ -8641,13 +8641,32 @@ DASH_SAVE_EVERY = 1                 # ★每一輪取樣都落地（原本 3 輪
 _DASH_HIST_FILE = os.path.join(_PERSIST_DIR, "dash_hist.json")
 
 
+# ★★★儀表板歷史的保留期 —— 跟交易用的 `_oi_history` **刻意分開**（2026-09-27）。
+#   原本所有修剪點都寫 `now − (OI_MOVERS_WINDOW_H + 1) × 3600` = **13 小時**，
+#   線上實測 `depth_min=779`（=13h×60）→ **儀表板的 24H 窗永遠填不滿**，
+#   頁面上「還要約 660 分鐘」的倒數永遠跑不完。
+#   ★為什麼不直接把 OI_MOVERS_WINDOW_H 改大：交易策略 `_fetch_okx_oi_movers`
+#     （「OI 增幅前20」實盤掃描來源）用 `hist[0]`（**最舊點**）當基準，不是「12h 前那點」
+#     → `_oi_history` 拉長 = 策略從量 12h 變成量 25h = **悄悄改掉實盤掃描池**。
+#   ★四份歷史逐一查過讀者與讀法：
+#       _oi_history   交易策略 + 幣安選幣器，用 hist[0]  → **維持 13h，不准動**
+#       _AGG_HISTORY  只有儀表板                        → 可拉長
+#       _BN_HISTORY   只有儀表板                        → 可拉長
+#       _PX_HISTORY   儀表板/巨鯨/警報，都用 `_at()` 目標時間內插 → 可拉長
+#   25 = 24H 窗 + 1 小時容差。★必須是字面值：OI_MOVERS_WINDOW_H 定義在檔案更後面。
+#   驗收：`python ../_chk_dash_keep.py`（存讀來回深度＋交易函數雜湊＋靜態掃描）
+DASH_HIST_KEEP_H = 25
+
+
 def _dash_hist_save() -> None:
     """★把 OI／價格取樣落地到 Railway volume（/data），redeploy 不歸零。
     不存檔的話每次部署 1H 窗都要重等一小時、12H 窗等於永遠等不到
     （部署頻率比 12 小時高）。時間戳取整數、數值取 6 位有效數字以縮小檔案。"""
     try:
-        keep_from = time.time() - (OI_MOVERS_WINDOW_H + 1) * 3600
-        def _pack(d):
+        _now = time.time()
+        keep_trade = _now - (OI_MOVERS_WINDOW_H + 1) * 3600   # _oi_history：交易用，維持 13h
+        keep_dash = _now - DASH_HIST_KEEP_H * 3600             # 其餘：儀表板用，要撐 24H 窗
+        def _pack(d, keep_from):
             out = {}
             for k, h in list(d.items()):   # ★snapshot:幣安取樣在背景執行緒改這些 dict
                 # 9 位有效數字:OI 的 1H 變化常常只有 1~3%,存成 6 位(1000052→1000050)
@@ -8662,8 +8681,9 @@ def _dash_hist_save() -> None:
         #   幣安那一腳都要重等一小時，OI 變化% 會在「OKX 單腳」與「雙所平均」之間跳。
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"v": 5, "ts": int(time.time()),
-                       "oi": _pack(_oi_history), "px": _pack(_PX_HISTORY),
-                       "bn": _pack(_BN_HISTORY),
+                       "oi": _pack(_oi_history, keep_trade),
+                       "px": _pack(_PX_HISTORY, keep_dash),
+                       "bn": _pack(_BN_HISTORY, keep_dash),
                        # ★CVD/資費/多空比也要落地：它們是逐幣抓的（幣安沒有批量端點），
                        #   redeploy 後要一整輪才補得回來。而**沒有 CVD 的幣會掉進
                        #   scoreBreakdown 的粗略分支**（只看 OI×價格），短線反彈時
@@ -8672,7 +8692,7 @@ def _dash_hist_save() -> None:
                        "ex": {k: v for k, v in _BN_EXTRA.items()},
                        # ★跨所聚合 OI 與資費也要落地：它們是 3 支批量 + 281 支逐幣換來的，
                        #   redeploy 後重新累積要等一小時才有 1H 窗。
-                       "agg": _pack(_AGG_HISTORY),
+                       "agg": _pack(_AGG_HISTORY, keep_dash),
                        "fr": {k: float(f"{v:.6g}") for k, v in _FR_AGG.items()},
                        # ★掃描快照也存：它是掃描迴圈每根 K 收盤順手記的，純記憶體 →
                        #   redeploy 後「幣種」那頁整個空白、要等下一根 15m 收盤才有東西
@@ -8693,19 +8713,21 @@ def _dash_hist_load() -> None:
             return
         with open(_DASH_HIST_FILE, encoding="utf-8") as f:
             d = json.load(f)
-        keep_from = time.time() - (OI_MOVERS_WINDOW_H + 1) * 3600
-        def _unpack(src):
+        _now = time.time()
+        keep_trade = _now - (OI_MOVERS_WINDOW_H + 1) * 3600   # _oi_history 維持 13h（見 DASH_HIST_KEEP_H 說明）
+        keep_dash = _now - DASH_HIST_KEEP_H * 3600
+        def _unpack(src, keep_from):
             out = {}
             for k, pts in (src or {}).items():
                 arr = [(float(t), float(v)) for t, v in pts if float(t) >= keep_from]
                 if len(arr) >= 1:
                     out[k] = arr
             return out
-        _oi_history.update(_unpack(d.get("oi")))
-        _PX_HISTORY = _unpack(d.get("px"))
-        _BN_HISTORY.update(_unpack(d.get("bn")))   # v1 舊檔沒這個鍵 → 空 dict，相容
+        _oi_history.update(_unpack(d.get("oi"), keep_trade))
+        _PX_HISTORY = _unpack(d.get("px"), keep_dash)
+        _BN_HISTORY.update(_unpack(d.get("bn"), keep_dash))   # v1 舊檔沒這個鍵 → 空 dict，相容
         dashboard.restore(d.get("scan"))           # v2 以前沒有 scan → restore 自己會忽略
-        _AGG_HISTORY.update(_unpack(d.get("agg")))   # v4 以前沒有 → 空 dict，相容
+        _AGG_HISTORY.update(_unpack(d.get("agg"), keep_dash))   # v4 以前沒有 → 空 dict，相容
         try:
             for _k, _v in (d.get("fr") or {}).items():
                 _FR_AGG[_k] = float(_v)
@@ -8717,14 +8739,19 @@ def _dash_hist_load() -> None:
                     _BN_EXTRA[_k] = dict(_v)
         except Exception:
             pass
-        _depth = 0
-        for _k, _h in _oi_history.items():
-            if _h:
-                _depth = max(_depth, int((time.time() - _h[0][0]) / 60))
+        # ★兩份保留期不同，深度要分開印 —— 只印 _oi_history 會永遠顯示 ~780 分鐘，
+        #   讓人以為 24H 窗還是撐不起來（顯示層要跟邏輯同步，手冊心法 12）。
+        def _deep(dd):
+            m = 0
+            for _h in dd.values():
+                if _h:
+                    m = max(m, int((time.time() - _h[0][0]) / 60))
+            return m
         print(f"[DASH] 讀回取樣歷史:OI {len(_oi_history)} 幣 / 價 {len(_PX_HISTORY)} 幣 / "
               f"幣安OI {len(_BN_HISTORY)} 幣 / 補值 {len(_BN_EXTRA)} 幣 / "
               f"聚合 {len(_AGG_HISTORY)} 幣,"
-              f"最深 {_depth} 分鐘(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
+              f"最深 交易 {_deep(_oi_history)} 分 / 儀表板 {_deep(_AGG_HISTORY)} 分"
+              f"(存檔於 {int(time.time() - d.get('ts', 0)) // 60} 分鐘前)", flush=True)
     except Exception as e:
         print(f"[DASH] 讀回取樣歷史失敗(從零開始): {e}", flush=True)
 
@@ -9107,7 +9134,7 @@ def _bn_extra_sample(picks: list) -> None:
                 if out.get("bn_oi"):
                     hh = _BN_HISTORY.setdefault(inst, [])
                     hh.append((now_s, out["bn_oi"]))
-                    _kf = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600
+                    _kf = now_s - DASH_HIST_KEEP_H * 3600   # _BN_HISTORY 只有儀表板讀
                     _BN_HISTORY[inst] = [(t, x) for (t, x) in hh if t >= _kf] or [(now_s, out["bn_oi"])]
         for k in list(_BN_EXTRA.keys()):
             if k not in _oi_history:
@@ -10045,7 +10072,8 @@ def _oi_sample_tick(force: bool = False) -> bool:
         if coin in _STABLE_EX:
             return False
         return (not _crypto_ok) or (coin in _crypto_ok)   # 抓不到清單就不過濾（與其他來源一致）
-    keep_from = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600      # 留到比最大窗多 1 小時就夠
+    keep_from = now_s - (OI_MOVERS_WINDOW_H + 1) * 3600      # _oi_history 專用：交易策略量 12h，不准動
+    dash_keep = now_s - DASH_HIST_KEEP_H * 3600               # 價格/聚合OI：儀表板要撐 24H 窗
     # ① OI
     try:
         r = requests.get("https://www.okx.com/api/v5/public/open-interest",
@@ -10086,7 +10114,7 @@ def _oi_sample_tick(force: bool = False) -> bool:
                               "volccy_usd": vc * last, "ts": now_s}
                 h = _PX_HISTORY.setdefault(inst, [])
                 h.append((now_s, last))
-                _PX_HISTORY[inst] = [(_t, _v) for (_t, _v) in h if _t >= keep_from] or [(now_s, last)]
+                _PX_HISTORY[inst] = [(_t, _v) for (_t, _v) in h if _t >= dash_keep] or [(now_s, last)]
             if snap:
                 _TICKER_SNAP = snap                       # 整批換掉，下架幣自然消失
                 for k in list(_PX_HISTORY.keys()):
@@ -10099,7 +10127,9 @@ def _oi_sample_tick(force: bool = False) -> bool:
     #   同步跑等於每 5 分鐘把**交易主迴圈**卡住十幾秒 —— 掃描時機不能被儀表板拖。
     #   `_BN_STATE["busy"]` 保證同時只有一個在跑（上一輪沒跑完就跳過這輪，不堆執行緒）。
     if not _BN_STATE.get("busy"):
-        def _bn_bg(_ns=now_s, _kf=keep_from):
+        # ★_kf 傳給 _bn_oi_sample（該參數未使用）與 _agg_oi_sample（只拿來修 _AGG_HISTORY），
+        #   兩者都**不碰 _oi_history** → 換成儀表板保留期不影響交易。
+        def _bn_bg(_ns=now_s, _kf=dash_keep):
             _t0 = time.time()
             try:
                 _bn_oi_sample(_ns, _kf)
