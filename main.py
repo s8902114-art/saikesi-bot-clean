@@ -9890,6 +9890,8 @@ def _dhx_v3(inst, ts, op, hi, lo, cl, cv, oi_hist):
                      "oi_delta_pct": round(d, 3), "swing_amp_pct": round(amp, 3),
                      "fut_cvd_i1": float(cv[p1]), "fut_cvd_i2": float(cv[p2]),
                      "spot_cvd_i1": None, "spot_cvd_i2": None, "engulf_idx": int(E - w0),
+                     # 吞噬 K 全幅%：儀表板「精選」篩選用（官方的吞噬 K 明顯較大，見 _an_dhx_v3_neg.py）
+                     "engulf_rng_pct": round((float(hi[E]) - float(lo[E])) / float(op[E]) * 100, 3),
                      "ts": time.time()}
                 return r
     return None

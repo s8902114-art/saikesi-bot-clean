@@ -704,7 +704,7 @@ def _flags(G):
 
 
 _DHXEV_FIELDS = ("inst", "kind", "bias", "entry", "sl", "tp1", "sl_dist_pct", "ts", "status",
-                 "r", "exit_ts", "oi_delta_pct", "swing_amp_pct")
+                 "r", "exit_ts", "oi_delta_pct", "swing_amp_pct", "engulf_rng_pct")
 
 
 def _dhx_events(G):
@@ -1060,12 +1060,14 @@ let W = 1, OITH = 1, PXTH = 5;   // 預設＝官方象限圖條件：OI ≥ 1%�
 //   （實測 CoinGlass 收錄是**依 OI 挑**的，不是依市值）。282 幣全列就是「看起來沒過濾」的主因。
 let ALLCOINS = false;
 // 數據訊號篩選（官方同款：做多/做空 × 吸收/衰竭；多一個「假突破」因為我們也發 TRAP）
-let DHXF = {dir:'', kind:''};
+// q:'A' = 只看「精選」（預設開）：吞噬 K 全幅 ≥0.8% 且 |OI 變化| ≥1%。來源見 dhxIsA()。
+let DHXF = {dir:'', kind:'', q:'A'};
 try{ const s=JSON.parse(localStorage.getItem('dash')||'{}');
      if(s.W && WINS.some(x=>x[0]===s.W)) W=s.W;      // 舊版存的 4/12 會被丟掉
      if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH;
      if(s.ALLCOINS) ALLCOINS=true;
-     if(s.DHXF && typeof s.DHXF==='object') DHXF={dir:s.DHXF.dir||'', kind:s.DHXF.kind||''}; }catch(e){}
+     if(s.DHXF && typeof s.DHXF==='object')
+       DHXF={dir:s.DHXF.dir||'', kind:s.DHXF.kind||'', q:(s.DHXF.q===undefined?'A':s.DHXF.q)}; }catch(e){}
 function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH,ALLCOINS,DHXF})); }catch(e){} }
 function toggleAll(){ ALLCOINS=!ALLCOINS; save(); draw(); }
 function setW(w){ W=w; save(); tick(); }
@@ -1123,7 +1125,7 @@ function focusMap(){
     if(d==='bull'||d==='bear') get(coinOf(x.inst))[d].add('警報'); });
   // 跟數據訊號頁一致：只算「入場訊號」段（持倉中）的事件，結單的不投票
   (D.dhxev||[]).forEach(x=>{ const d = {LONG:'bull',SHORT:'bear'}[x.bias];
-    if(d && x.status==='持倉中') get(coinOf(x.inst))[d].add('數據'); });
+    if(d && x.status==='持倉中' && dhxIsA(x)) get(coinOf(x.inst))[d].add('數據'); });  // 只算精選（跟數據訊號頁預設一致）
   return m;
 }
 function fireDir(f){ return !f ? null : (f.bull.size>=FIRE_MIN ? 'bull' : (f.bear.size>=FIRE_MIN ? 'bear' : null)); }
@@ -1636,22 +1638,36 @@ function dhxRows(list, id){
     ];
   });
 }
+// ★「精選」= 像官方的那一群（2026-09-27 `_an_dhx_v3_neg.py` / `_an_dhx_v3_gates.py`）：
+//   同 20 幣比「官方有發」vs「我多發」，官方的吞噬 K 明顯較大（全幅 AUC 0.78）、OI 變化較大（0.69）。
+//   吞噬全幅 ≥0.8% 且 |OI| ≥1%：頻率 14.1→7.1 倍，v3 抓得到的官方單留 16/20。
+//   ★門檻是在同一批 20 筆官方紀錄上挑的 → 只做成網頁篩選（可關），不寫進偵測器；等新紀錄做樣本外驗證。
+//   假突破（TRAP）沒評估過，不受這個篩選影響。
+const DHX_A_RNG = 0.8, DHX_A_OI = 1.0;
+function dhxIsA(e){
+  if(DHX_FAM[e.kind]==='假突破') return true;
+  return (e.engulf_rng_pct||0) >= DHX_A_RNG && Math.abs(e.oi_delta_pct||0) >= DHX_A_OI;
+}
 function viewDhx(){
   const all = D.dhxev||[], q = D.dhxq||{};
-  const match = e => (!DHXF.dir || e.bias===DHXF.dir) && (!DHXF.kind || DHX_FAM[e.kind]===DHXF.kind);
+  const match = e => (!DHXF.dir || e.bias===DHXF.dir) && (!DHXF.kind || DHX_FAM[e.kind]===DHXF.kind)
+                     && (!DHXF.q || dhxIsA(e));
   const rows = all.filter(match);
+  const nA = all.filter(dhxIsA).length;
   const open = rows.filter(e=>e.status==='持倉中');
   const done = rows.filter(e=>e.status!=='持倉中').sort((a,b)=>(b.exit_ts||0)-(a.exit_ts||0));
   const nTp = done.filter(e=>e.status==='止盈').length, nSl = done.filter(e=>e.status==='止損').length;
   const nEx = done.length - nTp - nSl, nDec = nTp + nSl;
   const chip = (k,v,lab) => `<div class="wb ${DHXF[k]===v?'on':''}" onclick="setDhxF('${k}','${v}')">${lab}</div>`;
   let h = '<div class="card"><h2>數據背離訊號'
-    + `<span>近 24h ${all.length} 筆・15m・掃 ${q.i||0} 幣</span></h2>`
-    + '<div class="wins">' + chip('dir','LONG','做多 📈') + chip('dir','SHORT','做空 📉')
+    + `<span>近 24h ${all.length} 筆（精選 ${nA}）・15m・掃 ${q.i||0} 幣</span></h2>`
+    + '<div class="wins">' + chip('q','A','精選') + '<span class="src"></span>'
+    + chip('dir','LONG','做多 📈') + chip('dir','SHORT','做空 📉')
     + '<span class="src"></span>' + chip('kind','吸收','吸收') + chip('kind','衰竭','衰竭')
     + chip('kind','假突破','假突破') + '</div>'
-    + '<div class="note">⚠ 這是<b>我自己的偵測器</b>，不是官方訊號：實測只抓得到官方 48%、'
-    + '發的量是官方的一百多倍（官方的 CVD 來源拿不到）。只收每輪品質前 15、同幣 5 小時內只記一次。</div>';
+    + '<div class="note">⚠ 這是<b>我自己的偵測器</b>，不是官方訊號：同幣同期抓得到官方約一半（47%）、'
+    + '發的量約官方 14 倍；<b>精選</b>（吞噬K ≥0.8%、OI ≥1%）壓到約 7 倍、官方單留 8 成。'
+    + '精選門檻只用 20 筆官方紀錄挑出來，還沒做樣本外驗證。</div>';
   h += `<h3 class="sech">入場訊號 <span class="dim">${open.length}</span></h3>`
     + (open.length ? dhxRows(open, 'dhxo') : '<div class="empty">暫無入場訊號</div>');
   h += `<h3 class="sech">已結單區 <span class="dim">止盈 ${nTp}・止損 ${nSl}・過期 ${nEx}`
