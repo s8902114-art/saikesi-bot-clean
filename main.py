@@ -8683,6 +8683,10 @@ def _dash_hist_save() -> None:
             _sigs = dashboard.sig_snapshot()
         except Exception:
             _sigs = {}
+        try:                                  # 數據訊號事件池：同理，出錯不拖垮核心存檔
+            _dhxev = [dict(v) for v in list(_DHX_EVENTS.values())]
+        except Exception:
+            _dhxev = []
         tmp = _DASH_HIST_FILE + ".tmp"
         # ★2026-09-24 加存 bn（幣安 OI）：先前幣安被 451 擋著、這裡沒東西可存所以沒寫，
         #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
@@ -8707,7 +8711,10 @@ def _dash_hist_save() -> None:
                        #   （用戶 2026-09-24 回報「空的」）。每列都有 ts，讀回來會照實顯示幾分鐘前。
                        "scan": dashboard.snapshot(),
                        # ★最近訊號（儀表板 🎯 標記讀它）—— 原本純記憶體，每次部署清空
-                       "sigs": _sigs},
+                       "sigs": _sigs,
+                       # ★數據訊號事件池（24h 列表＋止盈/止損結果）—— 不存的話每次部署清空，
+                       #   「已結單區」永遠只有部署後那幾小時
+                       "dhxev": _dhxev},
                       f, separators=(",", ":"))
         os.replace(tmp, _DASH_HIST_FILE)      # 原子替換,避免寫到一半被重啟砍成半截檔
     except Exception as e:
@@ -8742,6 +8749,13 @@ def _dash_hist_load() -> None:
         #   我第一版把它插在 _AGG_HISTORY 前面，它一出錯聚合 OI 就讀不回來（市場視圖吃的正是那份）。
         try:
             dashboard.sig_restore(d.get("sigs"))   # 舊存檔沒有 sigs → 忽略（相容）
+        except Exception:
+            pass
+        try:                                       # 舊存檔沒有 dhxev → 忽略（相容）
+            for _e in (d.get("dhxev") or []):
+                if (isinstance(_e, dict) and _e.get("key")
+                        and _now - float(_e.get("ts") or 0) < (DHX_EVENT_KEEP_H + 1) * 3600):
+                    _DHX_EVENTS[_e["key"]] = _e
         except Exception:
             pass
         try:
@@ -9243,6 +9257,79 @@ DHX_SCAN_SEC = 900               # 15 分鐘掃一次（官方全部訊號都是
 DHX_SCAN_POOL = 100              # 選幣層＝24h 成交額前 100（官方 source: volume_top100）
 DHX_WORKERS = 6                  # 併發（幣安限流上限 2400 權重/分，我們用不到 1%）
 DHX_SHOW_N = 15                  # ★顯示上限（偵測器仍比官方多發，原因見 _dhx_mag_ok）
+# ★2026-09-27 改成官方頁面的「事件」呈現（用戶：「你的好亂」）：
+#   官方只列**近 24 小時**的訊號，每筆有生命週期（持倉中／止盈／止損／過期），分「入場訊號」與
+#   「已結單區」；我原本是每 15 分鐘整批重掃的**狀態快照**，同一個結構每輪重畫一次、過了就消失。
+#   事件鍵 = 幣＋型態＋方向＋pivot2 價（＝停損價）：同一個結構後面幾輪再掃到 → 同一筆，不重記。
+_DHX_EVENTS: Dict[str, dict] = {}
+DHX_EVENT_KEEP_H = 24            # 官方前端 cutoff = now − 86400000（`_applyDhFilter`）
+DHX_COIN_GAP_H = 5.0             # 官方 162 筆「同幣最短間隔」乾淨地板 4.99h
+DHX_EVENTS_MAX = 300
+
+
+def _dhx_event_key(r: dict) -> str:
+    return f"{r['inst']}|{r['kind']}|{r['bias']}|{float(r['sl']):.10g}"
+
+
+def _dhx_event_step(ev: dict, bars, px_hist, now_s: float) -> None:
+    """推進一筆事件的狀態。只看**進場之後**的價格：
+      ·幣安 15m 高低（開盤時間 > 進場那根，當根剩下的部分不看，避免拿進場前的影線算）
+      ·加上 5 分鐘取樣價（補當根剩下那段）
+    做多：低 ≤ 停損 → 止損；高 ≥ TP1 → 止盈；同一根兩者都碰到 → 算止損（保守，不知道先後）。
+    ★官方還有「平保」狀態，但規則沒公布 → 不做，只做止盈／止損／過期。"""
+    if ev.get("status") != "持倉中":
+        return
+    long_ = ev["bias"] == "LONG"
+    sl, tp = float(ev["sl"]), float(ev["tp1"])
+    pts = []
+    if bars:
+        ts, hi, lo = bars
+        for t, h, l in zip(ts, hi, lo):
+            if t > ev["bar_ts"]:
+                pts.append((float(t) + 900.0, float(h), float(l)))   # 以收盤時間記
+    for t, p in (px_hist or []):
+        if t > ev["ts"]:
+            pts.append((float(t), float(p), float(p)))
+    pts.sort()
+    for t, h, l in pts:
+        hit_sl = (l <= sl) if long_ else (h >= sl)
+        hit_tp = (h >= tp) if long_ else (l <= tp)
+        if hit_sl or hit_tp:
+            ev["status"] = "止損" if hit_sl else "止盈"
+            ev["r"] = -1.0 if hit_sl else 1.0
+            ev["exit_ts"] = min(t, now_s)
+            return
+    if now_s - ev["ts"] >= DHX_EVENT_KEEP_H * 3600:
+        ev["status"] = "過期"
+        ev["exit_ts"] = now_s
+
+
+def _dhx_events_update(found: dict, bars_by_inst: dict, now_s: float) -> int:
+    """在**主執行緒**裡改 `_DHX_EVENTS`（掃描是多執行緒，但事件池只在這裡寫，儀表板讀快照時不會撞）。
+    回傳這輪新增幾筆。"""
+    new = 0
+    for inst, r in found.items():
+        k = _dhx_event_key(r)
+        if k in _DHX_EVENTS:
+            continue
+        # 官方同幣最短間隔 ~5h：同一個幣 5 小時內已經記過（不論型態）→ 不再記
+        if any(e["inst"] == inst and now_s - e["ts"] < DHX_COIN_GAP_H * 3600
+               for e in _DHX_EVENTS.values()):
+            continue
+        ev = dict(r)
+        ev.update({"key": k, "ts": now_s, "status": "持倉中", "r": None, "exit_ts": None,
+                   "bar_ts": float(r.get("bar_ts") or now_s)})
+        _DHX_EVENTS[k] = ev
+        new += 1
+    for ev in list(_DHX_EVENTS.values()):
+        _dhx_event_step(ev, bars_by_inst.get(ev["inst"]), _PX_HISTORY.get(ev["inst"]), now_s)
+    cut = now_s - (DHX_EVENT_KEEP_H + 1) * 3600      # 多留 1 小時，已結單的還看得到結果
+    for k in [k for k, e in _DHX_EVENTS.items() if e["ts"] < cut]:
+        del _DHX_EVENTS[k]
+    if len(_DHX_EVENTS) > DHX_EVENTS_MAX:
+        for k in sorted(_DHX_EVENTS, key=lambda x: _DHX_EVENTS[x]["ts"])[:len(_DHX_EVENTS) - DHX_EVENTS_MAX]:
+            del _DHX_EVENTS[k]
+    return new
 
 
 def _dhx_scan(force: bool = False) -> None:
@@ -9283,19 +9370,26 @@ def _dhx_scan(force: bool = False) -> None:
             try:
                 d = _bn_dhx_data(inst.split("-")[0])
                 if not d:
-                    return inst, None, True      # 幣安沒這個幣 → 記 miss，不是錯誤
+                    return inst, None, True, None   # 幣安沒這個幣 → 記 miss，不是錯誤
                 cl = d["cl"]; n = len(cl)
                 r = (_dhx_trap(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
                      or _dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
                      or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"]))
-                return inst, r, False
+                if r:
+                    r["bar_ts"] = float(d["ts"][-1])   # 進場那根的開盤時間（事件追蹤從下一根起算）
+                # 近 100 根高低順便帶回去，給事件池判止盈/止損（不多打任何 API）
+                bars = (d["ts"][-100:], d["hi"][-100:].tolist(), d["lo"][-100:].tolist())
+                return inst, r, False, bars
             except Exception:
-                return inst, None, False
+                return inst, None, False, None
 
         found = {}
         miss = 0
+        bars_by_inst = {}
         with ThreadPoolExecutor(DHX_WORKERS) as _ex:
-            for inst, r, m in _ex.map(_one, pool):
+            for inst, r, m, bars in _ex.map(_one, pool):
+                if bars:
+                    bars_by_inst[inst] = bars
                 if m:
                     miss += 1
                 elif r:
@@ -9317,14 +9411,21 @@ def _dhx_scan(force: bool = False) -> None:
                 return -_q(item[1])
             found = dict(sorted(found.items(), key=_qkey)[:DHX_SHOW_N])
         _DHX_SIG = found
+        # 事件池只收「這輪顯示的那批」（品質排序前 DHX_SHOW_N），跟畫面一致；再套官方同幣 5h 間隔
+        try:
+            _DHX_STATE["new"] = _dhx_events_update(found, bars_by_inst, time.time())
+            _DHX_STATE["ev"] = len(_DHX_EVENTS)
+        except Exception as _e:
+            print(f"[DHX] 事件池更新失敗(不影響交易): {_e}", flush=True)
         _DHX_STATE["n"] = len(found)
         _DHX_STATE["raw"] = raw_n            # ★過閘後的**真實**筆數（未截斷）
         _DHX_STATE["i"] = len(pool)          # 掃描涵蓋幣數（不再是游標）
         _DHX_STATE["miss"] = miss
         _DHX_STATE["ms"] = int((time.time() - _t0) * 1000)
-        print("[DHX] 掃 %d 幣(幣安無 %d)/%.1fs → %d 筆%s%s" % (
+        print("[DHX] 掃 %d 幣(幣安無 %d)/%.1fs → %d 筆%s，新事件 %s／池 %s%s" % (
             len(pool), miss, time.time() - _t0, raw_n,
             ("，顯示前 %d" % len(found)) if raw_n > len(found) else "",
+            _DHX_STATE.get("new"), _DHX_STATE.get("ev"),
             (": " + ", ".join(x["inst"].replace("-USDT-SWAP", "") + ":" + x["kind"]
                               for x in found.values())) if found else ""), flush=True)
     except Exception as e:

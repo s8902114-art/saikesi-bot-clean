@@ -703,6 +703,28 @@ def _flags(G):
     return out
 
 
+_DHXEV_FIELDS = ("inst", "kind", "bias", "entry", "sl", "tp1", "sl_dist_pct", "ts", "status",
+                 "r", "exit_ts", "oi_delta_pct", "swing_amp_pct")
+
+
+def _dhx_events(G):
+    """數據訊號事件池 → 前端列表（近 24h、新到舊）。永不拋例外。"""
+    try:
+        snap = G.get("_TICKER_SNAP") or {}
+        now = time.time()
+        out = []
+        for e in list((G.get("_DHX_EVENTS") or {}).values()):
+            if now - float(e.get("ts") or 0) > 24 * 3600:
+                continue
+            r = {k: e.get(k) for k in _DHXEV_FIELDS}
+            r["last"] = (snap.get(e.get("inst")) or {}).get("last")
+            out.append(r)
+        out.sort(key=lambda r: r.get("ts") or 0, reverse=True)
+        return out[:200]
+    except Exception:
+        return []
+
+
 def collect(G, win_h=1.0):
     with _LOCK:
         coins = {s: {tf: dict(r) for tf, r in d.items()} for s, d in _DASH.items()}
@@ -722,6 +744,8 @@ def collect(G, win_h=1.0):
         "mkt": _market(G, win_h),
         "dhx": sorted((G.get("_DHX_SIG") or {}).values(),
                       key=lambda r: r.get("ts") or 0, reverse=True)[:30],
+        # 數據訊號事件（官方式 24h 列表）＋當下價格（算浮動 R 用；顯示層只讀 bot 已有的 tickers）
+        "dhxev": _dhx_events(G),
         # 掃描統計：涵蓋幣數／幣安沒有的幾個／**過閘後真實筆數**（未被顯示上限截斷）
         "dhxq": {k: (G.get("_DHX_STATE") or {}).get(k)
                  for k in ("i", "miss", "raw", "n", "ms")},
@@ -966,6 +990,8 @@ _HTML = """<!doctype html>
   .fchip.up{border-color:var(--up,#16a34a)} .fchip.down{border-color:var(--down,#dc2626)}
   .fbar .sep{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
   .fbar .tgl{margin-left:auto;cursor:pointer;color:var(--dim);text-decoration:underline}
+  .sech{font-size:13px;margin:12px 0 6px;font-weight:600}
+  details.sub summary{cursor:pointer;color:var(--dim)}
   .note{color:var(--dim);font-size:11px;line-height:1.5;padding:6px 8px;margin:4px 0 8px;
         border-left:2px solid var(--warn,#c90);background:rgba(200,150,0,.07);border-radius:3px}
   .sub{color:var(--dim);font-size:11px}
@@ -1033,11 +1059,14 @@ let W = 1, OITH = 1, PXTH = 5;   // 預設＝官方象限圖條件：OI ≥ 1%�
 // ★ALLCOINS=false（預設）→ 視覺篩選器只看「OI 金額前 100」，跟官方同一種選法
 //   （實測 CoinGlass 收錄是**依 OI 挑**的，不是依市值）。282 幣全列就是「看起來沒過濾」的主因。
 let ALLCOINS = false;
+// 數據訊號篩選（官方同款：做多/做空 × 吸收/衰竭；多一個「假突破」因為我們也發 TRAP）
+let DHXF = {dir:'', kind:''};
 try{ const s=JSON.parse(localStorage.getItem('dash')||'{}');
      if(s.W && WINS.some(x=>x[0]===s.W)) W=s.W;      // 舊版存的 4/12 會被丟掉
      if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH;
-     if(s.ALLCOINS) ALLCOINS=true; }catch(e){}
-function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH,ALLCOINS})); }catch(e){} }
+     if(s.ALLCOINS) ALLCOINS=true;
+     if(s.DHXF && typeof s.DHXF==='object') DHXF={dir:s.DHXF.dir||'', kind:s.DHXF.kind||''}; }catch(e){}
+function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH,ALLCOINS,DHXF})); }catch(e){} }
 function toggleAll(){ ALLCOINS=!ALLCOINS; save(); draw(); }
 function setW(w){ W=w; save(); tick(); }
 function setTh(which,v){ v=parseFloat(v); if(which==='oi') OITH=v; else PXTH=v; save(); draw(); }
@@ -1092,8 +1121,9 @@ function focusMap(){
   (D.whale||[]).forEach(x=>{ if(x.dir==='bull') get(coinOf(x.inst)).bull.add('巨鯨'); });
   (D.anom||[]).forEach(x=>{ const d = x.confirmed_dir||x.init_dir;
     if(d==='bull'||d==='bear') get(coinOf(x.inst))[d].add('警報'); });
-  (D.dhx||[]).forEach(x=>{ const d = {LONG:'bull',SHORT:'bear'}[x.bias];
-    if(d) get(coinOf(x.inst))[d].add('數據'); });
+  // 跟數據訊號頁一致：只算「入場訊號」段（持倉中）的事件，結單的不投票
+  (D.dhxev||[]).forEach(x=>{ const d = {LONG:'bull',SHORT:'bear'}[x.bias];
+    if(d && x.status==='持倉中') get(coinOf(x.inst))[d].add('數據'); });
   return m;
 }
 function fireDir(f){ return !f ? null : (f.bull.size>=FIRE_MIN ? 'bull' : (f.bear.size>=FIRE_MIN ? 'bear' : null)); }
@@ -1437,7 +1467,7 @@ function scoreHTML(r){
   const part = (k,v,extra='') => v===0&&!extra ? ''
     : `<span class="sp"><i>${k}</i><b class="${v>0?'up':(v<0?'down':'dim')}">${v>0?'+':''}${v}</b>${extra}</span>`;
   // 數據訊號（15m 進場觸發）跟象限（1H/24H 狀態）本來就會不同號 —— 講清楚比藏起來好
-  const sig = (D.dhx||[]).find(x=>x.inst===r.inst);
+  const sig = (D.dhxev||[]).find(x=>x.inst===r.inst && x.status==='持倉中');
   // ★主顯示改用 24H 尺度：回測說它翻轉率 37.8% vs 1H 版 49.7%（≈丟銅板）、
   //   往後 24H 的多−空價差好 5 倍（+0.138% vs +0.027%，3/4 季較佳），
   //   而且跟官方對得上（同時刻：24H 版為正 15%/中位 −21，官方 19%/−18；
@@ -1577,79 +1607,71 @@ const KIND = {
   ABSORPTION:  ['吸收背離', ''],   // 價格**未破**前低/前高 + CVD 創新極值
   EXHAUSTION:  ['衰竭背離', ''],   // 價格**破了** + CVD **未**創新極值
 };
-// 該幣在 OI 排名的象限（跟數據訊號並排顯示）
-// ★用戶 2026-09-24 指出「數據訊號寫做多、但那個幣是空頭建倉」——
-//   那不是矛盾，是**兩個不同維度**：型態在講進場方向，象限在描述持倉×價格狀態。
-//   官方自己就寫「象限只描述持倉與價格，**不直接判定多空**」。並排顯示才不會各說各話。
-function quadOf(inst){
-  const m = ((D.mkt&&D.mkt.rows)||[]).find(x=>x.inst===inst);
-  if(!m) return {v:'', h:'<span class="dim">—</span>'};
-  const q = m.q24 || m.q;
-  return {v:q, h:`<span style="color:${QCLR[q]}">${q}</span>`};
+// ★2026-09-27 改成官方頁面的結構（用戶：「你的好亂」）：
+//   官方只列**近 24h** 事件，分「入場訊號」（還在跑）與「已結單區」（止盈/止損/過期），
+//   篩選只有 做多/做空 × 吸收/衰竭。原本這頁是每 15 分鐘整批重掃的**狀態快照**、四類分組＋一大段說明。
+const DHX_FAM = {ABSORPTION:'吸收', EXHAUSTION:'衰竭', SHORT_TRAP:'假突破', LONG_TRAP:'假突破'};
+const DHX_ST = {'持倉中':'warn', '止盈':'up', '止損':'down', '過期':'dim'};
+function setDhxF(k, v){ DHXF[k] = (DHXF[k]===v ? '' : v); save(); draw(); }
+function dhxR(e){          // 持倉中：以現價算浮動 R（R = 停損距離）
+  if(e.status!=='持倉中') return e.r;
+  const risk = Math.abs(e.entry - e.sl);
+  if(!e.last || !risk) return null;
+  return (e.bias==='LONG' ? (e.last - e.entry) : (e.entry - e.last)) / risk;
 }
-// 兩個錨點的 CVD：只顯示「升/降」比數值有用（數值量級各幣差很多）
-function cvdCell(a, b){
-  if(a===null||a===undefined||b===null||b===undefined)
-    return {v:0, h:'<span class="dim">—</span>'};
-  const up = b > a;
-  return {v: up?1:-1, h: up?'升':'降', c: up?'up':'down'};
-}
-
-// 數據訊號（TRAP / ABSORPTION / EXHAUSTION）：規格見 _DHX_DATASIG_0924_SPEC.md
-function viewDhx(){
-  const rows = D.dhx||[];
-  const q = D.dhxq||{};
-  if(!rows.length) return '<div class="card"><h2>數據訊號<span>15m</span></h2>'
-    + `<div class="empty">目前沒有成立的訊號。每 15 分鐘掃一次，涵蓋成交額前 `
-    + `${q.i||0} 幣（幣安沒有 ${q.miss||0} 個）。</div></div>`;
-  // 依型態分組：四個家族的判準完全不同，混在一張平表看不出誰是誰
-  const order = ['SHORT_TRAP','LONG_TRAP','ABSORPTION','EXHAUSTION'];
-  const by = {}; rows.forEach(r=>{ (by[r.kind]=by[r.kind]||[]).push(r); });
-  const groups = order.filter(k=>by[k]).map(k=>{
-    const lab = (KIND[k]||[k,''])[0], cl = (KIND[k]||['',''])[1];
-    const g = by[k].slice().sort((a,b)=>(b.ts||0)-(a.ts||0));
-    const nL = g.filter(x=>x.bias==='LONG').length;
-    return [`${lab}　<span class="dim">多 ${nL}／空 ${g.length-nL}</span>`, cl, g];
+function dhxRows(list, id){
+  return table(id, ['時間','幣','方向','類型','進場','停損','TP1','停損%','狀態'], list, e=>{
+    const r = dhxR(e), st = e.status||'';
+    const stH = st==='持倉中'
+      ? `持倉中 <span class="${r==null?'dim':cls(r)}">${r==null?'':(r>=0?'+':'')+f(r,2)+'R'}</span>`
+      : st + (st!=='過期' && e.exit_ts ? ` <span class="dim">${ago(e.exit_ts)}前</span>` : '');
+    return [
+      {v:e.ts, h:ago(e.ts)+'前'},
+      {v:e.inst, h:tag(e.inst) + `<a class="cl" onclick="openCard('${e.inst}')">`
+        + e.inst.replace('-USDT-SWAP','') + '</a>'},
+      {v:e.bias, h:e.bias==='LONG'?'做多':'做空', c:e.bias==='LONG'?'up':'down'},
+      {v:e.kind, h:(KIND[e.kind]||[e.kind])[0]},
+      pf(e.entry), pf(e.sl), pf(e.tp1), f(e.sl_dist_pct,2)+'%',
+      {v:r==null?-99:r, h:stH, c:DHX_ST[st]||''},
+    ];
   });
-  Object.keys(by).filter(k=>order.indexOf(k)<0).forEach(k=>groups.push([k,'',by[k]]));
-  const nLong = rows.filter(r=>r.bias==='LONG').length;
-  // ★誠實標示：偵測器實測比官方多發約 127 倍（幅度閘只壓掉一部分，
-  //   剩下的差距是結構條件還沒找到）→ 這裡顯示的是**品質排序後的前段**，不是全部。
-  const capped = (q.raw||0) > rows.length;
-  return '<div class="card">'
-    + `<h2>數據訊號<span>15m・掃 ${q.i||0} 幣・${q.raw||rows.length} 筆`
-    + `${capped ? `（顯示前 ${rows.length}）` : ''}・做多 ${nLong}／做空 ${rows.length-nLong}</span></h2>`
-    + (capped ? '<div class="note">⚠ 偵測器仍比官方多發（實測 117 倍，門檻只從官方 63 筆'
-        + '反推到幅度層，結構條件未解）→ 依擺動振幅與 OI 幅度排序後只顯示前段。'
-        + '<b>不要當成「已複刻數據獵手」使用。</b></div>' : '')
-    + secTable('dhx', ['幣','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'],
-        ['104px','56px','86px','92px','92px','70px','92px','92px','92px'], groups, r=>[
-        {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
-          + r.inst.replace('-USDT-SWAP','')+'</a>'},
-        {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
-        quadOf(r.inst),
-        pf(r.entry), pf(r.sl), f(r.sl_dist_pct,2)+'%', pf(r.tp1),
-        cvdCell(r.fut_cvd_i1, r.fut_cvd_i2), cvdCell(r.spot_cvd_i1, r.spot_cvd_i2),
-      ])
-    + '<div class="sub" style="margin-top:8px">'
-    + '<b>假跌破收回</b>（做多）：跌破前低又收回收盤價，且<b>合約 CVD 降、現貨 CVD 升</b>、OI 升。<br>'
-    + '<b>假突破收回</b>（做空）：鏡像 —— 合約 CVD 升、現貨 CVD 降、OI 升。<br>'
-    + '<b>吸收背離</b>（多空皆有）：做多＝低點<b>抬高</b>（沒破前低）但 <b>CVD 樞紐低點降低</b>'
-    + '（官方原話：賣方砸盤但價格未破前低，買方限價單吸收賣壓）；做空為鏡像。'
-    + '停損放 <b>pivot2 的價格</b>。<br>'
-    + '★TRAP 的 CVD／OI 條件是官方硬條件（400 筆實測 100% 一致：做空 36/36 合約升、'
-    + '0/36 現貨升；做多 0/60、59/60），沒有 CVD 就不發訊號。<br>'
-    + '<b>衰竭背離</b>（多空皆有）：做多＝<b>砸破</b>前低但 CVD <b>未</b>創新低（空方力竭）；'
-    + '做空＝突破前高但 CVD 未創新高（多方力竭）。<br>'
-    + '★<b>吸收 vs 衰竭只差一件事</b>：價格<b>有沒有破</b>前低／前高。'
-    + '沒破＝吸收（有人在吸），破了但 CVD 沒跟＝衰竭（推的人沒力了）。'
-    + '以上四句都是官方 <code>cvd_signal</code> 的原文，不是我的解讀。<br>'
-    + '★選幣層照官方 <code>volume_top100</code>（24h 成交額前 100）輪替掃描。<br>'
-    + '<b>「方向」和「象限」會不一樣，那是正常的</b>：方向是這個<b>型態</b>要怎麼進場，'
-    + '象限是這個幣<b>當下持倉×價格</b>的狀態。官方原話：「象限只描述持倉與價格，'
-    + '<b>不直接判定多空</b>」。兩者不同時，代表型態是在跟當下的持倉結構對做（例如假跌破收回做多，'
-    + '但持倉結構還在空頭建倉）——自己判斷要不要跟。'
-    + '</div></div>';
+}
+function viewDhx(){
+  const all = D.dhxev||[], q = D.dhxq||{};
+  const match = e => (!DHXF.dir || e.bias===DHXF.dir) && (!DHXF.kind || DHX_FAM[e.kind]===DHXF.kind);
+  const rows = all.filter(match);
+  const open = rows.filter(e=>e.status==='持倉中');
+  const done = rows.filter(e=>e.status!=='持倉中').sort((a,b)=>(b.exit_ts||0)-(a.exit_ts||0));
+  const nTp = done.filter(e=>e.status==='止盈').length, nSl = done.filter(e=>e.status==='止損').length;
+  const nEx = done.length - nTp - nSl, nDec = nTp + nSl;
+  const chip = (k,v,lab) => `<div class="wb ${DHXF[k]===v?'on':''}" onclick="setDhxF('${k}','${v}')">${lab}</div>`;
+  let h = '<div class="card"><h2>數據背離訊號'
+    + `<span>近 24h ${all.length} 筆・15m・掃 ${q.i||0} 幣</span></h2>`
+    + '<div class="wins">' + chip('dir','LONG','做多 📈') + chip('dir','SHORT','做空 📉')
+    + '<span class="src"></span>' + chip('kind','吸收','吸收') + chip('kind','衰竭','衰竭')
+    + chip('kind','假突破','假突破') + '</div>'
+    + '<div class="note">⚠ 這是<b>我自己的偵測器</b>，不是官方訊號：實測只抓得到官方 48%、'
+    + '發的量是官方的一百多倍（官方的 CVD 來源拿不到）。只收每輪品質前 15、同幣 5 小時內只記一次。</div>';
+  h += `<h3 class="sech">入場訊號 <span class="dim">${open.length}</span></h3>`
+    + (open.length ? dhxRows(open, 'dhxo') : '<div class="empty">暫無入場訊號</div>');
+  h += `<h3 class="sech">已結單區 <span class="dim">止盈 ${nTp}・止損 ${nSl}・過期 ${nEx}`
+    + (nDec ? `・勝率 ${f(nTp/nDec*100,0)}%（n=${nDec}${nDec<20?'，⚠ 樣本太少不能下結論':''}）` : '')
+    + '</span></h3>'
+    + (done.length ? dhxRows(done, 'dhxc') : '<div class="empty">暫無紀錄</div>');
+  return h + '<details class="sub" style="margin-top:8px"><summary>判定規則與狀態怎麼算</summary>'
+    + '<b>狀態</b>：進場＝偵測當下價格。之後用幣安 15m 高低（從下一根起算）加上 5 分鐘取樣價判定：'
+    + '碰 TP1（1R）＝止盈、碰停損＝止損、同一根兩者都碰到算止損（不知道先後，保守算）、'
+    + '24 小時都沒碰到＝過期。官方還有「平保」，規則沒公布，這裡沒做。<br>'
+    + '<b>假跌破收回</b>（做多）：跌破前低又收回收盤價，且<b>合約 CVD 降、現貨 CVD 升</b>、OI 升。'
+    + '<b>假突破收回</b>（做空）為鏡像。這組 CVD／OI 條件是官方硬條件'
+    + '（400 筆實測 100% 一致），沒有 CVD 就不發。<br>'
+    + '<b>吸收背離</b>：做多＝低點<b>抬高</b>但 <b>CVD 樞紐低點降低</b>（賣壓被限價買單吸收）；做空為鏡像。'
+    + '停損放 pivot2 的價格。<br>'
+    + '<b>衰竭背離</b>：做多＝<b>砸破</b>前低但 CVD <b>未</b>創新低（空方力竭）；做空為鏡像。<br>'
+    + '吸收 vs 衰竭只差一件事：價格<b>有沒有破</b>前低／前高。<br>'
+    + '選幣＝24h 成交額前 100（官方 <code>volume_top100</code>）。'
+    + '「方向」是型態的進場方向，跟 OI 排名的「象限」是不同維度，兩者不同是正常的。'
+    + '</details></div>';
 }
 
 function viewMkt(){
