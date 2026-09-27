@@ -9636,6 +9636,12 @@ DHX_ENGULF = True          # 吸收/衰竭要等吞噬 K 才發（官方 engulf_
 DHX_ENGULF_MAX_GAP = 8     # 吞噬 K 距 pivot2 最多 8 根（官方 engulf_gap 範圍 1~8，64/64）
 DHX_REV_MAX = 5            # 反向段最多 5 根（官方 engulf_reverse_count 1~5）
 DHX_NEU_MAX = 1            # 反向段內可夾 1 根十字（官方 engulf_neutral_count 0~1）
+# ★吸收/衰竭停損距下限（2026-09-27，用戶：「數量多那麼多倍就沒有過濾的效果了」）。
+#   官方 64 筆 `sl_distance_pct` 最小 1.59%（乾淨地板）。`_an_dhx_gates2.py` 同時量「官方留存」與「我的頻率」：
+#     1.5% → 頻率 39.5→24.3 倍、官方留存 **27/27**、扣費 EV −0.050→−0.026R
+#     2.0% → 官方開始掉（27→21）；擺動幅度／OI 門檻：砍我多少官方就等比例掉多少 = 沒有鑑別力，不採用。
+#   ★剩下的 ~24 倍是 pivot1 選法（需要官方的 CVD 來源，拿不到），不是再加門檻能解的。
+DHX_MIN_SL_PCT = 1.5
 
 
 def _dhx_engulf_ok(op, hi, lo, cl, n, long_, p2):
@@ -9744,6 +9750,8 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None, op=None):
         ex["pivot2_price"] = sl
         r = _dhx_pack(inst, "EXHAUSTION", "LONG" if want_low else "SHORT",
                       p1, p2, back, cl, sl, n, ex)
+        if r and r["sl_dist_pct"] < DHX_MIN_SL_PCT:
+            continue
         if r:
             r["sl_source"] = ex["sl_source"]
             return r
@@ -9811,6 +9819,8 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None, op=None):
         ex["pivot2_price"] = sl
         r = _dhx_pack(inst, "ABSORPTION", "LONG" if want_low else "SHORT",
                       p1, p2, n - 1, cl, sl, n, ex)
+        if r and r["sl_dist_pct"] < DHX_MIN_SL_PCT:
+            continue
         if r:
             r["sl_source"] = ex["sl_source"]
             return r
