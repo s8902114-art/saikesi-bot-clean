@@ -9278,6 +9278,10 @@ DHX_SHOW_N = 15                  # ★顯示上限（偵測器仍比官方多發
 #   事件鍵 = 幣＋型態＋方向＋pivot2 價（＝停損價）：同一個結構後面幾輪再掃到 → 同一筆，不重記。
 _DHX_EVENTS: Dict[str, dict] = {}
 DHX_EVENT_KEEP_H = 24            # 官方前端 cutoff = now − 86400000（`_applyDhFilter`）
+# ★目標 2R（2026-09-28，用戶：「數據單至少 2R」）。`_bt_dhx_tp.py`（扣 0.10%、24h 持有）：
+#   v3 全部 1R −0.036 → 2R +0.058；精選 +0.001 → +0.135；官方自己 −0.024 → +0.154
+#   ★但 CI 全部跨 0、對「同方向同停損距隨機進場」的超額也跨 0 → 2R 不比 1R 差，但**不能宣稱有勝率**。
+DHX_TP_R = 2.0
 DHX_COIN_GAP_H = 5.0             # 官方 162 筆「同幣最短間隔」乾淨地板 4.99h
 DHX_EVENTS_MAX = 300
 
@@ -9290,12 +9294,18 @@ def _dhx_event_step(ev: dict, bars, px_hist, now_s: float) -> None:
     """推進一筆事件的狀態。只看**進場之後**的價格：
       ·幣安 15m 高低（開盤時間 > 進場那根，當根剩下的部分不看，避免拿進場前的影線算）
       ·加上 5 分鐘取樣價（補當根剩下那段）
-    做多：低 ≤ 停損 → 止損；高 ≥ TP1 → 止盈；同一根兩者都碰到 → 算止損（保守，不知道先後）。
+    做多：低 ≤ 停損 → 止損；高 ≥ 目標（DHX_TP_R，2R）→ 止盈；同一根兩者都碰到 → 算止損（保守，不知道先後）。
     ★官方還有「平保」狀態，但規則沒公布 → 不做，只做止盈／止損／過期。"""
     if ev.get("status") != "持倉中":
         return
     long_ = ev["bias"] == "LONG"
-    sl, tp = float(ev["sl"]), float(ev["tp1"])
+    sl = float(ev["sl"])
+    # 目標 = 進場 ± DHX_TP_R × 停損距；事件建立時就寫進 ev["tp"]（舊事件沒有 → 這裡補算，同一個公式）
+    if ev.get("tp") is None:
+        _risk = abs(float(ev["entry"]) - sl)
+        ev["tp"] = float(ev["entry"]) + (DHX_TP_R * _risk if long_ else -DHX_TP_R * _risk)
+        ev["tp_r"] = DHX_TP_R
+    tp = float(ev["tp"])
     pts = []
     if bars:
         ts, hi, lo = bars
@@ -9311,7 +9321,7 @@ def _dhx_event_step(ev: dict, bars, px_hist, now_s: float) -> None:
         hit_tp = (h >= tp) if long_ else (l <= tp)
         if hit_sl or hit_tp:
             ev["status"] = "止損" if hit_sl else "止盈"
-            ev["r"] = -1.0 if hit_sl else 1.0
+            ev["r"] = -1.0 if hit_sl else float(ev.get("tp_r") or DHX_TP_R)
             ev["exit_ts"] = min(t, now_s)
             return
     if now_s - ev["ts"] >= DHX_EVENT_KEEP_H * 3600:

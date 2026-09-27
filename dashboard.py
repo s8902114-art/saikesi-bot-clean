@@ -704,7 +704,7 @@ def _flags(G):
 
 
 _DHXEV_FIELDS = ("inst", "kind", "bias", "entry", "sl", "tp1", "sl_dist_pct", "ts", "status",
-                 "r", "exit_ts", "oi_delta_pct", "swing_amp_pct", "engulf_rng_pct")
+                 "r", "exit_ts", "oi_delta_pct", "swing_amp_pct", "engulf_rng_pct", "tp", "tp_r")
 
 
 def _dhx_events(G):
@@ -1625,11 +1625,13 @@ function dhxR(e){          // 持倉中：以現價算浮動 R（R = 停損距�
 function dhxNetR(list){
   const d = list.filter(e=>e.status==='止盈'||e.status==='止損');
   if(!d.length) return null;
-  return d.reduce((s,e)=>s + (e.status==='止盈'?1:-1) - 0.10/Math.max(e.sl_dist_pct||0,1e-6), 0) / d.length;
+  // 用事件自己記的 r（止盈 = 目標 R，2026-09-28 起 2R；更早的舊單是 1R）；沒有 r 才退回 ±1
+  return d.reduce((s,e)=>s + (e.r!=null ? e.r : (e.status==='止盈'?1:-1))
+                    - 0.10/Math.max(e.sl_dist_pct||0,1e-6), 0) / d.length;
 }
 function fmtR(r){ return r==null ? '—' : (r>=0?'+':'') + f(r,2) + 'R'; }
 function dhxRows(list, id){
-  return table(id, ['時間','幣','方向','類型','進場','停損','TP1','停損%','狀態'], list, e=>{
+  return table(id, ['時間','幣','方向','類型','進場','停損','目標','停損%','狀態'], list, e=>{
     const r = dhxR(e), st = e.status||'';
     const stH = st==='持倉中'
       ? `持倉中 <span class="${r==null?'dim':cls(r)}">${r==null?'':(r>=0?'+':'')+f(r,2)+'R'}</span>`
@@ -1640,7 +1642,8 @@ function dhxRows(list, id){
         + e.inst.replace('-USDT-SWAP','') + '</a>'},
       {v:e.bias, h:e.bias==='LONG'?'做多':'做空', c:e.bias==='LONG'?'up':'down'},
       {v:e.kind, h:(KIND[e.kind]||[e.kind])[0]},
-      pf(e.entry), pf(e.sl), pf(e.tp1), f(e.sl_dist_pct,2)+'%',
+      pf(e.entry), pf(e.sl), {v:e.tp||e.tp1, h:pf(e.tp||e.tp1) + `<span class="dim"> ${e.tp_r||1}R</span>`},
+      f(e.sl_dist_pct,2)+'%',
       {v:r==null?-99:r, h:stH, c:DHX_ST[st]||''},
     ];
   });
@@ -1683,12 +1686,13 @@ function viewDhx(){
     + '</span></h3>'
     // ★目標 1R、停損 1R → 勝率 50% 只是打平；停損距很近時手續費吃掉一大塊 R，勝率會騙人。
     //   2026-09-28 實測：頁面勝率 62% 扣費後只剩 +0.02R；v3 回測 50%／官方自己 52%，扣費後都 ≈0。
-    + '<div class="sub">1R 目標：勝率 50% ＝打平。扣費用往返 0.10%（停損距越近、每筆扣的 R 越多）。'
-    + '回測（20 幣 20 天）v3 勝率 50%、官方自己的訊號 52%，扣費後都約 0R。</div>'
+    + '<div class="sub">2R 目標（止盈 +2R／止損 −1R）：勝率 33% ＝打平。扣費用往返 0.10%（停損距越近、每筆扣的 R 越多）。'
+    + '回測（20 幣 20 天，扣費）：v3 2R +0.06R／精選 +0.14R／官方自己 +0.15R，'
+    + '但信賴區間都跨 0、跟隨機進場比也分不出來 —— 不能當成已驗證的勝率。</div>'
     + (done.length ? dhxRows(done, 'dhxc') : '<div class="empty">暫無紀錄</div>');
   return h + '<details class="sub" style="margin-top:8px"><summary>判定規則與狀態怎麼算</summary>'
     + '<b>狀態</b>：進場＝偵測當下價格。之後用幣安 15m 高低（從下一根起算）加上 5 分鐘取樣價判定：'
-    + '碰 TP1（1R）＝止盈、碰停損＝止損、同一根兩者都碰到算止損（不知道先後，保守算）、'
+    + '碰目標（2R；09-28 以前的舊單是 1R）＝止盈、碰停損＝止損、同一根兩者都碰到算止損（不知道先後，保守算）、'
     + '24 小時都沒碰到＝過期。官方還有「平保」，規則沒公布，這裡沒做。<br>'
     + '<b>假跌破收回</b>（做多）：跌破前低又收回收盤價，且<b>合約 CVD 降、現貨 CVD 升</b>、OI 升。'
     + '<b>假突破收回</b>（做空）為鏡像。這組 CVD／OI 條件是官方硬條件'
