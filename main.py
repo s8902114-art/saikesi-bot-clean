@@ -8675,6 +8675,13 @@ def _dash_hist_save() -> None:
                 if pts:
                     out[k] = pts
             return out
+        # ★最近訊號是**加分功能**，不准拖垮核心的歷史存檔：原本寫在同一個 json.dump 裡，
+        #   它一出錯（例：dashboard 模組版本不符、沒有 sig_snapshot）整份 OI/價格/聚合歷史就都不存了。
+        #   實際在測試裡抓到：假的 dashboard 沒有這個方法 → 整檔寫不出來。
+        try:
+            _sigs = dashboard.sig_snapshot()
+        except Exception:
+            _sigs = {}
         tmp = _DASH_HIST_FILE + ".tmp"
         # ★2026-09-24 加存 bn（幣安 OI）：先前幣安被 451 擋著、這裡沒東西可存所以沒寫，
         #   改走 www.binance.com 之後有資料了就必須一起落地 —— 不然每次 redeploy
@@ -8697,7 +8704,9 @@ def _dash_hist_save() -> None:
                        # ★掃描快照也存：它是掃描迴圈每根 K 收盤順手記的，純記憶體 →
                        #   redeploy 後「幣種」那頁整個空白、要等下一根 15m 收盤才有東西
                        #   （用戶 2026-09-24 回報「空的」）。每列都有 ts，讀回來會照實顯示幾分鐘前。
-                       "scan": dashboard.snapshot()},
+                       "scan": dashboard.snapshot(),
+                       # ★最近訊號（儀表板 🎯 標記讀它）—— 原本純記憶體，每次部署清空
+                       "sigs": _sigs},
                       f, separators=(",", ":"))
         os.replace(tmp, _DASH_HIST_FILE)      # 原子替換,避免寫到一半被重啟砍成半截檔
     except Exception as e:
@@ -8728,6 +8737,12 @@ def _dash_hist_load() -> None:
         _BN_HISTORY.update(_unpack(d.get("bn"), keep_dash))   # v1 舊檔沒這個鍵 → 空 dict，相容
         dashboard.restore(d.get("scan"))           # v2 以前沒有 scan → restore 自己會忽略
         _AGG_HISTORY.update(_unpack(d.get("agg"), keep_dash))   # v4 以前沒有 → 空 dict，相容
+        # ★最近訊號放在**所有核心歷史讀完之後**、而且自己一層 try：
+        #   我第一版把它插在 _AGG_HISTORY 前面，它一出錯聚合 OI 就讀不回來（市場視圖吃的正是那份）。
+        try:
+            dashboard.sig_restore(d.get("sigs"))   # 舊存檔沒有 sigs → 忽略（相容）
+        except Exception:
+            pass
         try:
             for _k, _v in (d.get("fr") or {}).items():
                 _FR_AGG[_k] = float(_v)

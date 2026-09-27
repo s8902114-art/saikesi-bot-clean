@@ -63,6 +63,33 @@ def put(symbol, tf, **kv):
         pass
 
 
+def sig_snapshot():
+    """★最近訊號也要落地（2026-09-27）。`_SIG` 原本純記憶體 → 每次 redeploy 清空，
+    而儀表板的 🎯（你的策略有訊號）就是讀它 —— 不存的話每部署一次 🎯 就會空好幾小時。
+    最多 `_MAX_SIG` 筆，檔案很小。永不拋例外。"""
+    try:
+        with _LOCK:
+            return {k: dict(v) for k, v in _SIG.items()}
+    except Exception:
+        return {}
+
+
+def sig_restore(data):
+    """讀回最近訊號。舊存檔沒有這個鍵 → None → 直接忽略（相容）。永不拋例外。"""
+    try:
+        if not isinstance(data, dict):
+            return
+        with _LOCK:
+            for k, v in data.items():
+                if isinstance(v, dict) and "ts" in v:
+                    _SIG[str(k)] = dict(v)
+            if len(_SIG) > _MAX_SIG:
+                for k in sorted(_SIG, key=lambda x: _SIG[x]["ts"])[:len(_SIG) - _MAX_SIG]:
+                    _SIG.pop(k, None)
+    except Exception:
+        pass
+
+
 def snapshot():
     """把掃描快照倒出來給 main.py 落地（redeploy 後「幣種」那頁才不會整個空白）。永不拋例外。"""
     try:
@@ -927,6 +954,16 @@ _HTML = """<!doctype html>
        color:var(--dim);cursor:pointer;white-space:nowrap;font-size:13px}
   .tab.on{color:var(--fg);border-color:var(--accent);background:#16233a}
   .empty{color:var(--dim);font-size:12px;padding:8px 0}
+  /* ── 聚焦標記（🎯 你的策略／🔥 多頁共振）── */
+  .tg{display:inline-block;font-size:11px;line-height:1;margin-right:3px;cursor:help}
+  .fbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:8px 10px;margin:0 0 10px;
+        border:1px solid var(--line);border-radius:8px;background:var(--card,transparent);font-size:12px}
+  .fbar .lab{color:var(--dim);margin-right:2px}
+  .fchip{display:inline-flex;gap:3px;align-items:center;padding:2px 8px;border-radius:99px;
+         border:1px solid var(--line);cursor:pointer;white-space:nowrap}
+  .fchip.up{border-color:var(--up,#16a34a)} .fchip.down{border-color:var(--down,#dc2626)}
+  .fbar .sep{width:1px;align-self:stretch;background:var(--line);margin:0 4px}
+  .fbar .tgl{margin-left:auto;cursor:pointer;color:var(--dim);text-decoration:underline}
   .note{color:var(--dim);font-size:11px;line-height:1.5;padding:6px 8px;margin:4px 0 8px;
         border-left:2px solid var(--warn,#c90);background:rgba(200,150,0,.07);border-radius:3px}
   .sub{color:var(--dim);font-size:11px}
@@ -991,12 +1028,108 @@ const QCLR = {'多頭建倉':'var(--up)','空頭平倉':'#6fd3a8','空頭建倉'
 // 官方只有 15m / 30m / 1H 三檔（原文：「15m／30m 僅觀察變化，不另產生卡片或通知」）
 const WINS = [[0.25,'15m'],[0.5,'30m'],[1,'1H']];
 let W = 1, OITH = 1, PXTH = 5;   // 預設＝官方象限圖條件：OI ≥ 1%、|價格| ≤ 5%
+// ★ALLCOINS=false（預設）→ 視覺篩選器只看「OI 金額前 100」，跟官方同一種選法
+//   （實測 CoinGlass 收錄是**依 OI 挑**的，不是依市值）。282 幣全列就是「看起來沒過濾」的主因。
+let ALLCOINS = false;
 try{ const s=JSON.parse(localStorage.getItem('dash')||'{}');
      if(s.W && WINS.some(x=>x[0]===s.W)) W=s.W;      // 舊版存的 4/12 會被丟掉
-     if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH; }catch(e){}
-function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH})); }catch(e){} }
+     if(s.OITH) OITH=s.OITH; if(s.PXTH) PXTH=s.PXTH;
+     if(s.ALLCOINS) ALLCOINS=true; }catch(e){}
+function save(){ try{ localStorage.setItem('dash',JSON.stringify({W,OITH,PXTH,ALLCOINS})); }catch(e){} }
+function toggleAll(){ ALLCOINS=!ALLCOINS; save(); draw(); }
 function setW(w){ W=w; save(); tick(); }
 function setTh(which,v){ v=parseFloat(v); if(which==='oi') OITH=v; else PXTH=v; save(); draw(); }
+
+// ── 聚焦標記：🎯 你的策略／🔥 多頁共振（2026-09-27）──────────────────────────
+// ★用 🎯 不用 ⭐：OI 排名已經用 ★ 表示「OI 變化落在全市場前 5%（異常）」、
+//   視覺篩選器用 ◆ 表示「資金注入」，⭐ 跟 ★ 長得太像一定會搞混。
+// ★為什麼只有這兩種、而且 🔥 標「未驗證」：前 5 頁**單獨或疊加都沒被證明能提高勝率**
+//   （警報加在進場上是負貢獻 +0.246→+0.078；四象限 64 檢定只 3 格過；評分最好的 24H 版
+//   前瞻價差 +0.138% 連往返手續費都快蓋不過）。官方自己也寫「觸發次數多不代表勝率高」。
+//   做一個「這符號＝勝率高」等於騙人 → 只有 🎯（你的策略，有回測勝率背書）當主訊號。
+// ★幣名統一：訊號是 'SOL/USDT'（可能帶 ':USDT'），其餘頁是 'SOL-USDT-SWAP'
+//   → 一律切成純幣名再比。0827 追蹤池就是格式不一致、比對 100% 失敗的事故。
+// ★不用正規式：這段 JS 是包在 **Python 字串**裡的，正規式裡「反斜線加斜線」那種跳脫
+//   在 Python 是無效跳脫字元 → 現在只噴 SyntaxWarning，但 Python 已公告未來會升級成
+//   SyntaxError → dashboard.py import 失敗 → **bot 啟動就掛**。改成逐字切，零反斜線。
+//   （連這段註解都不能寫出那個字元組合 —— 註解也在同一個 Python 字串裡。）
+function coinOf(s){
+  let t = String(s||'');
+  for(const ch of ['/', '-', ':']){ const i = t.indexOf(ch); if(i >= 0) t = t.slice(0, i); }
+  return t.toUpperCase();
+}
+const STAR_HOURS = 24;    // 🎯 看最近 24 小時內的策略訊號（持倉則一律算）
+// ★🔥 門檻 = 2：只計算**本身就有「亮／不亮」判定**的 4 頁（篩選器用官方資金注入條件、
+//   巨鯨用已判定方向、警報、數據訊號）。OI 排名只有 −100~+100 的總分、**官方沒有強弱分級**，
+//   自己訂一條「≥30 算亮」就是手冊記過最多次的「把連續量切成自己想的門檻」→ 不計入。
+//   門檻用 2 不用 3 是實測的：當下 282 幣只有 10 幣被任一頁點名、2 幣被 2 頁點名、0 幣被 3 頁點名
+//   （一個時間點的快照，樣本小）→ 定 3 等於永遠不亮。
+const FIRE_MIN = 2;
+let FOCUS = {};
+function focusMap(){
+  const m = {};
+  const get = c => (m[c] = m[c] || {star:null, why:[], bull:new Set(), bear:new Set()});
+  (D.trades||[]).forEach(t=>{                        // 🎯 持倉（已落地，重啟不掉）
+    const f = get(coinOf(t.symbol||t.inst_id));
+    f.star = (t.direction==='short') ? 'bear' : 'bull';
+    f.why.push('持倉' + (t.exit_strategy ? '・'+t.exit_strategy : ''));
+  });
+  const cut = (D.now||0) - STAR_HOURS*3600;
+  (D.signals||[]).forEach(s=>{                       // 🎯 最近 24h 策略訊號
+    if((s.ts||0) < cut) return;
+    const f = get(coinOf(s.symbol));
+    if(!f.star) f.star = (s.dir==='short') ? 'bear' : 'bull';
+    f.why.push((s.strat||'策略') + (s.tf ? ' '+s.tf : ''));
+  });
+  ((D.mkt||{}).rows||[]).forEach(x=>{                // 🔥 篩選器：官方資金注入條件
+    if(!x.inflow) return;
+    const d = x.q==='多頭建倉' ? 'bull' : (x.q==='空頭建倉' ? 'bear' : null);
+    if(d) get(coinOf(x.inst))[d].add('篩選器');
+  });
+  (D.whale||[]).forEach(x=>{ if(x.dir==='bull'||x.dir==='bear') get(coinOf(x.inst))[x.dir].add('巨鯨'); });
+  (D.anom||[]).forEach(x=>{ const d = x.confirmed_dir||x.init_dir;
+    if(d==='bull'||d==='bear') get(coinOf(x.inst))[d].add('警報'); });
+  (D.dhx||[]).forEach(x=>{ const d = {LONG:'bull',SHORT:'bear'}[x.bias];
+    if(d) get(coinOf(x.inst))[d].add('數據'); });
+  return m;
+}
+function fireDir(f){ return !f ? null : (f.bull.size>=FIRE_MIN ? 'bull' : (f.bear.size>=FIRE_MIN ? 'bear' : null)); }
+// 表格裡幣名前面的小標記
+function tag(inst){
+  const f = FOCUS[coinOf(inst)];
+  if(!f) return '';
+  let h = '';
+  if(f.star) h += `<span class="tg" title="你的策略：${f.why.join('、')}">🎯</span>`;
+  for(const d of ['bull','bear']) if(f[d].size >= FIRE_MIN)
+    h += `<span class="tg" title="${[...f[d]].join('＋')} 同時${d==='bull'?'偏多':'偏空'}（未驗證勝率）">🔥</span>`;
+  return h;
+}
+// 最上面的聚焦列：先看 🎯，🔥 當「值得看一眼」
+function focusBar(){
+  const star = [], fire = [];
+  for(const [c,f] of Object.entries(FOCUS)){
+    if(f.star) star.push([c,f]);
+    else if(fireDir(f)) fire.push([c,f]);
+  }
+  const chip = (c,d,t) => `<span class="fchip ${d==='bull'?'up':'down'}" title="${t}"`
+    + ` onclick="openCard('${c}-USDT-SWAP')">${c}<b class="${d==='bull'?'up':'down'}">${d==='bull'?'多':'空'}</b></span>`;
+  let h = '<div class="fbar">';
+  h += '<span class="lab">🎯 你的策略</span>'
+     + (star.length ? star.map(([c,f])=>chip(c,f.star,f.why.join('、'))).join('')
+                    : '<span class="dim">現在沒有（持倉＋近 24h 訊號）</span>');
+  h += '<span class="sep"></span><span class="lab">🔥 ≥2 頁同向</span>'
+     + (fire.length ? fire.map(([c,f])=>{ const d=fireDir(f); return chip(c,d,[...f[d]].join('＋')+'（未驗證勝率）'); }).join('')
+                    : '<span class="dim">現在沒有</span>');
+  h += `<span class="tgl" onclick="toggleAll()">${ALLCOINS ? '只看 OI 前 100' : '顯示全部幣'}</span>`;
+  return h + '</div>';
+}
+// 視覺篩選器的幣池：預設 OI 金額前 100；🎯🔥 的幣一律保留（不能因為小就被藏掉）
+function poolRows(rows){
+  if(ALLCOINS) return rows;
+  const top = new Set(rows.slice().sort((a,b)=>(b.oiu||0)-(a.oiu||0)).slice(0,100).map(r=>r.inst));
+  return rows.filter(r => top.has(r.inst) || (FOCUS[coinOf(r.inst)] &&
+    (FOCUS[coinOf(r.inst)].star || fireDir(FOCUS[coinOf(r.inst)]))));
+}
 
 function draw(){
   if(!D) return;
@@ -1013,18 +1146,26 @@ function draw(){
   vEl.parentElement.style.color = (D.ver===PAGE_VER) ? '' : 'var(--warn)';
 
   const v=document.getElementById('view');
+  // ★標記要在任何 view 之前算好（tag()/poolRows() 都讀 FOCUS）；算壞了不可以讓整頁掛掉
+  try{ FOCUS = focusMap(); }catch(e){ FOCUS = {}; }
   document.getElementById('card').innerHTML = cardHTML();
-  if(TAB==='mkt') v.innerHTML = viewMkt();
-  if(TAB==='whale') v.innerHTML = viewWhale();
-  if(TAB==='rank') v.innerHTML = viewRank();
-  if(TAB==='dhx') v.innerHTML = viewDhx();
-  if(TAB==='anom') v.innerHTML = viewAnom();
-  if(TAB==='pos') v.innerHTML = viewPos();
-  if(TAB==='oi') v.innerHTML = viewOI();
-  if(TAB==='coins') v.innerHTML = viewCoins();
-  if(TAB==='diag') v.innerHTML = viewDiag();
-  if(TAB==='sig') v.innerHTML = viewSig();
-  if(TAB==='sys') v.innerHTML = viewSys();
+  let body = '';
+  if(TAB==='mkt') body = viewMkt();
+  if(TAB==='whale') body = viewWhale();
+  if(TAB==='rank') body = viewRank();
+  if(TAB==='dhx') body = viewDhx();
+  if(TAB==='anom') body = viewAnom();
+  if(TAB==='pos') body = viewPos();
+  if(TAB==='oi') body = viewOI();
+  if(TAB==='coins') body = viewCoins();
+  if(TAB==='diag') body = viewDiag();
+  if(TAB==='sig') body = viewSig();
+  if(TAB==='sys') body = viewSys();
+  // 聚焦列只放在前 5 頁（看盤那幾頁）；持倉/幣種/系統頁不需要
+  const FOCUS_TABS = ['mkt','whale','rank','anom','dhx'];
+  let fb = '';
+  if(FOCUS_TABS.indexOf(TAB) >= 0){ try{ fb = focusBar(); }catch(e){ fb = ''; } }
+  v.innerHTML = fb + body;
 }
 
 // ★時間尺度對照：這一頁用的窗 vs 大盤 24H。兩者背離時（例如 24H 大跌、近 1H 反彈）
@@ -1150,7 +1291,7 @@ function viewWhale(){
        + '價格卻還壓在 3% 以內（＝資金先動、行情還沒啟動）。</div>';
   } else {
     h += table('whale', ['幣','狀態','OI 1H','價 1H','判定依據','起算'], rows, r=>[
-      {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+      {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
         + r.inst.replace('-USDT-SWAP','') + '</a>'},
       {v:r.dir, h:(WDIR[r.dir]||[r.dir,''])[0], c:(WDIR[r.dir]||['','dim'])[1]},
       {v:r.oi, h:pct(r.oi), c:'up'},
@@ -1369,7 +1510,7 @@ function viewAnom(){
     return `<div class="card"><h2>${title}<span>${g.length}</span></h2>`
       + (note?`<div class="sub" style="margin-bottom:8px">${note}</div>`:'')
       + (g.length ? table('an'+title, ['幣','階段','15m','OI15m','相對BTC','CVD','觸發'], g, r=>[
-          {v:r.coin, h:`<a class="cl" onclick="openCard('${r.inst}')">${r.coin}</a>`},
+          {v:r.coin, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">${r.coin}</a>`},
           {v:r.status, h:`${r.bias_label}`, c:(ST[r.status]||['',''])[1]},
           {v:r.p15, h:f2(r.p15), c:cls(r.p15)},
           {v:r.oi15, h:f2(r.oi15), c:cls(r.oi15)},
@@ -1447,7 +1588,7 @@ function viewDhx(){
         + '<b>不要當成「已複刻數據獵手」使用。</b></div>' : '')
     + secTable('dhx', ['幣','方向','象限','進場','停損','停損%','TP1','合約CVD','現貨CVD'],
         ['104px','56px','86px','92px','92px','70px','92px','92px','92px'], groups, r=>[
-        {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+        {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
           + r.inst.replace('-USDT-SWAP','')+'</a>'},
         {v:r.bias, h:r.bias==='LONG'?'做多':'做空', c:r.bias==='LONG'?'up':'down'},
         quadOf(r.inst),
@@ -1476,12 +1617,15 @@ function viewDhx(){
 }
 
 function viewMkt(){
-  const m=D.mkt, rows=m.rows||[];
-  if(!rows.length) return noData(m);
+  const m=D.mkt, all=m.rows||[];
+  if(!all.length) return noData(m);
+  // ★預設只看 OI 金額前 100（跟官方同選法）；🎯🔥 的幣不論大小一律保留。散佈圖跟表都吃這份。
+  const rows = poolRows(all);
   const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   const sel = rows.filter(hit);
   return '<div class="card">' + winBar()
-    + `<h2>視覺篩選器<span>${m.win_h}H・${rows.length} 個合約・命中 ${sel.length}</span></h2>`
+    + `<h2>視覺篩選器<span>${m.win_h}H・${ALLCOINS ? '全部 '+all.length : 'OI 前 100（共 '+all.length+'）'}`
+    + ` 個合約・命中 ${sel.length}</span></h2>`
     + scaleBar()
     // ★官方把這一頁叫「巨鯨雷達」（前端 data-target-tab="visual"），跟「OI 儀表板」(data-target-tab="oi") 是兩個不同分頁。
     //   原話：「用所選週期的持倉變化＋價格變化，觀察資金是否已經注入市場，
@@ -1501,7 +1645,7 @@ function viewMkt(){
     + `<div class="sub">官方固定值：象限圖 OI ≥ 1%、|價格| ≤ 5%。`
     + `<b>價格是上限</b> —— 找的是「OI 大動、價格還沒動」。</div>`
     + (sel.length ? table('sel', ['幣','OI%','價%','象限'], sel, r=>[
-          {v:r.inst, h:`<a class="cl" onclick="openCard('${r.inst}')">`
+          {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
             + (r.inflow?'<span class="star">◆</span>':'')+r.inst.replace('-USDT-SWAP','')+'</a>'},
           {v:r.oi, h:pct(r.oi), c:cls(r.oi)},
           {v:r.px, h:pct(r.px), c:cls(r.px)},
@@ -1565,7 +1709,7 @@ function viewRank(){
       const s = r.sc24 || r.sc || {};   // 排名上的小分數也用主尺度（24H）
       body += '<tr>'
         + `<td class="dim">${i+1}</td>`
-        + `<td><a class="cl" onclick="openCard('${r.inst}')">`
+        + `<td>${tag(r.inst)}<a class="cl" onclick="openCard('${r.inst}')">`
           + (r.an===2?'<span class="star">★</span>':'')
           + r.inst.replace('-USDT-SWAP','') + '</a>'
           + (s.total!==undefined
