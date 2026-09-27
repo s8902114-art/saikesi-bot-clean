@@ -9232,6 +9232,7 @@ def _bn_dhx_data(coin: str, limit: int = 300):
         return None
     try:
         ts = [int(x[0]) // 1000 for x in k]
+        op = np.array([float(x[1]) for x in k], dtype=float) / scale   # 吞噬判定要開盤價
         hi = np.array([float(x[2]) for x in k], dtype=float) / scale
         lo = np.array([float(x[3]) for x in k], dtype=float) / scale
         cl = np.array([float(x[4]) for x in k], dtype=float) / scale
@@ -9248,7 +9249,7 @@ def _bn_dhx_data(coin: str, limit: int = 300):
                 sv = np.cumsum([m.get(t, 0.0) for t in ts])
     except Exception:
         sv = None
-    return {"ts": ts, "hi": hi, "lo": lo, "cl": cl, "cv": cv, "sv": sv}
+    return {"ts": ts, "op": op, "hi": hi, "lo": lo, "cl": cl, "cv": cv, "sv": sv}
 
 
 _DHX_SIG = {}                    # 數據訊號結果：inst -> dict（給儀表板顯示）
@@ -9373,8 +9374,10 @@ def _dhx_scan(force: bool = False) -> None:
                     return inst, None, True, None   # 幣安沒這個幣 → 記 miss，不是錯誤
                 cl = d["cl"]; n = len(cl)
                 r = (_dhx_trap(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
-                     or _dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"])
-                     or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"]))
+                     or _dhx_absorb(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
+                                    op=d.get("op"))
+                     or _dhx_exhaust(inst, d["hi"], d["lo"], cl, n, d["cv"], d["sv"], d["ts"],
+                                     op=d.get("op")))
                 if r:
                     r["bar_ts"] = float(d["ts"][-1])   # 進場那根的開盤時間（事件追蹤從下一根起算）
                 # 近 100 根高低順便帶回去，給事件池判止盈/止損（不多打任何 API）
@@ -9629,7 +9632,56 @@ def _dhx_mag_ok(hi, lo, p1, p2, want_low, oi_d):
     return bool(amp >= DHX_MIN_AMP_PCT), round(amp, 3)
 
 
-def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
+DHX_ENGULF = True          # 吸收/衰竭要等吞噬 K 才發（官方 engulf_idx 64/64 = 最後一根已收盤）
+DHX_ENGULF_MAX_GAP = 8     # 吞噬 K 距 pivot2 最多 8 根（官方 engulf_gap 範圍 1~8，64/64）
+DHX_REV_MAX = 5            # 反向段最多 5 根（官方 engulf_reverse_count 1~5）
+DHX_NEU_MAX = 1            # 反向段內可夾 1 根十字（官方 engulf_neutral_count 0~1）
+
+
+def _dhx_engulf_ok(op, hi, lo, cl, n, long_, p2):
+    """★吞噬觸發（2026-09-27 補，用戶：停損就是吸收的低點）。
+    官方的吸收/衰竭是**事件**：pivot2 形成後，等一根**同向 K 收盤穿過前面那段反向 K 的極端**才進
+    （`entry_source: engulf_market`、`engulf_idx` 恆為 48 = 最後一根已收盤）。
+    我原本狀態一成立就發 → 價格還貼著 pivot2，停損距只剩 0.1~0.5%。
+    判定式來自官方 64 筆（`_DHX_ABSORB_0925_SPEC.md`）：
+      吞噬 K 同向 64/64；反向段 1~5 根、可夾 ≤1 根十字，根數與官方完全相符 64/64；
+      `收盤 > 反向段最高`（做多）94%（古典「吞前一根實體」只有 14%，不是古典吞噬）。
+    ★吞噬 K 可以是**最後一根已收盤（n−2）或它前一根（n−3）**（n−1 是幣安的未收盤那根）：
+      官方 64 筆「發訊 − 吞噬 K 收盤」是**雙峰** —— 0~3 分鐘 28 筆、15~17 分鐘 36 筆
+      （`_dhx_engulf_64.txt` 逐筆量）。我第一版只認 n−2 → 召回從 46% 掉到 32%，
+      被擋掉的 9 筆裡 7 筆就是「最後一根已收盤是反向 K、吞噬 K 在前一根」。"""
+    if op is None:
+        return False
+    return any(_dhx_engulf_at(op, hi, lo, cl, E, long_, p2) for E in (n - 2, n - 3))
+
+
+def _dhx_engulf_at(op, hi, lo, cl, E, long_, p2):
+    """在第 E 根判吞噬（規則見 `_dhx_engulf_ok`）。"""
+    if E < 3 or not (1 <= E - p2 <= DHX_ENGULF_MAX_GAP):
+        return False
+    same = (lambda j: cl[j] > op[j]) if long_ else (lambda j: cl[j] < op[j])
+    rev = (lambda j: cl[j] < op[j]) if long_ else (lambda j: cl[j] > op[j])
+    if not same(E):
+        return False
+    j = E - 1
+    while j > 0 and same(j):           # 反向段與吞噬 K 之間可以隔幾根同向 K（官方中位隔 1 根）
+        j -= 1
+    end, cnt, neu = j, 0, 0
+    while j >= 0:
+        if rev(j):
+            cnt += 1; j -= 1; continue
+        if cl[j] == op[j] and neu < DHX_NEU_MAX:
+            neu += 1; j -= 1; continue
+        break
+    start = j + 1
+    if cnt < 1 or cnt > DHX_REV_MAX or end < start:
+        return False
+    if long_:
+        return bool(cl[E] > float(np.max(hi[start:end + 1])))
+    return bool(cl[E] < float(np.min(lo[start:end + 1])))
+
+
+def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None, op=None):
     """衰竭背離（exhaustion）—— **多空各一邊**。
 
     ★官方 `cvd_signal` 原話（2026-09-24 從他們 API 直接抓到）：
@@ -9672,6 +9724,8 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
                 back = k; break
         if back is None or (n - 1 - back) > 4:
             continue
+        if DHX_ENGULF and not _dhx_engulf_ok(op, hi, lo, cl, n, want_low, p2):
+            continue
         # ★★OI 是硬條件：**衰竭＝OI 下降**（官方 161 筆裡 8/8 全是下降，中位 −0.46%；
         #   對照吸收 55/55 全是上升 +1.80%）。語意：動能耗盡、倉位在平掉。取不到就不發。
         oi_d = _dhx_oi_delta(inst, ts[p1], ts[p2]) if ts is not None else None
@@ -9696,7 +9750,7 @@ def _dhx_exhaust(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
     return None
 
 
-def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
+def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None, op=None):
     """吸收背離（absorption）—— **多空各一邊**。
 
     ★官方 `cvd_signal` 原話：「底背離吸收：**賣方砸盤但價格未破前低**，買方限價單吸收賣壓」
@@ -9730,6 +9784,8 @@ def _dhx_absorb(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
             continue                     # 做多要：CVD 樞紐低點**降低**（賣方砸盤）
         if (not want_low) and not (c2 > c1):
             continue                     # 做空鏡像：CVD 樞紐高點升高
+        if DHX_ENGULF and not _dhx_engulf_ok(op, hi, lo, cl, n, want_low, p2):
+            continue                     # ★等吞噬 K（官方是事件觸發，不是狀態成立就發）
         # ★★OI 是硬條件：**吸收＝OI 上升**。
         #   2026-09-25 拉官方 161 筆原始紀錄逐筆算 `oi_pivot1→oi_pivot2`：
         #     吸收 n=55，**55/55 都是上升**，中位 +1.80%
