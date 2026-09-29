@@ -145,7 +145,19 @@ def run(raw=None, start_ms=None, notify=None):
             else: B += 1
         rows.append(dict(s, btc=b, act="進場", K=K, eq=eq, score=score))
     dec = "✅ 可以上真錢（分數≥+2.2）" if score >= UP else ("❌ 判定不行（分數≤−2.2）" if score <= DOWN else "繼續記錄")
+    prev = _state.get("decision")
     _state.update(rows=rows, eq=eq, score=score, W=W, B=B, L=Ls, decision=dec, err="")
+    # ★過門檻那一刻發一則明顯的通知（redeploy 後第一輪不重發；當時的判定已寫在啟動訊息裡）
+    if notify and not _first_run and dec != prev and dec != "繼續記錄":
+        if dec.startswith("✅"):
+            notify("🚨🚨 **翻倉：可以開始了** 🚨🚨\n"
+                   f"前推紀錄 贏{W}/保本{B}/輸{Ls}，檢定分數 {score:+.2f} 已達 +2.2（事先寫死的上線門檻）。\n"
+                   "規則照舊：官方做多＋BTC24h≤0｜每單風險=資金50%｜0.5R移保本｜TP2(1.5R)全出｜一次一筆。\n"
+                   "要改成真單請跟 Claude 說（目前仍只記錄，不會自己下單）。")
+        else:
+            notify("🛑 **翻倉：判定不行** 🛑\n"
+                   f"前推紀錄 贏{W}/保本{B}/輸{Ls}，檢定分數 {score:+.2f} 已達 −2.2（事先寫死的停止門檻）。\n"
+                   "照規則停止，不上真錢。")
     if notify:
         for r in rows:
             key = (r["act"], r.get("K"))
