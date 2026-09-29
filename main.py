@@ -51,6 +51,11 @@ for pkg in REQUIRED_PACKAGES:
 import requests
 import numpy as np
 import pandas as pd
+try:
+    import fanpan                   # ★2026-09-30 翻倉紙上前推（官方數據訊號做多＋BTC24h≤0，只記錄不下單；規則見 fanpan.py 檔頭）
+except Exception as _fpe:
+    fanpan = None
+    print(f"[翻倉前推] 模組載入失敗：{_fpe}", flush=True)
 import daily_report   # 每日00:00(UTC)復盤(record_entry進場記;daily_tick主迴圈發)
 import dashboard      # 私人儀表板(唯讀,掛在既有 Flask 上;沒設 DASH_TOKEN 就整個不存在)
 import ccxt
@@ -8265,6 +8270,7 @@ def poll_dc_commands():
                                 "__即時判斷__\n"
                                 "**`幣` / `幣 空/多 [時框]`** - 順籌碼即時判斷(象限+評分±10+方向轉折+SL/TP)，如 `ADA`、`ADA 空 15m`(時框5m/15m/30m/1H/4H，預設1H)\n"
                                 "**`!top` / `!top 15m`** - 掃全幣，列當前最適合做多/做空各前3名(評分排序)\n"
+                                "**`!fp`** - 翻倉紙上前推現況（官方數據訊號做多＋BTC24h≤0｜風險50%｜0.5R保本｜TP2全出；只記錄不下單）\n"
                                 "__模式 / 掃描__\n"
                                 "`!status` 系統狀態 · `!setlive`/`!setpaper` 實盤/模擬 · `!pause`/`!resume` 暫停/恢復掃描\n"
                                 "__風控__\n"
@@ -8278,6 +8284,10 @@ def poll_dc_commands():
                                 "__過濾 / 開關__\n"
                                 "`/cvd on|off` · `/adx on|off` · `/trade [15m|30m|1h|4h|all] on|off` · `/margin isolated|cross` · `/exchange okx|bingx on|off`\n"
                             )
+
+                        # ── fp：翻倉紙上前推現況（2026-09-30）──────────────
+                        elif cmd == "fp":
+                            dc_log(fanpan.status_text() if fanpan else "⚠️ 翻倉前推模組沒有載入（看 Railway log）")
 
                         # ── top：掃全幣評分，列做多/做空各前3名 ──────────────
                         elif cmd == "top":
@@ -11649,6 +11659,10 @@ if __name__ == "__main__":
 # 2. 啟動 Discord 指令輪詢執行緒
     dc_cmd_thread = Thread(target=poll_dc_commands, daemon=True)
     dc_cmd_thread.start()
+
+# 2b. 翻倉紙上前推（每 10 分鐘重算；讀 DHX_COOKIE，沒設就只回報「未設定」）
+    if fanpan:
+        Thread(target=fanpan.loop, args=(dc_log,), name="fanpan", daemon=True).start()
 
 # 3. 直通主執行緒進入無漂移排程輪詢主迴圈
     main_polling_loop()
