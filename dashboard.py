@@ -778,15 +778,59 @@ def register(app, G):
     """在 main.py 的 Flask app 上掛載。G = main.py 的 globals()（讀到的永遠是當下值）。"""
     from flask import jsonify, make_response, request
 
+    # ★手機推播（2026-09-30）：金鑰/訂閱存持久磁碟；背景每 60 秒比對各分頁有沒有新東西。失敗不影響網頁。
+    try:
+        import webpush_notify as _wp
+        _wp.start(G, collect, G.get("_PERSIST_DIR") or ".")
+    except Exception as _e:
+        _wp = None
+        print(f"[推播] 沒啟動：{_e}", flush=True)
+
     @app.route("/d/<tok>")
     def _dash_page(tok):
         if not _token_ok(tok):
             return "", 404
-        r = make_response(_HTML)
+        # service worker 與 manifest 掛在同一個路徑的 ?sw=1 / ?m=1：
+        #   腳本在 /d/ 目錄下 → 預設 scope＝/d/，蓋得到 /d/<tok>；不必另外開放 scope。
+        if request.args.get("sw"):
+            r = make_response(_SW_JS)
+            r.headers["Content-Type"] = "application/javascript; charset=utf-8"
+            r.headers["Cache-Control"] = "no-store"
+            return r
+        if request.args.get("m"):
+            r = jsonify({"name": "盤面", "short_name": "盤面", "start_url": f"/d/{tok}", "scope": "/d/",
+                         "display": "standalone", "background_color": "#0b0e14", "theme_color": "#0b0e14"})
+            r.headers["Content-Type"] = "application/manifest+json"
+            return r
+        r = make_response(_HTML.replace("__VER__", VER))
         r.headers["Content-Type"] = "text/html; charset=utf-8"
         r.headers["X-Robots-Tag"] = "noindex, nofollow"
         r.headers["Cache-Control"] = "no-store"
         return r
+
+    @app.route("/d/<tok>/push", methods=["GET", "POST"])
+    def _dash_push(tok):
+        if not _token_ok(tok):
+            return "", 404
+        try:
+            if _wp is None:
+                return jsonify({"ok": False, "err": "推播模組沒啟動"})
+            if request.method == "GET":
+                return jsonify({"ok": True, "key": _wp.public_key(), "status": _wp.status(),
+                                "topics": {k: {"name": v[0], "desc": v[1]} for k, v in _wp.TOPICS.items()}})
+            b = request.get_json(silent=True) or {}
+            op = b.get("op")
+            if op == "sub":
+                return jsonify({"ok": _wp.upsert(b.get("sub") or {}, b.get("prefs") or {})})
+            if op == "unsub":
+                _wp.remove((b.get("sub") or {}).get("endpoint")); return jsonify({"ok": True})
+            if op == "test":
+                ep = (b.get("sub") or {}).get("endpoint")
+                n = _wp.push("test", "🔔 盤面通知測試", "收到這則就代表手機通知設定成功了", only_ep=ep)
+                return jsonify({"ok": n > 0})
+            return jsonify({"ok": False, "err": "未知操作"})
+        except Exception as e:
+            return jsonify({"ok": False, "err": type(e).__name__})
 
     @app.route("/d/<tok>/api")
     def _dash_api(tok):
@@ -880,6 +924,29 @@ def register(app, G):
     return app
 
 
+# ★手機推播的 service worker（2026-09-30）：收到推播就跳通知；點通知打開儀表板並切到對應分頁（#tab=xxx）。
+_SW_JS = """
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (_) { d = {title: '盤面', body: e.data ? e.data.text() : ''}; }
+  e.waitUntil(self.registration.showNotification(d.title || '盤面', {
+    body: d.body || '', tag: d.tag || undefined, data: {tab: d.tab || ''}}));
+});
+self.addEventListener('notificationclick', e => {
+  e.notification.close();
+  const tab = (e.notification.data || {}).tab || '';
+  e.waitUntil(self.clients.matchAll({type: 'window', includeUncontrolled: true}).then(ws => {
+    for (const w of ws) { if (w.url.indexOf('/d/') >= 0) {
+      try { w.postMessage({tab}); } catch (_) {}
+      return w.focus(); } }
+    // 自己的網址＝/d/<token>?sw=1 → 路徑就是儀表板（scope 只有 /d/，直接開會 404）
+    return self.clients.openWindow(self.location.pathname + (tab ? '#tab=' + tab : ''));
+  }));
+});
+"""
+
 _HTML = """<!doctype html>
 <html lang="zh-Hant"><head>
 <meta charset="utf-8">
@@ -888,6 +955,7 @@ _HTML = """<!doctype html>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0b0e14">
+<link rel="manifest" href="?m=1">
 <title>盤面</title>
 <style>
   .sps{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
@@ -1008,6 +1076,7 @@ _HTML = """<!doctype html>
   .fpbig{font-size:15px;padding:12px;margin:6px 0 10px;border-radius:10px;border:1px solid var(--line);line-height:1.7}
   .fpbig.up{border-color:var(--up);background:rgba(22,163,74,.08)} .fpbig.dim{color:var(--fg)}
   .fpsum{font-size:13px;line-height:1.8;margin:4px 0 8px}
+  .nbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 8px;font-size:12px}
   input.f{background:#0f141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;
           padding:6px 10px;font-size:13px;width:100%;margin-bottom:10px}
 </style></head><body>
@@ -1214,7 +1283,84 @@ function draw(){
   const FOCUS_TABS = ['mkt','whale','rank','anom','dhx'];
   let fb = '';
   if(FOCUS_TABS.indexOf(TAB) >= 0){ try{ fb = focusBar(); }catch(e){ fb = ''; } }
-  v.innerHTML = fb + body;
+  let nb = ''; try{ nb = notiBar(); }catch(e){ nb = ''; }     // 每一頁都有自己的通知開關；壞了不能拖垮整頁
+  v.innerHTML = nb + fb + body;
+}
+
+// ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
+//   每支手機各自記住哪幾頁要通知（存伺服器，redeploy 不掉；本機也存一份給畫面用）。
+const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
+const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
+  anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
+  diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
+let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
+try{ PUSH.prefs = JSON.parse(localStorage.getItem('pushprefs')||'{}') || {}; }catch(e){ PUSH.prefs = {}; }
+function pushOK(){ try{ return ('serviceWorker' in navigator) && ('PushManager' in window) && (typeof Notification !== 'undefined'); }catch(e){ return false; } }
+function isIOS(){ try{ return /iPhone|iPad|iPod/.test(navigator.userAgent||''); }catch(e){ return false; } }
+function isStandalone(){ try{ return (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || navigator.standalone===true; }catch(e){ return false; } }
+function b64u(s){ const p='='.repeat((4-s.length%4)%4), b=atob((s+p).replace(/-/g,'+').replace(/_/g,'/'));
+  const a=new Uint8Array(b.length); for(let i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+async function pushInit(){
+  if(!pushOK()) return;
+  try{
+    PUSH.perm = Notification.permission;
+    PUSH.reg = await navigator.serviceWorker.register(location.pathname + '?sw=1');
+    PUSH.sub = await PUSH.reg.pushManager.getSubscription();
+    navigator.serviceWorker.addEventListener('message', e => { const t=(e.data||{}).tab; if(t){ TAB=t; draw(); } });
+    if(PUSH.sub) pushSave();                        // 讓伺服器端的偏好跟這支手機同步
+  }catch(e){ PUSH.err = String(e); }
+  draw();
+}
+async function pushEnable(){
+  try{
+    const perm = await Notification.requestPermission(); PUSH.perm = perm;
+    if(perm !== 'granted'){ draw(); return; }
+    const k = await (await fetch(PUSHAPI, {cache:'no-store'})).json();
+    if(!k.key){ PUSH.err = k.err || '伺服器沒有推播金鑰'; draw(); return; }
+    const reg = PUSH.reg || await navigator.serviceWorker.register(location.pathname + '?sw=1'); PUSH.reg = reg;
+    PUSH.sub = await reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64u(k.key)});
+    if(!Object.keys(PUSH.prefs).length) PUSH.prefs = {fp:true};     // 第一次開：先只開翻倉，其他頁自己選
+    await pushSave();
+  }catch(e){ PUSH.err = String(e); }
+  draw();
+}
+async function pushSave(){
+  try{ localStorage.setItem('pushprefs', JSON.stringify(PUSH.prefs)); }catch(e){}
+  if(!PUSH.sub) return;
+  try{ await fetch(PUSHAPI, {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({op:'sub', sub: PUSH.sub.toJSON ? PUSH.sub.toJSON() : PUSH.sub, prefs: PUSH.prefs})}); }catch(e){}
+}
+function pushToggle(t){ PUSH.prefs[t] = !PUSH.prefs[t]; pushSave(); draw(); }
+function pushAll(on){ Object.keys(NOTI).forEach(t => PUSH.prefs[t] = on); pushSave(); draw(); }
+async function pushTest(){
+  if(!PUSH.sub) return;
+  try{ const r = await (await fetch(PUSHAPI, {method:'POST', headers:{'Content-Type':'application/json'},
+         body: JSON.stringify({op:'test', sub: PUSH.sub.toJSON ? PUSH.sub.toJSON() : PUSH.sub})})).json();
+       if(!r.ok) PUSH.err = '測試沒發出去（' + (r.err||'伺服器找不到這支手機的訂閱') + '）'; }catch(e){ PUSH.err = String(e); }
+  draw();
+}
+function tabName(t){ const x = TABS.find(z => z[0]===t); return x ? x[1] : t; }
+function notiBar(){
+  if(!pushOK()) return '<div class="nbar sub">🔔 這個瀏覽器不能收推播'
+    + (isIOS() && !isStandalone() ? '：iPhone 要先按「分享 → 加入主畫面」，再從主畫面的圖示打開這頁' : '') + '</div>';
+  if(!PUSH.sub || PUSH.perm !== 'granted')
+    return '<div class="nbar"><span class="wb" onclick="pushEnable()">🔔 開啟手機通知</span>'
+      + (PUSH.perm==='denied' ? ' <span class="sub">通知被封鎖了，要到手機「設定 → 通知」把這個 App 打開</span>' : '')
+      + (PUSH.err ? ' <span class="sub warn">'+PUSH.err+'</span>' : '') + '</div>';
+  const on = !!PUSH.prefs[TAB];
+  return `<div class="nbar"><span class="wb ${on?'on':''}" onclick="pushToggle('${TAB}')">🔔 「${tabName(TAB)}」通知：${on?'開':'關'}</span>`
+    + ` <span class="sub">${NOTI[TAB]||''}</span> <span class="wb" onclick="TAB='sys';draw()">全部設定</span></div>`;
+}
+function notiPanel(){
+  let h = '<div class="card"><h2>手機通知<span>每一頁各自開關</span></h2>';
+  if(!pushOK() || !PUSH.sub || PUSH.perm !== 'granted') return h + notiBar() + '</div>';
+  h += '<div class="wins"><span class="wb" onclick="pushAll(true)">全部開</span><span class="wb" onclick="pushAll(false)">全部關</span>'
+     + '<span class="wb" onclick="pushTest()">發一則測試</span></div>';
+  h += '<div class="grid">' + Object.keys(NOTI).map(t => {
+      const on = !!PUSH.prefs[t];
+      return `<div class="kv" onclick="pushToggle('${t}')" style="cursor:pointer"><span>${tabName(t)}<br><span class="sub">${NOTI[t]}</span></span><b class="${on?'up':'dim'}">${on?'開':'關'}</b></div>`;
+    }).join('') + '</div>';
+  return h + (PUSH.err ? '<div class="sub warn">'+PUSH.err+'</div>' : '') + '</div>';
 }
 
 // ★時間尺度對照：這一頁用的窗 vs 大盤 24H。兩者背離時（例如 24H 大跌、近 1H 反彈）
@@ -1984,7 +2130,7 @@ function viewSig(){
 function viewSys(){
   const m=D.mode;
   const kv=(k,v,c='')=>`<div class="kv"><span class="dim">${k}</span><b class="${c}">${v}</b></div>`;
-  let h='<div class="card"><h2>執行設定</h2><div class="grid">'
+  let h = notiPanel() + '<div class="card"><h2>執行設定</h2><div class="grid">'
     + kv('風險/筆', (m.risk_pct*100).toFixed(1)+'%')
     + Object.entries(m.auto_trade).map(([k,v])=>kv(k, v?'開':'關', v?'up':'dim')).join('')
     + '</div></div>';
@@ -1995,7 +2141,7 @@ function viewSys(){
   return h;
 }
 
-const PAGE_VER = '20260925r';
+const PAGE_VER = '__VER__';   // ★送頁面時由伺服器填入 VER（2026-09-30：曾經只改了 Python 的 VER 忘了這裡 → 每次開頁都重載一次）
 async function tick(){
   try{
     const r = await fetch(API + '?w=' + W, {cache:'no-store'});
@@ -2013,7 +2159,10 @@ async function tick(){
     }
   }catch(e){}
 }
+// 從推播點進來會帶 #tab=xxx → 直接切到那一頁
+try{ const _h = (location.hash||'').match(/tab=([a-z]+)/); if(_h && TABS.some(t=>t[0]===_h[1])) TAB = _h[1]; }catch(e){}
 tick(); setInterval(tick, 20000);
+pushInit();
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) tick(); });
 </script></body></html>
 """
