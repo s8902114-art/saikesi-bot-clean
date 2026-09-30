@@ -195,6 +195,29 @@ def status_text():
     return "\n".join(out)
 
 
+def dash_payload():
+    """給儀表板「翻倉」分頁（只讀已算好的值、不打任何 API、不含憑證）。永不拋例外。"""
+    try:
+        def num(v):
+            try:
+                f = float(v); return f if f == f and f not in (float("inf"), float("-inf")) else None
+            except Exception:
+                return None
+        rows = []
+        for r in _state.get("rows") or []:
+            risk = abs(r["e"] - r["sl"])
+            rows.append(dict(t=int(r["t"]), coin=r["coin"], typ=r.get("typ") or "", e=num(r["e"]), sl=num(r["sl"]),
+                             be=num(r["e"] + r["d"] * BE_R * risk), tp2=num(r["tp2"]), btc=num(r.get("btc")),
+                             act=r["act"], K=r.get("K"), eq=num(r.get("eq")), score=num(r.get("score"))))
+        s = _state
+        return dict(ok=True, start=START_UTC_MS, live=FP_LIVE, api=s.get("api"), last_run=s.get("last_run"),
+                    W=s.get("W", 0), B=s.get("B", 0), L=s.get("L", 0), eq=num(s.get("eq")), score=num(s.get("score")),
+                    decision=s.get("decision"), err=s.get("err") or "", up=UP, down=DOWN, w_step=W_STEP, l_step=L_STEP,
+                    rows=rows[-40:])
+    except Exception as e:
+        return dict(ok=False, err=f"{type(e).__name__}")
+
+
 def loop(notify):
     while True:
         try:

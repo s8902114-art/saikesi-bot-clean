@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260925r"
+VER = "20260930fp"
 
 
 def _clean(v):
@@ -760,7 +760,17 @@ def collect(G, win_h=1.0):
         "flags": _flags(G),
         "coins": coins,
         "signals": sigs,
+        # ★翻倉紙上前推（2026-09-30）：只讀 fanpan 已算好的值，fanpan.dash_payload 自己不拋例外
+        "fp": _fp(G),
     }
+
+
+def _fp(G):
+    try:
+        m = G.get("fanpan")
+        return m.dash_payload() if m else {"ok": False, "err": "模組未載入"}
+    except Exception as e:
+        return {"ok": False, "err": type(e).__name__}
 
 
 # ── 路由 ────────────────────────────────────────────────────────────────────
@@ -995,6 +1005,9 @@ _HTML = """<!doctype html>
   .note{color:var(--dim);font-size:11px;line-height:1.5;padding:6px 8px;margin:4px 0 8px;
         border-left:2px solid var(--warn,#c90);background:rgba(200,150,0,.07);border-radius:3px}
   .sub{color:var(--dim);font-size:11px}
+  .fpbig{font-size:15px;padding:12px;margin:6px 0 10px;border-radius:10px;border:1px solid var(--line);line-height:1.7}
+  .fpbig.up{border-color:var(--up);background:rgba(22,163,74,.08)} .fpbig.dim{color:var(--fg)}
+  .fpsum{font-size:13px;line-height:1.8;margin:4px 0 8px}
   input.f{background:#0f141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;
           padding:6px 10px;font-size:13px;width:100%;margin-bottom:10px}
 </style></head><body>
@@ -1048,7 +1061,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['fp','翻倉'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -1189,6 +1202,7 @@ function draw(){
   if(TAB==='whale') body = viewWhale();
   if(TAB==='rank') body = viewRank();
   if(TAB==='dhx') body = viewDhx();
+  if(TAB==='fp') body = viewFp();
   if(TAB==='anom') body = viewAnom();
   if(TAB==='pos') body = viewPos();
   if(TAB==='oi') body = viewOI();
@@ -1704,6 +1718,42 @@ function viewDhx(){
     + '選幣＝24h 成交額前 100（官方 <code>volume_top100</code>）。'
     + '「方向」是型態的進場方向，跟 OI 排名的「象限」是不同維度，兩者不同是正常的。'
     + '</details></div>';
+}
+
+// ★翻倉紙上前推（2026-09-30）：只顯示 fanpan 已算好的值（D.fp），不打任何 API。
+function fpT(ms){ if(!ms) return '—'; const d=new Date(ms+8*3600000), p=n=>String(n).padStart(2,'0');
+  return p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate())+' '+p(d.getUTCHours())+':'+p(d.getUTCMinutes()); }
+function viewFp(){
+  const p = D.fp || {};
+  if(!p.ok) return '<div class="card"><h2>翻倉</h2><div class="empty">翻倉前推沒有資料（'+(p.err||'未知')+'）</div></div>';
+  const rows = p.rows || [];
+  const open = rows.filter(r=>r.act==='進場' && r.K==='持倉中');
+  const last = rows.length ? rows[rows.length-1] : null;
+  let h = '<div class="card"><h2>翻倉<span>紙上前推・只記錄不下單・起點 '+fpT(p.start)+'（台北）</span></h2>';
+  if(open.length){
+    const r = open[open.length-1];
+    h += '<div class="fpbig up">✅ 現在這筆可以下：<b>'+r.coin+'</b> 做多'
+      + '<br>進場 <b>'+pf(r.e)+'</b>　停損 <b>'+pf(r.sl)+'</b>　漲到 <b>'+pf(r.be)+'</b> 停損移進場價　TP2 停利 <b>'+pf(r.tp2)+'</b>（整筆全出）'
+      + '<div class="sub">'+fpT(r.t)+' 官方 '+(r.typ||'')+' 訊號・發訊時 BTC 24h '+f2(r.btc)+'</div></div>';
+  } else {
+    h += '<div class="fpbig dim">目前沒有可以下的單'
+      + (last ? '<div class="sub">最新一筆官方做多：'+fpT(last.t)+' '+last.coin+' → '+last.act+(last.K?('（'+last.K+'）'):'')+'</div>' : '')
+      + '</div>';
+  }
+  const sc = p.score||0, need = (p.up||0) - sc;
+  h += '<div class="fpsum">紙上資金 100U → <b>'+f(p.eq,1)+'U</b>　贏 '+p.W+'・保本 '+p.B+'・輸 '+p.L
+    + '<br>檢定分數 <b class="'+cls(sc)+'">'+(sc>=0?'+':'')+f(sc,2)+'</b>（到 +'+f(p.up,1)+' 可以開始翻倉、到 '+f(p.down,1)+' 判定不行；每贏 +'+f(p.w_step,2)+'、每輸 '+f(p.l_step,2)+'）'
+    + '<br><b>'+(p.decision||'—')+'</b>'
+    + (p.decision==='繼續記錄' && p.w_step ? '・離可以開始還差 '+f(need,2)+'（約再淨贏 '+Math.max(0,Math.ceil(need/p.w_step))+' 筆）' : '')
+    + '</div>';
+  h += '<div class="note">規則（事先寫死、不會改）：官方數據訊號做多 ＋ 發訊時 BTC 過去 24h ≤0%｜每單風險＝資金 50%｜漲到 0.5R 停損移進場價｜TP2（1.5R）整筆全出｜一次只拿一筆。'
+    + '到 +2.2 時 Discord 會發 🚨 通知；這頁跟 Discord 都<b>不會自己下真單</b>。官方 API：'+(p.api||'—')+(p.err?'・⚠ '+p.err:'')+'</div>';
+  h += '<h3 class="sech">最近官方做多訊號 <span class="dim">'+rows.length+'</span></h3>';
+  if(!rows.length) return h + '<div class="empty">前推開始後還沒有官方做多訊號</div></div>';
+  return h + table('fp', ['時間','幣','進場','停損','TP2','BTC24h','處理','紙上資金'], rows.slice().reverse(), r => [
+    {v:r.t, h:fpT(r.t)}, r.coin, pf(r.e), pf(r.sl), pf(r.tp2), {v:r.btc||0, h:f2(r.btc), c:cls(-(r.btc||0))},
+    r.act==='進場' ? {v:1, h:'✅ '+(r.K||''), c:r.K==='贏'?'up':(r.K==='輸'?'down':'')} : {v:0, h:'⛔ '+String(r.act).replace('不進','')},
+    {v:r.eq==null?-1:r.eq, h:r.eq==null?'—':f(r.eq,1)+'U'}]) + '</div>';
 }
 
 function viewMkt(){
