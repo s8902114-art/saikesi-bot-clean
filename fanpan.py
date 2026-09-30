@@ -76,23 +76,32 @@ def candles(inst, since_ms):
     """OKX 15m 已收盤 K（history-candles 往回翻頁；已抓過的只補新的）。回傳 (排序好的 bar 起始時間 list, dict)。"""
     have = _candles.setdefault(inst, {})
     newest = max(have) if have else None
-    after = None
-    for _ in range(600):
-        q = {"instId": inst, "bar": "15m", "limit": "100"}
-        if after: q["after"] = str(after)
-        try:
-            j = requests.get(OKX + "/api/v5/market/history-candles", params=q, headers=UA, timeout=12).json()
-        except Exception:
-            time.sleep(1); continue
-        if j.get("code") == "50011":                     # 限流 → 退避，不當成沒資料
-            time.sleep(1.5); continue
-        dd = j.get("data") or []
-        if not dd: break
-        for z in dd:
-            if z[8] == "1": have[int(z[0])] = (float(z[1]), float(z[2]), float(z[3]), float(z[4]))
-        oldest = int(dd[-1][0]); after = oldest
-        if oldest <= since_ms or (newest is not None and oldest <= newest): break
-        time.sleep(0.12)
+    oldest_have = min(have) if have else None
+
+    def page(after, stop_at):
+        """從 after（不含）往更早翻頁，翻到 ≤ stop_at 為止。"""
+        for _ in range(600):
+            q = {"instId": inst, "bar": "15m", "limit": "100"}
+            if after: q["after"] = str(after)
+            try:
+                j = requests.get(OKX + "/api/v5/market/history-candles", params=q, headers=UA, timeout=12).json()
+            except Exception:
+                time.sleep(1); continue
+            if j.get("code") == "50011":                 # 限流 → 退避，不當成沒資料
+                time.sleep(1.5); continue
+            dd = j.get("data") or []
+            if not dd: return
+            for z in dd:
+                if z[8] == "1": have[int(z[0])] = (float(z[1]), float(z[2]), float(z[3]), float(z[4]))
+            after = int(dd[-1][0])
+            if after <= stop_at: return
+            time.sleep(0.12)
+
+    # ① 補最新：從現在往回翻到已經有的最新一根（沒快取就翻到 since_ms）
+    page(None, newest if newest is not None else since_ms)
+    # ② 補更早：要的起點比快取最早還早 → 從快取最早那根往前翻（2026-09-30 修：原本只會補新的，亂序查詢會拿不到舊資料）
+    if oldest_have is not None and since_ms < oldest_have:
+        page(oldest_have, since_ms)
     return sorted(have), have
 
 
