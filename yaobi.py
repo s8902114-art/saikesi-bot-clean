@@ -50,11 +50,36 @@ def _get(path, params, tries=5):
     return None
 
 
+def binance_onboard():
+    """幣安永續上市日（coin -> ms）。★走 www.binance.com：fapi 網域從 Railway 被 451，www 同路徑通（手冊 09-24）。
+    ★為什麼需要：OKX 的 listTime 會在合約重新上架時重設 —— 10-02 線上實測 PENDLE/ZEN/ENA 被 OKX 算成
+      上市 300 多天，幣安實際 1162/2138/912 天 → 老幣被當新幣。回測用的也是幣安上市日。拿不到回 None。"""
+    try:
+        r = requests.get("https://www.binance.com/fapi/v1/exchangeInfo", headers=UA, timeout=20)
+        if r.status_code != 200:
+            return None
+        out = {}
+        for s in r.json().get("symbols") or []:
+            if s.get("quoteAsset") != "USDT" or s.get("contractType") != "PERPETUAL" or not s.get("onboardDate"):
+                continue
+            b = s.get("baseAsset") or ""
+            for pre in ("1000000", "1000"):                  # 1000PEPE → PEPE（OKX 用原名）
+                if b.startswith(pre) and len(b) > len(pre):
+                    b = b[len(pre):]; break
+            out[b] = min(out.get(b, float("inf")), float(s["onboardDate"]))
+        return out or None
+    except Exception:
+        return None
+
+
 def universe():
-    """OKX 加密幣 USDT 永續（instCategory=1，排除股票/商品），上市 ≤ MAX_AGE_D 天。"""
+    """OKX 加密幣 USDT 永續（instCategory=1，排除股票/商品），上市 ≤ MAX_AGE_D 天。
+    上市日＝min(OKX listTime, 幣安 onboardDate)；幣安拿不到時只用 OKX（並在頁面標警告）。"""
     d = _get("/api/v5/public/instruments", {"instType": "SWAP"})
     if d is None:
         raise RuntimeError("instruments 抓不到")
+    bn = binance_onboard()
+    _state["bn_ok"] = bn is not None
     now = time.time() * 1000
     out = {}
     for x in d:
@@ -65,6 +90,8 @@ def universe():
             lt = float(x.get("listTime") or 0)
         except ValueError:
             continue
+        if bn and iid.split("-")[0] in bn:
+            lt = min(lt, bn[iid.split("-")[0]]) if lt > 0 else bn[iid.split("-")[0]]
         if lt > 0 and (now - lt) / DAY <= MAX_AGE_D:
             out[iid] = lt
     return out
@@ -190,7 +217,8 @@ def run(now_s=None):
     watch.sort(key=lambda w: -w["dd"])
     sigs.sort(key=lambda s: -s["day"])
     _state.update(last_run=now_s, n_univ=len(univ), watch=watch, sigs=sigs, ms=int((time.time() - t0) * 1000),
-                  err=(f"{miss} 個幣日K抓不到" if miss else ""))
+                  err="；".join(x for x in ((f"{miss} 個幣日K抓不到" if miss else ""),
+                                             ("" if _state.get("bn_ok") else "幣安上市日抓不到，只用 OKX listTime（可能把重新上架的老幣當新幣）")) if x))
 
 
 def dash_payload():
