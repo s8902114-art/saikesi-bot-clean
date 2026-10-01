@@ -56,6 +56,11 @@ try:
 except Exception as _fpe:
     fanpan = None
     print(f"[翻倉前推] 模組載入失敗：{_fpe}", flush=True)
+try:
+    import yaobi                    # ★2026-10-02 妖幣觀察清單（Barry 10-01 直播：新幣深跌＋日線放量→回踩；只列出來、不下單）
+except Exception as _ybe:
+    yaobi = None
+    print(f"[妖幣觀察] 模組載入失敗：{_ybe}", flush=True)
 import daily_report   # 每日00:00(UTC)復盤(record_entry進場記;daily_tick主迴圈發)
 import dashboard      # 私人儀表板(唯讀,掛在既有 Flask 上;沒設 DASH_TOKEN 就整個不存在)
 import ccxt
@@ -11671,6 +11676,9 @@ if __name__ == "__main__":
 # 2b. 翻倉紙上前推（每 10 分鐘重算；讀 DHX_COOKIE，沒設就只回報「未設定」）
     if fanpan:
         Thread(target=fanpan.loop, args=(dc_log,), name="fanpan", daemon=True).start()
+# 2c. 妖幣觀察清單（每 30 分鐘從 OKX 日K 重算；無狀態、不下單）
+    if yaobi:
+        Thread(target=yaobi.loop, name="yaobi", daemon=True).start()
 
 # 3. 直通主執行緒進入無漂移排程輪詢主迴圈
     main_polling_loop()

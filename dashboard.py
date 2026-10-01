@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261002whale"
+VER = "20261002yao"
 
 
 def _clean(v):
@@ -762,7 +762,24 @@ def collect(G, win_h=1.0):
         "signals": sigs,
         # ★翻倉紙上前推（2026-09-30）：只讀 fanpan 已算好的值，fanpan.dash_payload 自己不拋例外
         "fp": _fp(G),
+        # ★妖幣觀察清單（2026-10-02，Barry 10-01 直播）：只讀 yaobi 已算好的值＋巨鯨事件標記，不打 API
+        "yao": _yao(G),
     }
+
+
+def _yao(G):
+    try:
+        m = G.get("yaobi")
+        p = m.dash_payload() if m else {"ok": False, "err": "模組未載入"}
+        if p.get("ok"):
+            wh = {}
+            for ev in (G.get("_WHALE") or {}).values():
+                if ev.get("dir") in ("bull", "pending"):
+                    wh[ev.get("inst")] = ev.get("dir")
+            p["whale"] = wh
+        return p
+    except Exception as e:
+        return {"ok": False, "err": type(e).__name__}
 
 
 def _fp(G):
@@ -1130,7 +1147,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['fp','翻倉'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['fp','翻倉'],['yao','妖幣'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -1272,6 +1289,7 @@ function draw(){
   if(TAB==='rank') body = viewRank();
   if(TAB==='dhx') body = viewDhx();
   if(TAB==='fp') body = viewFp();
+  if(TAB==='yao') body = viewYao();
   if(TAB==='anom') body = viewAnom();
   if(TAB==='pos') body = viewPos();
   if(TAB==='oi') body = viewOI();
@@ -1290,7 +1308,7 @@ function draw(){
 // ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
 //   每支手機各自記住哪幾頁要通知（存伺服器，redeploy 不掉；本機也存一份給畫面用）。
 const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
-const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
+const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', yao:'新的放量訊號、回踩到進場價、到目標或停損', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
   anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
   diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
 let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
@@ -1874,6 +1892,52 @@ function viewDhx(){
     + '選幣＝24h 成交額前 100（官方 <code>volume_top100</code>）。'
     + '「方向」是型態的進場方向，跟 OI 排名的「象限」是不同維度，兩者不同是正常的。'
     + '</details></div>';
+}
+
+// ★妖幣觀察清單（2026-10-02，Barry 10-01 直播「打妖幣的眉角」）：只顯示 yaobi 已算好的值（D.yao），不打 API、不下單。
+function yaoDay(ms){ if(!ms) return '—'; const d=new Date(ms), p=n=>String(n).padStart(2,'0'); return p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate()); }
+const YRES = {'到價':['✅ 到','up'], '停損':['❌ 停損','down'], '保本':['➖ 保本','dim'], '持倉中':['⏳','']};
+function viewYao(){
+  const p = D.yao || {};
+  if(!p.ok) return '<div class="card"><h2>妖幣</h2><div class="empty">妖幣觀察沒有資料（'+(p.err||'未知')+'）</div></div>';
+  const rule = p.rule || {}, wh = p.whale || {}, sigs = p.sigs || [], watch = p.watch || [];
+  // 每個幣只留最新一筆放量訊號（同一個幣連續幾天放量很常見）
+  const seen = {}, latest = [];
+  for(const s of sigs){ if(!seen[s.coin]){ seen[s.coin]=1; latest.push(s); } }
+  const live = latest.filter(s => s.state==='等回踩' || (s.state==='已回踩' && Object.values(s.res||{}).some(x=>x==='持倉中')));
+  let h = '<div class="card"><h2>妖幣觀察<span>只列出來給你判斷・不下單・每 30 分鐘更新'
+    + (p.last_run ? '・更新於 '+ago(p.last_run)+'前' : '') + '</span></h2>';
+  h += '<div class="note">Barry 原話：①從最高點到最低點跌 <b>'+(rule.min_dd||80)+'%</b> 以上 ②<b>新幣</b>（這裡用上市 ≤'+(rule.max_age||400)+' 天）'
+    + ' ③巨鯨雷達/OI 儀表板跳＝<b>放觀察清單</b>，不是進場 ④<b>日線</b>出現往上拉、量明顯比前面幾根大的K ⑤之後<b>等回踩再進</b>。'
+    + '<br>我補的：放量＝綠K 且量 &gt; 前 '+(rule.vol_lb||10)+' 根日K最大量；進場＝放量K實體中點（'+(rule.fill_days||5)+' 天內沒回踩就失效）；'
+    + '停損＝上市高點後最低點 ×'+(rule.sl_mult||0.97)+'；目標 +'+(rule.targets||[30,50,100]).join('%／+')+'%；漲到 +1R 停損移進場價。'
+    + '<br>回測（約 200 幣、2025-01~2026-08）：每筆平均 +0.13~0.15R、新幣深跌後 30 天內 28% 漲過 +50%；'
+    + '但<b>押 50% 一次一筆模擬約 80% 最後虧錢</b>，所以這是觀察清單、不是翻倉訊號。日K 以台北 08:00 收盤；上市日用 OKX 的（比幣安晚上市的幣，回調% 可能算少）。'
+    + (p.err ? '<br>⚠ '+p.err : '') + '</div>';
+  h += '<h3 class="sech">現在可以看的 <span class="dim">'+live.length+'</span></h3>';
+  const cols = ['幣','放量日','回調','上市','量倍','進場','現價','停損','+30%','+50%','+100%','狀態'];
+  const row = s => {
+    const gap = (s.last && s.e) ? (s.last/s.e-1)*100 : null, R = s.res || {};
+    const tgt = (i,k) => R[k] ? {v:i, h:(YRES[R[k]]||[R[k],''])[0]+' '+pf((s.tps||[])[i]), c:(YRES[R[k]]||['',''])[1]} : {v:i, h:pf((s.tps||[])[i])};
+    return [
+      {v:s.coin, h:`<a class="cl" onclick="openCard('${s.inst}')">${s.coin}</a>`
+        + (wh[s.inst] ? ' <span class="star" title="巨鯨雷達 6 小時內有偏多/觀察中">🐋</span>' : '') + (s.backfill ? ' <span class="dim">回填</span>' : '')},
+      {v:s.day, h:yaoDay(s.day)}, {v:s.dd, h:f(s.dd,0)+'%'}, {v:s.age, h:f(s.age,0)+'天'}, {v:s.vr||0, h:s.vr?'×'+f(s.vr,1):'—'},
+      {v:s.e||0, h:pf(s.e)}, {v:gap==null?-999:gap, h:pf(s.last)+(gap==null?'':' <span class="'+cls(gap)+'">'+(gap>=0?'+':'')+f(gap,1)+'%</span>')},
+      {v:s.sld||0, h:pf(s.sl)+' <span class="dim">−'+f(s.sld,0)+'%</span>'},
+      tgt(0,'+30%'), tgt(1,'+50%'), tgt(2,'+100%'),
+      {v:s.state, h:s.state==='等回踩' ? '⏳ 等回踩到 '+pf(s.e) : (s.state==='已回踩' ? '已回踩 '+yaoDay(s.fill_day) : s.state)}];
+  };
+  h += live.length ? table('yao', cols, live, row) : '<div class="empty">目前沒有：放量後還在等回踩、或已回踩還沒出結果的幣。</div>';
+  h += '<h3 class="sech">近 60 天全部放量訊號 <span class="dim">'+sigs.length+'</span></h3>';
+  h += sigs.length ? table('yao2', cols, sigs, row) : '<div class="empty">近 60 天沒有放量訊號</div>';
+  h += '<h3 class="sech">觀察清單（新幣＋已跌 ≥'+(rule.min_dd||80)+'%，還沒放量的也列）<span class="dim">'+watch.length+' / 新幣 '+(p.n_univ||0)+'</span></h3>';
+  h += watch.length ? table('yao3', ['幣','回調','上市','低點以來','現價'], watch, w => [
+      {v:w.coin, h:`<a class="cl" onclick="openCard('${w.inst}')">${w.coin}</a>` + (wh[w.inst] ? ' 🐋' : '')},
+      {v:w.dd, h:f(w.dd,1)+'%'}, {v:w.age, h:f(w.age,0)+'天'},
+      {v:w.up_from_low==null?-1:w.up_from_low, h:w.up_from_low==null?'—':'+'+f(w.up_from_low,0)+'%'}, {v:w.last||0, h:pf(w.last)}])
+    : '<div class="empty">沒有</div>';
+  return h + '</div>';
 }
 
 // ★翻倉紙上前推（2026-09-30）：只顯示 fanpan 已算好的值（D.fp），不打任何 API。
