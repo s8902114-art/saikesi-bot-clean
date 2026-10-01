@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20260930fp"
+VER = "20261002whale"
 
 
 def _clean(v):
@@ -1478,7 +1478,7 @@ const WDIR = {bull:['偏多','up'], bear:['偏空','down'],
 // ★官方卡片摘要用的片語表（`_whaleRadarSharedContract.notice_rules` 原樣，單位：%／分位）。
 //   每列 [下界, 上界, 含下界, 含上界, 片語]；null = 無界。
 const WHALE_PHRASE = {
-  oi:   [[4,6,true,false,'持倉持續增加'],[6,10,true,false,'持倉明顯增加'],[10,null,true,false,'持倉大幅增加']],
+  oi:   [[3,6,true,false,'持倉持續增加'],[6,10,true,false,'持倉明顯增加'],[10,null,true,false,'持倉大幅增加']],
   px:   [[-3,-1.5,true,true,'價格明顯回落'],[-1.5,-0.5,false,true,'價格小幅回落'],
          [-0.5,0.5,false,false,'價格仍在盤整'],[0.5,1.5,true,false,'價格小幅上漲'],[1.5,3,true,true,'價格開始上漲']],
   oi15: [[null,-1,false,false,'短線持倉明顯回落'],[-1,-0.3,true,false,'短線持倉小幅回落'],
@@ -1497,42 +1497,52 @@ function whaleSummary(r){
   }
   return out.join('｜') || '資金活動升溫';
 }
+function whaleSort(a,b){
+  // ★官方 v2 排序（`candidateRows.sort`）：有量能分位的在前、分位高的在前，同分再比 1H OI
+  const ar = a.vpct!=null && isFinite(a.vpct), br = b.vpct!=null && isFinite(b.vpct);
+  if(ar!==br) return br - ar;
+  if(ar && a.vpct!==b.vpct) return b.vpct - a.vpct;
+  return (b.oi||0) - (a.oi||0);
+}
+function whaleRow(r){
+  return [
+    {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
+      + r.inst.replace('-USDT-SWAP','') + '</a>'},
+    {v:r.dir, h:(WDIR[r.dir]||[r.dir,''])[0]
+      + (r.dir==='pending' ? `<span class="dim"> ${Math.max(0, Math.ceil((900-(D.now-r.first_ts))/60))}分</span>` : ''),
+      c:(WDIR[r.dir]||['','dim'])[1]},
+    {v:r.oi, h:pct(r.oi), c:'up'},
+    {v:r.px, h:pct(r.px), c:cls(r.px)},
+    {v:r.oi15==null?-99:r.oi15, h:r.oi15==null?'—':pct(r.oi15), c:cls(r.oi15||0)},
+    {v:r.vpct==null?-1:r.vpct, h:r.vpct==null?'<span class="dim">補充中</span>':'P'+f(r.vpct*100,0)},
+    {v:0, h:`<span class="dim" title="${r.note||''}">${whaleSummary(r)}</span>`},
+    ago(r.first_ts),
+  ];
+}
 function viewWhale(){
   const all = D.whale || [], q = D.whaleq || {};
-  // ★官方只列兩種：「此刻符合正式條件」或「後端判定為 偏多／觀察中 且還在有效期」
-  //   （前端 `_whaleRadarIsLongCandidate(...) || _whaleRadarBackendDecision(coin)`，
-  //    後者只收 ['bull','pending']）→ 偏空／方向未成立的**不顯示**。這裡照做。
-  const rows = all.filter(r => r.formal || r.dir==='bull' || r.dir==='pending')
-                  .sort((a,b)=>(b.oi||0)-(a.oi||0));
-  const hidden = all.length - rows.length;
+  // ★官方 v2（2026-10-02 改版）：列表**只列後端判「偏多／觀察中」**的幣（`_whaleRadarBackendDecision`），
+  //   量能分位只用來排序（拿不到的排最後）。官方的方向判定在後端、我們拿不到，
+  //   這裡的方向是我訂的 → 我判「方向未成立／偏空」的**不藏**，放到下面一區（官方可能判偏多）。
+  const cols = ['幣','狀態','OI 1H','價 1H','15m OI','量能','摘要','起算'];
+  const rows = all.filter(r => r.dir==='bull' || r.dir==='pending').sort(whaleSort);
+  const rest = all.filter(r => !(r.dir==='bull' || r.dir==='pending')).sort(whaleSort);
   let h = '<div class="card"><h2>◆ 巨鯨雷達｜資金注入候選 ' + rows.length + ' 個'
-    + `<span>原始 ${q.raw||0}・正式 ${q.formal||0}・OI 來源 ${q.src||'—'}</span></h2>`
-    + '<div class="sub" style="margin-bottom:8px">正式條件：<b>1H OI ≥4%、|價格| ≤3%、'
-    + '量能分位 ≥80%、15m OI ≤2%</b>（四條全中才算）→ 觀察 15 分鐘 → 判方向。</div>';
-  if(!rows.length){
-    h += '<div class="empty">目前沒有正式候選。'
-       + ((q.raw||0) ? `（有 ${q.raw} 個原始候選，但量能不到自身 30 天 80 分位、或 15m OI 已經衝太快）` : '')
-       + '</div>';
-  } else {
-    h += table('whale', ['幣','狀態','OI 1H','價 1H','15m OI','量能分位','摘要','起算'], rows, r=>[
-      {v:r.inst, h:tag(r.inst) + `<a class="cl" onclick="openCard('${r.inst}')">`
-        + r.inst.replace('-USDT-SWAP','') + '</a>'},
-      {v:r.dir, h:(WDIR[r.dir]||[r.dir,''])[0]
-        + (r.dir==='pending' ? `<span class="dim"> ${Math.max(0, Math.ceil((900-(D.now-r.first_ts))/60))}分</span>` : ''),
-        c:(WDIR[r.dir]||['','dim'])[1]},
-      {v:r.oi, h:pct(r.oi), c:'up'},
-      {v:r.px, h:pct(r.px), c:cls(r.px)},
-      {v:r.oi15==null?-99:r.oi15, h:r.oi15==null?'—':pct(r.oi15), c:cls(r.oi15||0)},
-      {v:r.vpct==null?-1:r.vpct, h:r.vpct==null?'—':f(r.vpct*100,0)+'%'},
-      {v:0, h:`<span class="dim" title="${r.note||''}">${whaleSummary(r)}</span>`},
-      ago(r.first_ts),
-    ]);
+    + `<span>此刻候選 ${q.raw||0}・OI 來源 ${q.src||'—'}</span></h2>`
+    + '<div class="sub" style="margin-bottom:8px">條件：<b>1H OI ≥3%、|1H 價格| ≤3%</b>'
+    + '（持倉先行、價格還沒擴張）→ 觀察 15 分鐘 → 判方向。<b>量能只用來排序</b>（官方原話），'
+    + '新幣量能還沒滿 25 天的顯示「補充中」排最後。</div>';
+  h += rows.length ? table('whale', cols, rows, whaleRow)
+                   : '<div class="empty">目前沒有偏多／觀察中的候選。</div>';
+  if(rest.length){
+    h += `<div class="sub" style="margin:10px 0 6px">我判方向未成立／偏空 ${rest.length} 個`
+       + '（官方方向在後端算、我們拿不到，<b>官方可能判偏多</b>，所以不藏）：</div>'
+       + table('whale2', cols, rest, whaleRow);
   }
   return h + '<div class="sub" style="margin-top:8px">'
-    + (hidden ? `另有 ${hidden} 個判為偏空／方向未成立，官方不列出，這裡也不列。<br>` : '')
-    + '★四條門檻、15 分鐘、判斷因子（OI 保留／相對 BTC／CVD）與摘要片語都是<b>官方原樣</b>；'
-    + '「三因子怎麼合成方向」官方在後端算、沒公布，這段<b>是我訂的</b>（各 ±1，≥2 偏多）。'
-    + '量能分位取<b>最新已收盤</b>那根 15m（官方沒寫取哪根）。</div></div>';
+    + '★來源：官方前端契約 v2「持倉先行且價格尚未擴張的事件候選；成交量分位只用於排序，不作硬性淘汰」。'
+    + '3% 門檻是從契約片語下界＋對帳 Barry 10-01 直播畫面官方 13 幣（3% 抓到 13/13、4% 只有 8/13）推回來的。'
+    + '方向三因子（OI 保留／相對 BTC／CVD）是官方的，<b>怎麼合成是我訂的</b>（各 ±1，≥2 偏多）。</div></div>';
 }
 
 function inflowCard(){

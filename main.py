@@ -10164,10 +10164,18 @@ WHALE_MAX = 40
 #     才列為正式資金注入候選。」 契約欄位 volume_percentile_threshold=0.8、oi_15m_max=2.0，
 #   判定式 `_whaleRadarIsLongCandidate`：oi1h≥4 && |px1h|≤3 && volPct≥0.8 && oi15≤2。
 #   量能來源是他們的 `okxVolumePct15m30dMap` → **OKX** 15m 成交量、自身 30 天分位。
-WHALE_OI_1H = 0.04
+#   ★★2026-10-02 官方前端改版（契約 schema_version 2、radar_policy v10.6），上面那段已過期：
+#   ①契約原文「持倉先行且價格尚未擴張的事件候選；**成交量分位只用於排序，不作硬性淘汰**」，
+#     新契約裡 oi_threshold／volume_percentile_threshold／oi_15m_max 三個欄位都消失了；
+#   ②OI 摘要片語下界 4→**3**（`notice_rules.oi` 第一段 [3,6]）；
+#   ③對帳 Barry 10-01 23:15 直播畫面上的官方 13 幣（ZBT/HMSTR/ESP/RLS/UP/GMT/UB/BARD/BABY/BICO/CNPY/CASHCAT/BEAT），
+#     用 OKX rubik 5m OI 重建：門檻 4% 只抓到 8/13、**3% 抓到 13/13**；同時段隨機 60 幣 5/60 → 7/60；
+#     15m OI ≤2% 在兩種門檻下都分不出官方幣（4% 時反而砍掉 2 個官方、0 個對照）。
+#   → 候選 = 1H OI ≥3% 且 |1H 價| ≤3%；量能分位與 15m OI 只拿來排序／顯示（`_chk_whale_miss2.py`）。
+#   ★官方列表本身只列後端判「偏多／觀察中」的幣（`_whaleRadarBackendDecision`，專業版 API，我們 403），
+#     門檻是後端算的，3% 是由上面兩個證據推回來的，不是讀到的常數。
+WHALE_OI_1H = 0.03
 WHALE_PX_1H = 0.03
-WHALE_VOL_PCT = 0.80
-WHALE_OI15_MAX = 0.02
 WHALE_VOL_DAYS = 30
 WHALE_VOL_TTL = 6 * 3600         # 30 天分布 6 小時重抓一次（分布變很慢；「當根量」每輪另抓）
 WHALE_STABLE = {"USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD", "USDS", "USDE", "USDD", "USDY",
@@ -10276,7 +10284,7 @@ def _whale_scan(now_s: float) -> None:
     在引導模式選單叫「視覺篩選器」，但頁面裡裝的是**兩套不同門檻的產物**：
       ·「持倉 × 價格象限圖」＝ 瀏覽/篩選工具，OI ≥1%、|價格| ≤5%，
         官方明說「**象限只描述持倉與價格，不直接判定多空**」→ 這是「篩選器」那半。
-      ·「資金注入候選」＝ **警報產品**，1H OI ≥4%、|價格| ≤3%，**會產生卡片與通知**，
+      ·「資金注入候選」＝ **警報產品**，1H OI ≥3%（v2；舊版 4%）、|價格| ≤3%，**會產生卡片與通知**，
         而且有後續流程 → 這是「雷達」那半。
     決定性證據是他們自己的契約字串：`batch_title: "巨鯨雷達｜資金注入候選 {count} 個"`
     —— 巨鯨雷達是產品名，資金注入候選是它的產出。
@@ -10286,7 +10294,7 @@ def _whale_scan(now_s: float) -> None:
     不另產生卡片或通知。」方向標籤 `direction_labels`：
     bull=偏多／bear=偏空／pending=觀察中／none=方向未成立。
 
-    ★誠實標記：**三個判斷因子與 15 分鐘、4%/3% 門檻都是官方的**，
+    ★誠實標記：**三個判斷因子與 15 分鐘是官方的；3%/3% 門檻是從 v2 契約片語＋13 幣對帳推回來的**，
       但「三個因子怎麼合成一個方向」官方沒公布（server-side），
       下面的合成規則（各記 ±1、總分 ≥2 偏多 / ≤−2 偏空 / 其餘方向未成立）**是我訂的**。
 
@@ -10327,14 +10335,14 @@ def _whale_scan(now_s: float) -> None:
             if oi1 is None or px1 is None:
                 continue
             ev = _WHALE.get(inst)
-            if oi1 >= WHALE_OI_1H and abs(px1) <= WHALE_PX_1H:     # 原始候選（官方固定門檻）
+            if oi1 >= WHALE_OI_1H and abs(px1) <= WHALE_PX_1H:     # 候選（官方 v2：只有這兩條）
                 raw += 1
                 need_vol.append((oi1, inst))
                 oi15 = _chg15(h)
                 vp = (_WHALE_VOL.get(inst) or {}).get("pct")
-                # ★正式候選：量能分位與 15m OI 缺一不可；**拿不到值 = 不通過**（不可當成過）
-                is_formal = (vp is not None and vp >= WHALE_VOL_PCT
-                             and oi15 is not None and oi15 <= WHALE_OI15_MAX)
+                # ★官方 v2：量能分位「只用於排序，不作硬性淘汰」→ 拿不到量能（新幣不到 25 天）也照列，
+                #   顯示「量能資料補充中」排到最後；15m OI 只當摘要片語。
+                is_formal = True
                 if is_formal:
                     formal += 1
                     if not ev:
