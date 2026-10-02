@@ -11,7 +11,7 @@ import os, json, time, threading, base64, traceback
 
 TOPICS = {  # 分頁代號 → (名稱, 什麼時候通知)
     "fp": ("翻倉", "有可以下的單、出結果、過 +2.2／−2.2"),
-    "yao": ("妖幣", "新的放量訊號、回踩到進場價、到目標或停損"),
+    "yao": ("妖幣", "有長盤整的新放量訊號、限價成交、贏或輸"),
     "mkt": ("視覺篩選器", "某個幣剛出現 🔥（兩個以上來源同方向）"),
     "whale": ("巨鯨雷達", "新的巨鯨訊號"),
     "rank": ("OI 排名", "新擠進 OI 增幅前 10"),
@@ -142,7 +142,7 @@ def _snap(P):
     s["fp"] = {f"{r.get('t')}|{r.get('coin')}": r for r in (fp.get("rows") or [])}
     s["fp_dec"] = fp.get("decision")
     # 妖幣：每筆放量訊號（幣＋放量日）→ 狀態與各目標結果；回填（上線前）的不通知
-    s["yao"] = {f"{x.get('inst')}|{x.get('day')}": x for x in (P.get("yao") or {}).get("sigs") or [] if not x.get("backfill")}
+    s["yao"] = {f"{x.get('inst')}|{x.get('day')}": x for x in (P.get("yao") or {}).get("sigs") or [] if not x.get("backfill") and x.get("ok")}   # v2：只推有長盤整的
     # 🔥：同一個幣、同一個方向，兩個以上來源（對齊網頁 focusMap 的來源定義）
     src = {}
     def add(c, d, n): src.setdefault((c, d), set()).add(n)
@@ -195,14 +195,14 @@ def _events(a, b):
         E.append(("fp", "🚨 翻倉判定：" + b["fp_dec"], "到儀表板「翻倉」分頁看明細"))
     for k, x in b.get("yao", {}).items():
         o = (a.get("yao") or {}).get(k); c = x.get("coin")
+        tp = (x.get("tps") or [None])[0]
         if not o:
-            E.append(("yao", f"妖幣：{c} 日線放量", f"回調 {x.get('dd')}%｜上市 {x.get('age')} 天｜等回踩到 {x.get('e'):.6g}｜停損 {x.get('sl'):.6g}"
-                      if x.get("e") and x.get("sl") else "")); continue
-        if o.get("state") != "已回踩" and x.get("state") == "已回踩":
-            E.append(("yao", f"妖幣：{c} 回踩到進場價", f"進 {x.get('e'):.6g}｜停損 {x.get('sl'):.6g}" if x.get("e") and x.get("sl") else ""))
-        for tg, res in (x.get("res") or {}).items():
-            if res != "持倉中" and (o.get("res") or {}).get(tg) != res:
-                E.append(("yao", f"妖幣：{c} 目標{tg}【{res}】", ""))
+            E.append(("yao", f"妖幣：{c} 日線放量（盤整 {x.get('box_d')} 天）", f"限價掛 {x.get('e'):.6g}｜停損 {x.get('sl'):.6g}｜目標 1R {tp:.6g}"
+                      if x.get("e") and x.get("sl") and tp else "")); continue
+        if o.get("state") == "等回踩" and x.get("state") in ("持倉中", "贏", "輸"):
+            E.append(("yao", f"妖幣：{c} 限價成交", f"進 {x.get('e'):.6g}｜停損 {x.get('sl'):.6g}｜目標 {tp:.6g}" if x.get("e") and x.get("sl") and tp else ""))
+        if o.get("state") != x.get("state") and x.get("state") in ("贏", "輸"):
+            E.append(("yao", f"妖幣：{c}【{x.get('state')}】", f"{x.get('R'):+.2f}R" if x.get("R") is not None else ""))
     for k, v in b["fire"].items():
         if k not in a["fire"]:
             c, d = k.split("|"); E.append(("mkt", f"🔥 {c} {'偏多' if d == 'bull' else '偏空'}", "來源：" + "、".join(v)))

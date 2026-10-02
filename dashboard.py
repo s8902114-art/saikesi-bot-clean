@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261002yao2"
+VER = "20261003yao3"
 
 
 def _clean(v):
@@ -1308,7 +1308,7 @@ function draw(){
 // ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
 //   每支手機各自記住哪幾頁要通知（存伺服器，redeploy 不掉；本機也存一份給畫面用）。
 const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
-const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', yao:'新的放量訊號、回踩到進場價、到目標或停損', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
+const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
   anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
   diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
 let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
@@ -1897,53 +1897,57 @@ function viewDhx(){
 // ★妖幣觀察清單（2026-10-02，Barry 10-01 直播「打妖幣的眉角」）：只顯示 yaobi 已算好的值（D.yao），不打 API、不下單。
 //   用戶：「這什麼啊 密密麻麻的」→ 版面只留「現在能下的」小卡，其他（規則／全部訊號／觀察清單）收進折疊。
 function yaoDay(ms){ if(!ms) return '—'; const d=new Date(ms), p=n=>String(n).padStart(2,'0'); return p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate()); }
-const YRES = {'到價':['✅ 到','up'], '停損':['❌ 停損','down'], '保本':['➖ 保本','dim'], '持倉中':['⏳','']};
+const YST = {'贏':['✅ 贏','up'], '輸':['❌ 輸','down'], '持倉中':['⏳ 持倉中',''], '等回踩':['⏳ 等回踩',''],
+  '沒回踩・失效':['沒回踩・失效','dim'], '作廢（先破低）':['先破低・作廢','dim'], '沒長盤整・不追':['沒長盤整','dim'], '1H 抓不到':['⚠ 1H 抓不到','down']};
+function yaoR(v){ return v==null ? '' : ' <span class="'+cls(v)+'">'+(v>=0?'+':'')+f(v,2)+'R</span>'; }
+function yaoStat(t, lab){
+  if(!t || !t.n) return '<div class="sub">'+lab+'：還沒有結案的單'+(t&&t.open ? '（進行中 '+t.open+'）' : '')+'</div>';
+  return '<div class="sub">'+lab+'：結案 <b>'+t.n+'</b> 筆・贏 '+t.win+'・勝率 '+f(t.win/t.n*100,0)+'%・每筆 <b class="'+cls(t.avgR)+'">'+(t.avgR>=0?'+':'')+f(t.avgR,3)+'R</b>'
+    + '・要穿過0.1%才成交 '+(t.avgR1==null?'—':(t.avgR1>=0?'+':'')+f(t.avgR1,3)+'R')+(t.open ? '・進行中 '+t.open : '')+'</div>';
+}
 function viewYao(){
   const p = D.yao || {};
   if(!p.ok) return '<div class="card"><h2>妖幣</h2><div class="empty">妖幣觀察沒有資料（'+(p.err||'未知')+'）</div></div>';
-  const rule = p.rule || {}, wh = p.whale || {}, sigs = p.sigs || [], watch = p.watch || [];
-  // 每個幣只留最新一筆放量訊號（同一個幣連續幾天放量很常見）
-  const seen = {}, latest = [];
-  for(const s of sigs){ if(!seen[s.coin]){ seen[s.coin]=1; latest.push(s); } }
-  // 「現在能下」＝等回踩中，或 3 天內才回踩、三個目標都還沒出結果、現價離進場價 ±10% 內
+  const rule = p.rule || {}, wh = p.whale || {}, sigs = p.sigs || [], watch = p.watch || [], st = p.stats || {};
   const nowMs = (D.now||0)*1000;
-  const live = latest.filter(s => s.state==='等回踩' || (s.state==='已回踩' && s.fill_day && nowMs - s.fill_day <= 3*86400000
-    && Object.values(s.res||{}).every(x=>x==='持倉中') && s.last && s.e && Math.abs(s.last/s.e-1) <= 0.10));
-  let h = '<div class="card"><h2>妖幣<span>只列出來給你判斷・不下單'+(p.last_run ? '・'+ago(p.last_run)+'前更新' : '')+'</span></h2>';
+  // 「現在能下」＝有長盤整、而且還在等回踩（限價掛著）；或 3 天內剛成交、還在持倉中
+  const live = sigs.filter(s => s.ok && (s.state==='等回踩' || (s.state==='持倉中' && s.fill_ts && nowMs - s.fill_ts <= 3*86400000)));
+  let h = '<div class="card"><h2>妖幣<span>只列出來・不下單・影子單記錄'+(p.last_run ? '・'+ago(p.last_run)+'前更新' : '')+'</span></h2>';
   if(p.err) h += '<div class="sub">⚠ '+p.err+'</div>';
   if(!live.length){
-    h += '<div class="fpbig dim">目前沒有可以下的</div>';
+    h += '<div class="fpbig dim">目前沒有可以掛的單</div>';
   } else {
     for(const s of live){
-      const gap = (s.last && s.e) ? (s.last/s.e-1)*100 : null, tp = s.tps || [];
+      const gap = (s.last && s.e) ? (s.last/s.e-1)*100 : null, tp = (s.tps||[])[0];
       h += '<div class="fpsum">'
         + `<a class="cl" onclick="openCard('${s.inst}')"><b>${s.coin}</b></a>` + (wh[s.inst] ? ' 🐋' : '')
-        + '　' + (s.state==='等回踩' ? '⏳ 等回踩到 <b>'+pf(s.e)+'</b>' : '✅ 已回踩（'+yaoDay(s.fill_day)+'），進場價 <b>'+pf(s.e)+'</b>')
+        + '　' + (s.state==='等回踩' ? '⏳ 限價掛 <b>'+pf(s.e)+'</b>' : '✅ 已成交 '+yaoDay(s.fill_ts)+'，進場 <b>'+pf(s.e)+'</b>')
         + '　現價 '+pf(s.last)+(gap==null ? '' : ' <span class="'+cls(gap)+'">'+(gap>=0?'+':'')+f(gap,1)+'%</span>')
-        + '<br>停損 <b>'+pf(s.sl)+'</b> <span class="dim">−'+f(s.sld,0)+'%</span>'
-        + '　目標 +30% '+pf(tp[0])+'・+50% '+pf(tp[1])+'・+100% '+pf(tp[2])
-        + '<br><span class="dim">'+yaoDay(s.day)+' 放量 ×'+f(s.vr,1)+'・從高點跌 '+f(s.dd,0)+'%・上市 '+f(s.age,0)+' 天</span></div>';
+        + '<br>停損 <b>'+pf(s.sl)+'</b> <span class="dim">−'+f(s.sld,1)+'%</span>　目標 1R <b>'+pf(tp)+'</b>'
+        + '<br><span class="dim">'+yaoDay(s.day)+' 放量 ×'+f(s.vr,1)+'・盤整 '+s.box_d+' 天・從高點跌 '+f(s.dd,0)+'%・上市 '+f(s.age,0)+' 天</span></div>';
     }
   }
+  h += '<div class="sech">影子單戰績（照規則掛單的話，只算有長盤整的）</div>' + yaoStat(st.live, '上線後') + yaoStat(st.backfill, '近 60 天回填');
   h += '<details><summary class="sech">規則</summary><div class="note">'
-    + 'Barry 原話：從最高點跌 <b>'+(rule.min_dd||80)+'%</b> 以上的<b>新幣</b>（上市 ≤'+(rule.max_age||400)+' 天），'
-    + '巨鯨雷達跳＝放觀察清單；<b>日線</b>出現量明顯變大的綠K，之後<b>等回踩再進</b>。'
-    + '<br>我補的：量 &gt; 前 '+(rule.vol_lb||10)+' 根日K最大量；進場＝放量K實體中點（'+(rule.fill_days||5)+' 天沒回踩就作廢）；'
-    + '停損＝高點後最低點 ×'+(rule.sl_mult||0.97)+'；漲到 +1R 停損移進場價。'
-    + '<br>回測：每筆平均 +0.13~0.15R，但<b>押 50% 一次一筆模擬約 80% 最後虧錢</b> → 這是觀察清單、不是翻倉訊號。</div></details>';
-  const cols = ['幣','放量日','進場','停損','+30%','+50%','+100%','狀態'];
+    + 'Barry 原話：從最高點跌 <b>'+(rule.min_dd||80)+'%</b> 以上的<b>新幣</b>（上市 ≤'+(rule.max_age||400)+' 天），<b>日線</b>出現量明顯變大的綠K，之後<b>等回踩再進</b>。'
+    + '<br>回測定案：量 &gt; 前 '+(rule.vol_lb||10)+' 根日K最大量；放量前要有 ≥'+(rule.box_days||30)+' 天<b>長盤整</b>（沒有的三段回測都是負的）；'
+    + '限價掛放量K實體中點，'+(rule.fill_days||5)+' 天沒成交或先跌破放量K低點就作廢；停損＝放量K低點；目標＝1R。'
+    + '<br>回測（含補回的下架幣、扣費）：每筆 2020~21 +0.14R、2022~24 +0.09R、2025~26 +0.08R；'
+    + '<b>要穿過中點 0.1% 才成交時 2025~26 只剩 +0.04R</b> → 優勢很薄，不是翻倉訊號。</div></details>';
+  const cols = ['幣','放量日','盤整','進場','停損','狀態'];
   const row = s => {
-    const R = s.res || {};
-    const tgt = (i,k) => R[k] ? {v:i, h:(YRES[R[k]]||[R[k],''])[0], c:(YRES[R[k]]||['',''])[1]} : {v:i, h:'—'};
+    const z = YST[s.state] || [s.state||'—',''];
     return [
       {v:s.coin, h:`<a class="cl" onclick="openCard('${s.inst}')">${s.coin}</a>` + (wh[s.inst] ? ' 🐋' : '')},
-      {v:s.day, h:yaoDay(s.day)}, {v:s.e||0, h:pf(s.e)},
-      {v:s.sld||0, h:pf(s.sl)+' <span class="dim">−'+f(s.sld,0)+'%</span>'},
-      tgt(0,'+30%'), tgt(1,'+50%'), tgt(2,'+100%'),
-      {v:s.state, h:s.state==='等回踩' ? '等回踩' : (s.state==='已回踩' ? '已回踩 '+yaoDay(s.fill_day) : s.state)}];
+      {v:s.day, h:yaoDay(s.day)}, {v:s.box_d||0, h:s.ok ? s.box_d+'天' : '<span class="dim">—</span>'},
+      {v:s.e||0, h:pf(s.e)}, {v:s.sld||0, h:pf(s.sl)+' <span class="dim">−'+f(s.sld,1)+'%</span>'},
+      {v:s.state||'', h:'<span class="'+z[1]+'">'+z[0]+'</span>'+yaoR(s.R)}];
   };
-  h += '<details><summary class="sech">近 60 天全部放量訊號 <span class="dim">'+sigs.length+'</span></summary>'
-    + (sigs.length ? table('yao2', cols, sigs, row) : '<div class="empty">近 60 天沒有放量訊號</div>') + '</details>';
+  const okS = sigs.filter(s => s.ok), noS = sigs.filter(s => !s.ok);
+  h += '<details><summary class="sech">近 60 天有長盤整的放量訊號 <span class="dim">'+okS.length+'</span></summary>'
+    + (okS.length ? table('yao2', cols, okS, row) : '<div class="empty">沒有</div>') + '</details>';
+  h += '<details><summary class="sech">沒長盤整的放量訊號（不追，只列參考）<span class="dim">'+noS.length+'</span></summary>'
+    + (noS.length ? table('yao4', cols, noS, row) : '<div class="empty">沒有</div>') + '</details>';
   h += '<details><summary class="sech">觀察清單（新幣、已跌 ≥'+(rule.min_dd||80)+'%、還沒放量）<span class="dim">'+watch.length+'</span></summary>'
     + (watch.length ? table('yao3', ['幣','從高點跌','上市','低點以來','現價'], watch, w => [
       {v:w.coin, h:`<a class="cl" onclick="openCard('${w.inst}')">${w.coin}</a>` + (wh[w.inst] ? ' 🐋' : '')},
