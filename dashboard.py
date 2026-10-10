@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261003yao3"
+VER = "20261011tx1"
 
 
 def _clean(v):
@@ -764,6 +764,8 @@ def collect(G, win_h=1.0):
         "fp": _fp(G),
         # ★妖幣觀察清單（2026-10-02，Barry 10-01 直播）：只讀 yaobi 已算好的值＋巨鯨事件標記，不打 API
         "yao": _yao(G),
+        # ★麥門台指（2026-10-11）：只讀 mmtx 已算好的值（期交所 1 分 K → 階梯／籌碼異常星／彩色K），不打 API
+        "tx": _tx(G),
     }
 
 
@@ -778,6 +780,14 @@ def _yao(G):
                     wh[ev.get("inst")] = ev.get("dir")
             p["whale"] = wh
         return p
+    except Exception as e:
+        return {"ok": False, "err": type(e).__name__}
+
+
+def _tx(G):
+    try:
+        m = G.get("mmtx")
+        return m.dash_payload() if m else {"ok": False, "err": "模組未載入"}
     except Exception as e:
         return {"ok": False, "err": type(e).__name__}
 
@@ -1147,7 +1157,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['fp','翻倉'],['yao','妖幣'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['tx','台指'],['fp','翻倉'],['yao','妖幣'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -1290,6 +1300,7 @@ function draw(){
   if(TAB==='dhx') body = viewDhx();
   if(TAB==='fp') body = viewFp();
   if(TAB==='yao') body = viewYao();
+  if(TAB==='tx') body = viewTx();
   if(TAB==='anom') body = viewAnom();
   if(TAB==='pos') body = viewPos();
   if(TAB==='oi') body = viewOI();
@@ -1308,7 +1319,7 @@ function draw(){
 // ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
 //   每支手機各自記住哪幾頁要通知（存伺服器，redeploy 不掉；本機也存一份給畫面用）。
 const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
-const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
+const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', tx:'彩色K換色（15 分 K 收盤確認）、出現籌碼異常星', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
   anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
   diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
 let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
@@ -1892,6 +1903,85 @@ function viewDhx(){
     + '選幣＝24h 成交額前 100（官方 <code>volume_top100</code>）。'
     + '「方向」是型態的進場方向，跟 OI 排名的「象限」是不同維度，兩者不同是正常的。'
     + '</details></div>';
+}
+
+// ★麥門台指（2026-10-11）：只顯示 mmtx 已算好的值（D.tx），不打 API、不下單。
+//   bars 每根 = [時間, 開, 高, 低, 收, 量, 顏色(模型), 顏色(公式), 階梯P2, 階梯P1, 星(該15K內最大的5K量,0=無)]
+const TXC = {0:'#6b7280', 1:'#eab208', 2:'#2c8ce3', 3:'#d15d5d'};   // 黑在暗底看不到 → 用深灰；金/藍/紅＝軟體原色
+const TXN = {0:'黑', 1:'金', 2:'藍', 3:'紅'};
+let TXBARS = 96;
+function txBadge(c){ return '<span style="display:inline-block;padding:1px 8px;border-radius:6px;font-weight:700;color:#fff;background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
+function txChart(bars){
+  const n = bars.length; if(!n) return '<div class="empty">沒有K棒</div>';
+  const step = 9, padL = 4, padR = 58, W = padL + n*step + padR, Hp = 260, Hv = 70, gap = 18, H = Hp + gap + Hv + 18;
+  let lo = Infinity, hi = -Infinity, vmax = 1;
+  for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]);
+    if(b[8]!=null){ lo = Math.min(lo, b[8]-12); hi = Math.max(hi, b[8]+12); } }
+  const pad = (hi-lo)*0.04 || 10; lo -= pad; hi += pad;
+  const y = v => Hp - (v-lo)/(hi-lo)*Hp;
+  const yv = v => Hp + gap + Hv - v/vmax*Hv;
+  let g = '';
+  // 階梯（參數二）值±9 淡紫雙線；參數一 虛線
+  for(const [k,dash,col] of [[8,'',"#a1a1e8"],[9,'3,3',"#7c7cc4"]]){
+    let i0 = 0;
+    for(let i=1;i<=n;i++){
+      if(i===n || bars[i][k]!==bars[i0][k]){
+        const v = bars[i0][k];
+        if(v!=null){
+          const x0 = padL + i0*step, x1 = padL + i*step - 1;
+          if(k===8){ g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v+9)+'" y2="'+y(v+9)+'" stroke="'+col+'" stroke-width="1.2"/>'
+                        + '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v-9)+'" y2="'+y(v-9)+'" stroke="'+col+'" stroke-width="1.2"/>'; }
+          else { g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v)+'" y2="'+y(v)+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="'+dash+'"/>'; }
+        }
+        i0 = i;
+      }
+    }
+  }
+  // K棒＋量＋星
+  for(let i=0;i<n;i++){
+    const b = bars[i], x = padL + i*step + step/2, col = TXC[b[6]]||'#888';
+    const yo = y(b[1]), yc = y(b[4]), top = Math.min(yo,yc), hgt = Math.max(1, Math.abs(yo-yc));
+    g += '<line x1="'+x+'" x2="'+x+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'" stroke-width="1"/>';
+    g += '<rect x="'+(x-3)+'" y="'+top+'" width="6" height="'+hgt+'" fill="'+(b[4]>=b[1] ? col : col)+'" fill-opacity="'+(b[4]>=b[1] ? '1' : '0.55')+'" stroke="'+col+'"/>';
+    const vy = yv(b[5]);
+    g += '<rect x="'+(x-3)+'" y="'+vy+'" width="6" height="'+(Hp+gap+Hv-vy)+'" fill="'+col+'" fill-opacity="0.45"/>';
+    if(b[10]>0) g += '<text x="'+x+'" y="'+(vy-3)+'" text-anchor="middle" font-size="11" fill="#ffd166">★</text>';
+    if(i%16===0) g += '<text x="'+x+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="#8b97ab">'+b[0]+'</text>';
+  }
+  // 價格刻度
+  for(let k=0;k<=4;k++){ const v = lo + (hi-lo)*k/4;
+    g += '<text x="'+(W-padR+4)+'" y="'+(y(v)+3)+'" font-size="9" fill="#8b97ab">'+Math.round(v)+'</text>'; }
+  const last = bars[n-1];
+  g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+y(last[4])+'" y2="'+y(last[4])+'" stroke="#e6edf7" stroke-width="0.5" stroke-dasharray="2,3"/>'
+     + '<text x="'+(W-padR+4)+'" y="'+(y(last[4])+3)+'" font-size="10" font-weight="700" fill="#e6edf7">'+Math.round(last[4])+'</text>';
+  // 容器 dir=rtl → 捲軸一打開就停在最右邊（最新那根），不用 JS；svg 本身再設回 ltr
+  return '<div dir="rtl" style="overflow-x:auto"><svg dir="ltr" viewBox="0 0 '+W+' '+H+'" width="'+Math.max(W, 320)+'" height="'+H+'" style="max-width:none;display:block">'+g+'</svg></div>';
+}
+function viewTx(){
+  const p = D.tx || {};
+  if(!p.ok) return '<div class="card"><h2>台指・麥門指標</h2><div class="empty">沒有資料（'+(p.err||'未知')+'）</div></div>';
+  const all = p.bars || [], bars = all.slice(-TXBARS), last = all[all.length-1] || [];
+  let h = '<div class="card"><h2>台指・麥門指標<span>期交所 1 分 K・最後一分鐘 '+(p.last_minute||'—')+'・'+(p.age!=null ? p.age+' 秒前算' : '')+'</span></h2>';
+  if(p.stale || p.fetch_err) h += '<div class="warn">⚠ '+(p.stale ? '盤中超過 5 分鐘沒抓到新資料，下面是舊的。' : '')+(p.fetch_err||'')+'</div>';
+  const cl = p.live_bar ? (all[all.length-2] || []) : last;   // 已收盤的最後一根（盤中那根顏色還會變）
+  h += '<div class="fpsum">'+(p.live_bar ? '盤中這根 '+txBadge(last[6])+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(cl[6]) : '現在 '+txBadge(last[6]))
+     + (p.model ? '' : ' <span class="warn">（模型檔沒讀到，用公式版）</span>')
+     + (p.last_change ? '　最近換色 <b>'+p.last_change[0]+'</b> '+p.last_change[1]+' → '+p.last_change[2] : '')
+     + '<br>收盤 <b>'+pf(last[4])+'</b>　階梯(參數二) <b>'+pf(p.ladder2)+'</b> ±'+(p.half||9)+'　階梯(參數一) <b>'+pf(p.ladder1)+'</b>'
+     + (last[7]!==last[6] ? '<br><span class="dim">公式版這根是 '+TXN[last[7]]+'（模型與公式不同時以模型為準）</span>' : '') + '</div>';
+  h += '<div style="margin:6px 0">' + [48,96,240].map(k => '<span class="wb '+(TXBARS===k?'on':'')+'" onclick="TXBARS='+k+';draw()">'+k+' 根</span>').join(' ') + '</div>';
+  h += txChart(bars);
+  const st = all.filter(b => b[10]>0).slice(-8).reverse();
+  h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(b => '<div class="sub">★ '+b[0]+'　5 分 K 量 <b>'+b[10]+'</b> 口　收 '+pf(b[4])+'</div>').join('') : '<div class="empty">最近 '+all.length+' 根內沒有</div>');
+  h += '<details><summary class="sech">規則與準確度</summary><div class="note">'
+    + '<b>彩色K（追價氛圍，15 分 K）</b>：黑&lt;金&lt;藍&lt;紅，每根最多動一格。紅→藍＝收盤跌破 EMA55；黑→金＝收盤站上 SMA35（這兩條吻合 99~100%）。'
+    + '金↔藍、進紅、進黑由均線特徵模型判斷；對影片畫面 11,020 根標註（2023-12~2024-09）做四段時間交叉驗證 <b>95%</b>（公式版約 92.6%）；2025 以後沒有標註可以對。'
+    + '<br><b>階梯</b>：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；軟體畫值 ±9 點（實線＝參數二、虛線＝參數一）。'
+    + '<br><b>籌碼異常星</b>：加權開盤時間（09:00~13:25 開始）內某根 5 分 K 量 ≥3000 口；15 分 K 只要包含一根就標星。'
+    + '<br>資料：期交所公開 1 分 K（對麥門資料量 100%、高 100%、收 99.7% 相同）。加權的彩色K公式對不上（76%），沒有放。'
+    + '</div></details>';
+  h += '<div class="sub">合約 '+Object.values(p.sym||{}).join(' / ')+'・1 分 K '+(p.n1m||0)+' 根</div></div>';
+  return h;
 }
 
 // ★妖幣觀察清單（2026-10-02，Barry 10-01 直播「打妖幣的眉角」）：只顯示 yaobi 已算好的值（D.yao），不打 API、不下單。

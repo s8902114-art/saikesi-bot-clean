@@ -11,6 +11,7 @@ import os, json, time, threading, base64, traceback
 
 TOPICS = {  # 分頁代號 → (名稱, 什麼時候通知)
     "fp": ("翻倉", "有可以下的單、出結果、過 +2.2／−2.2"),
+    "tx": ("台指", "彩色K換色（15 分 K 收盤確認）、出現籌碼異常星"),
     "yao": ("妖幣", "有長盤整的新放量訊號、限價成交、贏或輸"),
     "mkt": ("視覺篩選器", "某個幣剛出現 🔥（兩個以上來源同方向）"),
     "whale": ("巨鯨雷達", "新的巨鯨訊號"),
@@ -142,6 +143,14 @@ def _snap(P):
     s["fp"] = {f"{r.get('t')}|{r.get('coin')}": r for r in (fp.get("rows") or [])}
     s["fp_dec"] = fp.get("decision")
     # 妖幣：每筆放量訊號（幣＋放量日）→ 狀態與各目標結果；回填（上線前）的不通知
+    # 台指：只看「已收盤」的 15 分 K 換色（盤中那根會閃）；星 = 那根 15 分 K 時間
+    tx = P.get("tx") or {}
+    if tx.get("ok") and tx.get("bars"):
+        rows = tx["bars"][:-1] if tx.get("live_bar") else tx["bars"]
+        s["tx"] = {"c": (rows[-1][0], rows[-1][6]) if rows else None, "px": rows[-1][4] if rows else None,
+                   "lad": tx.get("ladder2"), "stars": {r[0]: r[10] for r in tx["bars"] if r[10]}}
+    else:
+        s["tx"] = None
     s["yao"] = {f"{x.get('inst')}|{x.get('day')}": x for x in (P.get("yao") or {}).get("sigs") or [] if not x.get("backfill") and x.get("ok")}   # v2：只推有長盤整的
     # 🔥：同一個幣、同一個方向，兩個以上來源（對齊網頁 focusMap 的來源定義）
     src = {}
@@ -193,6 +202,14 @@ def _events(a, b):
             E.append(("fp", f"翻倉：{r.get('coin')} 官方做多 不進", str(r.get("act"))))
     if b["fp_dec"] != a["fp_dec"] and b["fp_dec"] and b["fp_dec"] != "繼續記錄":
         E.append(("fp", "🚨 翻倉判定：" + b["fp_dec"], "到儀表板「翻倉」分頁看明細"))
+    ta, tb = a.get("tx"), b.get("tx")
+    if ta and tb:       # 兩輪都有資料才比（剛啟動/抓不到時不比，免得把舊星全部當新的推）
+        if ta["c"] and tb["c"] and tb["c"][0] != ta["c"][0] and tb["c"][1] != ta["c"][1]:
+            nm = {0: "黑", 1: "金", 2: "藍", 3: "紅"}
+            E.append(("tx", f"台指：彩色K {nm.get(ta['c'][1])}→{nm.get(tb['c'][1])}", f"{tb['c'][0]} 收 {tb['px']:.0f}｜階梯 {tb['lad'] or '—'}"))
+        for t, v in tb["stars"].items():
+            if t not in ta["stars"]:
+                E.append(("tx", "台指：★籌碼異常", f"{t} 那根 15 分 K｜5 分 K 量 {int(v)} 口"))
     for k, x in b.get("yao", {}).items():
         o = (a.get("yao") or {}).get(k); c = x.get("coin")
         tp = (x.get("tps") or [None])[0]
