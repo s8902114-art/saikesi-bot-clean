@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx3"
+VER = "20261011tx4"
 
 
 def _clean(v):
@@ -1947,6 +1947,13 @@ const TXLIB = 'https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightw
 let TXS = 'TX', TXTF = '15', TXCH = null, TXDATA = {}, TXLIBST = '', TXERR = '', TXBUSY = {};
 try{ const v = JSON.parse(localStorage.getItem('txsel')||'{}'); if(v.s==='TX'||v.s==='TSE') TXS = v.s; if(TXTFN[v.tf]) TXTF = v.tf; }catch(e){}
 function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} draw(); }
+// 階梯參數：麥門一次只畫一個（設定裡選）→ 按鈕切換，預設參數一（用戶 10-11）。K 棒列裡 參數二＝b[7]、參數一＝b[8]
+let TXLAD = '1';
+try{ const v = localStorage.getItem('txlad'); if(v === '1' || v === '2') TXLAD = v; }catch(e){}
+function txLadIdx(){ return TXLAD === '2' ? 7 : 8; }
+function txLadSel(k){ TXLAD = k; try{ localStorage.setItem('txlad', k); }catch(e){}
+  if(TXCH && TXDATA[TXCH.key]){ try{ txLadApply(); txLegend(null); }catch(e){} }
+  draw(); }
 function txBadge(c){ return '<span class="txb" style="background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
 function txAlpha(hex, a){ const n = parseInt(String(hex).slice(1), 16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
 function txP2(n){ return String(n).padStart(2, '0'); }
@@ -1966,19 +1973,17 @@ function txChg(v, prec){ return '<span style="color:'+(v>0?'#ef4444':(v<0?'#22c5
 function txCandle(b){ const c = TXC[b[6]] || '#888888', up = b[4] >= b[1];
   return {time:b[0], open:b[1], high:b[2], low:b[3], close:b[4], color: up ? c : txAlpha(c, 0.4), borderColor:c, wickColor:c}; }
 function txVol(b){ return {time:b[0], value:b[5], color: txAlpha(TXC[b[6]] || '#888888', 0.45)}; }
-// 階梯分段：同一組 (參數二, 參數一) 連續的 K 棒＝一段；每段最後一個點 color 透明 → 連到下一段的那一小段看不見
-//   回傳 3 條的資料（參數二+9、參數二−9、參數一），每條每根都有點（沒值給空白點）
+// 階梯分段：選到的參數（idx）同一個值連續的 K 棒＝一段；每段最後一個點 color 透明 → 連到下一段的那一小段看不見
+//   回傳 2 條的資料（值+9、值−9＝麥門的淡紫雙線），每條每根都有點（沒值給空白點）
 const TXGAP = 'rgba(0,0,0,0)';
-function txLadSeg(bars, half){
-  const out = [[], [], []]; let prev = null;
+function txLadSeg(bars, half, idx){
+  const out = [[], []]; let prev = null;
   for(const b of bars){
-    const t = b[0], v = b[7], p1 = b[8];
+    const t = b[0], v = b[idx];
     if(v === null || v === undefined){ for(const s of out) s.push({time:t}); prev = null; continue; }
-    const key = v + '|' + p1;
-    if(prev !== null && key !== prev) for(const s of out){ const q = s[s.length - 1]; if(q && q.value !== undefined) q.color = TXGAP; }
-    prev = key;
-    const vals = [v + half, v - half, (p1 === null || p1 === undefined) ? null : p1];
-    for(let j = 0; j < 3; j++) out[j].push(vals[j] === null ? {time:t} : {time:t, value:vals[j]});
+    if(prev !== null && v !== prev) for(const s of out){ const q = s[s.length - 1]; if(q && q.value !== undefined) q.color = TXGAP; }
+    prev = v;
+    out[0].push({time:t, value:v + half}); out[1].push({time:t, value:v - half});
   }
   return out;
 }
@@ -2010,12 +2015,11 @@ function txCreate(){
   const vs = ch.addHistogramSeries({priceScaleId:'vol', priceFormat:{type:'volume'}, lastValueVisible:false, priceLineVisible:false});
   ch.priceScale('vol').applyOptions({scaleMargins:{top:0.82, bottom:0}});
   cs.priceScale().applyOptions({scaleMargins:{top:0.08, bottom:0.22}});
-  // 階梯 3 條：參數二+9、參數二−9、參數一虛線。換階處要斷開（用戶：「斷點突然又連起來了」）：
+  // 階梯 2 條：選到的參數 ±9。換階處要斷開（用戶：「斷點突然又連起來了」）：
   //   這個程式庫的線會「跨過空白點直接連過去」（實測畫出斜線），所以改用逐點顏色——
   //   「每段最後一個點」塗透明＝從它連到下一段的那一小段看不見（實測：線段顏色取「起點」那個點的 color）。
   const lo = {lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
-  const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)),
-               ch.addLineSeries(Object.assign({color:'#7c7cc4', lineStyle:2}, lo))];
+  const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo))];
   TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, key:'', fit:true, hl:0};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
@@ -2032,9 +2036,13 @@ function txApply(){
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  const seg = m.ladder ? txLadSeg(bars, m.half) : null;
-  C.lad.forEach((s, j) => s.setData(seg ? seg[j] : []));
+  txLadApply();
   txFit(); txHiLo(); txSess(); txLegend(null);
+}
+function txLadApply(){
+  const C = TXCH, R = TXDATA[C.key]; if(!R) return;
+  const seg = R.meta.ladder ? txLadSeg(R.bars, R.meta.half, txLadIdx()) : null;
+  C.lad.forEach((s, j) => s.setData(seg ? seg[j] : []));
 }
 // 一開始只顯示最近 120 根（日/週 150 根）。★圖表剛建立時寬度還是 0，這時設範圍會被當成「全部擠進 0 寬」
 //   → 等它有寬度（尺寸變化回呼）再設；stub 環境沒有 clientWidth 就直接設。
@@ -2051,7 +2059,7 @@ function txUpdate(nb){
     if(m.vol) C.vs.update(txVol(b));
   }
   if(m.ladder){     // 段號從頭算才知道單雙 → 整串重分段，只把新來的那幾根推進去（舊的段不會變）
-    const all = TXDATA[C.key].bars, seg = txLadSeg(all, m.half);
+    const all = TXDATA[C.key].bars, seg = txLadSeg(all, m.half, txLadIdx());
     for(let i = all.length - nb.length; i < all.length; i++) C.lad.forEach((s, j) => s.update(seg[j][i]));
   }
   txHiLo(); txSess(); txLegend(null);
@@ -2102,7 +2110,7 @@ function txLegend(t){
   const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(b[6])
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
-    + (m.vol ? ' 量 '+b[5] : '') + (m.ladder && b[7] !== null && b[7] !== undefined ? ' 階梯 '+b[7] : '') + (b[9] > 0 ? ' ★'+b[9] : '');
+    + (m.vol ? ' 量 '+b[5] : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+b[txLadIdx()] : '') + (b[9] > 0 ? ' ★'+b[9] : '');
 }
 async function txFetch(){
   const key = TXS+'|'+TXTF; if(TXBUSY[key]) return; TXBUSY[key] = 1;
@@ -2141,20 +2149,20 @@ function txSvg(){
   const step = 9, padL = 4, padR = 58, W = padL + n*step + padR, Hp = 260, Hv = m.vol ? 70 : 0, gap = 18, H = Hp + gap + Hv + 18;
   let lo = Infinity, hi = -Infinity, vmax = 1;
   for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]);
-    if(m.ladder && b[7] !== null && b[7] !== undefined){ lo = Math.min(lo, b[7] - 12); hi = Math.max(hi, b[7] + 12); } }
+    const lv = b[txLadIdx()]; if(m.ladder && lv !== null && lv !== undefined){ lo = Math.min(lo, lv - 12); hi = Math.max(hi, lv + 12); } }
   const pad = (hi - lo)*0.04 || 10; lo -= pad; hi += pad;
   const y = v => Hp - (v - lo)/(hi - lo)*Hp, yv = v => Hp + gap + Hv - v/vmax*Hv;
   let g = '';
   // 階梯：每一段各畫一條平線（段與段之間不連）
-  if(m.ladder) for(const [k, dash, col] of [[7, '', '#a1a1e8'], [8, '3,3', '#7c7cc4']]){
+  if(m.ladder) for(const k of [txLadIdx()]){
     let i0 = 0;
     for(let i = 1; i <= n; i++){
       if(i === n || bars[i][k] !== bars[i0][k]){
         const v = bars[i0][k];
         if(v !== null && v !== undefined){
           const x0 = padL + i0*step, x1 = padL + i*step - 1;
-          for(const off of (k === 7 ? [m.half, -m.half] : [0]))
-            g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v + off)+'" y2="'+y(v + off)+'" stroke="'+col+'" stroke-width="1.2"'+(dash ? ' stroke-dasharray="'+dash+'"' : '')+'/>';
+          for(const off of [m.half, -m.half])
+            g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v + off)+'" y2="'+y(v + off)+'" stroke="#a1a1e8" stroke-width="1.2"/>';
         }
         i0 = i;
       }
@@ -2181,7 +2189,9 @@ function viewTx(){
       const q = P[k] || {};
       return `<span class="wb ${TXS===k?'on':''}" onclick="txSel('${k}')">${n} ${q.ok ? txBadge(q.c) : ''}</span>`; }).join(' ')
     + '<span class="txsp"></span>'
-    + Object.keys(TXTFN).map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ') + '</div>';
+    + Object.keys(TXTFN).map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
+    + (TXS === 'TX' && txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
+        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '') + '</div>';
   if(!p.ok) h += '<div class="empty">'+(p.err || '沒有資料')+'</div>';
   else {
     h += '<div class="fpsum">' + (p.live_bar ? '15 分盤中這根 '+txBadge(p.c)+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(p.closed[1])
@@ -2189,7 +2199,8 @@ function viewTx(){
        + (p.model ? '' : ' <span class="warn">（模型檔沒讀到，用公式版）</span>')
        + (p.last_change ? '　最近換色 <b>'+p.last_change[0]+'</b> '+p.last_change[1]+' → '+p.last_change[2] : '')
        + '<br>最新 <b>'+txNum(p.last, TXS==='TX' ? 0 : 2)+'</b>'
-       + (TXS==='TX' ? '　階梯(參數二) <b>'+txNum(p.ladder2, 1)+'</b> ±'+(p.half || 9)+'　階梯(參數一) <b>'+txNum(p.ladder1, 1)+'</b>' : '')
+       + (TXS==='TX' ? (TXLAD === '2' ? '　階梯(參數二) <b>'+txNum(p.ladder2, 1)+'</b> ±'+(p.half || 9)+' <span class="dim">參數一 '+txNum(p.ladder1, 1)+'</span>'
+                                       : '　階梯(參數一) <b>'+txNum(p.ladder1, 1)+'</b> ±'+(p.half || 9)+' <span class="dim">參數二 '+txNum(p.ladder2, 1)+'</span>') : '')
        + '　<span class="dim">最後一分鐘 '+(p.last_minute || '—')+'</span>'
        + (p.color_formula !== p.color ? '<br><span class="dim">公式版這根是 '+p.color_formula+'（模型與公式不同時以模型為準）</span>' : '') + '</div>';
   }
@@ -2205,7 +2216,7 @@ function viewTx(){
     + '<br>・<b>台指</b> 15 分：影片畫面 11,020 根標註（2023-12~2024-09）四段時間交叉驗證 <b>95%</b>（公式版 92.6%）。'
     + '<br>・<b>加權</b> 15 分：台指顏色直接搬只對 35%（兩邊各算各的）；台指公式套加權 86%；台指＋加權標註合併訓練 <b>約 88%</b>（加權標註只有 1,128 根、2023-12~2024-06，最弱那段 72%）。'
     + '<br>・1H／日／週：同一個模型套上去，<b>沒有驗證</b>；週K只有 2023-12 起約 150 根，長均線算不出來，所以整條灰色。'
-    + '<br><b>階梯</b>（只有台指）：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；畫值 ±9 點（實線＝參數二、虛線＝參數一）。'
+    + '<br><b>階梯</b>（只有台指）：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；畫值 ±9 點的雙線；跟麥門一樣一次只畫一個，按鈕切換（預設參數一）。'
     + '<br><b>籌碼異常星</b>（只有台指 15 分）：加權開盤時間（09:00~13:25 開始）內某根 5 分 K 量 ≥3000 口。'
     + '<br><b>K 棒</b>：台指日K＝前一晚夜盤＋當天日盤（期交所交易日；量跟期交所公布的當日總量一致），1H 日盤從 08:45 起算；加權 1H 從 09:00 起算，13:00 那根含收盤。虛線＝換盤（夜盤／日盤開始）。'
     + '<br>資料：期交所公開 1 分 K（台指對麥門資料量 100%、收 99.7% 相同；加權 267/267 根完全相同、沒有量）。近月合約＝最早到期（結算日日盤還是舊月）。'

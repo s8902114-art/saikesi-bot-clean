@@ -150,7 +150,7 @@ def _snap(P):
         for k in ("TX", "TSE"):
             q = tx.get(k) or {}
             if q.get("ok") and q.get("closed"):
-                z[k] = {"c": tuple(q["closed"]), "lad": q.get("ladder2")}
+                z[k] = {"c": tuple(q["closed"]), "lad1": q.get("ladder1"), "lad2": q.get("ladder2")}
         z["stars"] = {t: v for t, v in ((tx.get("TX") or {}).get("stars") or [])}
         s["tx"] = z
     else:
@@ -213,7 +213,7 @@ def _events(a, b):
             x, y = ta.get(k), tb.get(k)
             if x and y and y["c"][0] != x["c"][0] and y["c"][1] != x["c"][1]:
                 E.append(("tx", f"{lab}：彩色K {nm.get(x['c'][1])}→{nm.get(y['c'][1])}",
-                          f"{y['c'][0]} 那根 15 分 K 收盤" + (f"｜階梯 {y['lad']}" if y.get("lad") else "")))
+                          f"{y['c'][0]} 那根 15 分 K 收盤" + (f"｜階梯 參數一 {y['lad1']}／參數二 {y['lad2']}" if y.get("lad1") else "")))
         for t, v in tb["stars"].items():
             if t not in ta["stars"]:
                 E.append(("tx", "台指：★籌碼異常", f"{t} 那根 15 分 K｜5 分 K 量 {int(v)} 口"))
