@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx6"
+VER = "20261011tx7"
 
 
 def _clean(v):
@@ -1761,7 +1761,7 @@ function cardHTML(){
     + `<div class="cq" style="color:${QCLR[qMain]}">${qMain}　<small>${meta[0]}</small></div>`
     + `<div class="sub" style="margin:6px 0 10px">${meta[1]||''}</div>`
     + (TXS === 'C:' + r.inst ? '<div class="txbar">'
-        + Object.keys(TXTFN).map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
+        + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
         + (txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
             `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '')
         + '</div>' + txCSum() + '<div id="txslotc"></div>'
@@ -1954,13 +1954,13 @@ function viewDhx(){
 //   K 棒每根 = [時間秒(台北當UTC), 開, 高, 低, 收, 量, 顏色(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無)]
 const TXC = {'-1':'#4b5563', 0:'#6b7280', 1:'#eab208', 2:'#2c8ce3', 3:'#d15d5d'};   // 黑在暗底看不到 → 深灰
 const TXN = {'-1':'暖機', 0:'黑', 1:'金', 2:'藍', 3:'紅'};
-const TXTFN = {'15':'15分', '60':'1H', 'D':'日', 'W':'週'};
+const TXTFN = {'15':'15分', '60':'1H', '240':'4H', 'D':'日', 'W':'週'};   // 4H 只有幣有（台指/加權伺服器沒算）
 const TXAPI = API.slice(0, -3) + 'txc';
 const TXLIB = 'https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';
 let TXS = 'TX', TXTF = '15', TXCH = null, TXDATA = {}, TXLIBST = '', TXERR = '', TXBUSY = {}, TXLAST = {};
 try{ const v = JSON.parse(localStorage.getItem('txsel')||'{}');
-  if(v.s==='TX'||v.s==='TSE'||(typeof v.s==='string' && v.s.indexOf('C:')===0 && v.s.length < 40)) TXS = v.s; if(TXTFN[v.tf]) TXTF = v.tf; }catch(e){}
-function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; if(!TXSAVE){ try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} } draw(); }
+  if(v.s==='TX'||v.s==='TSE'||(typeof v.s==='string' && v.s.indexOf('C:')===0 && v.s.length < 40)) TXS = v.s; if(TXTFN[v.tf]) TXTF = v.tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; }catch(e){}
+function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; if(!TXSAVE){ try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} } draw(); }
 // 階梯參數：麥門一次只畫一個（設定裡選）→ 按鈕切換，預設參數一（用戶 10-11）。K 棒列裡 參數二＝b[7]、參數一＝b[8]
 let TXLAD = '1';
 try{ const v = localStorage.getItem('txlad'); if(v === '1' || v === '2') TXLAD = v; }catch(e){}
@@ -1980,7 +1980,8 @@ function txTick(t, k){ const d = new Date(t*1000);
   if(k===2) return (d.getUTCMonth()+1)+'/'+d.getUTCDate();
   return txP2(d.getUTCHours())+':'+txP2(d.getUTCMinutes()); }
 function txNum(v, prec){ return (v===null||v===undefined||isNaN(v)) ? '—' : Number(v).toFixed(prec); }
-function txIntra(){ return TXTF==='15' || TXTF==='60'; }
+function txIntra(){ return TXTF==='15' || TXTF==='60' || TXTF==='240'; }
+function txTfs(){ return Object.keys(TXTFN).filter(k => k !== '240' || txIsC(TXS)); }
 // 台股慣例：漲紅跌綠
 function txChg(v, prec){ return '<span style="color:'+(v>0?'#ef4444':(v<0?'#22c55e':'var(--dim)'))+'">'+(v>0?'+':'')+txNum(v, prec)+'</span>'; }
 
@@ -2004,14 +2005,14 @@ function txLadSeg(bars, half, idx){
 
 // ★幣（OKX 永續，2026-10-11）：K 棒由手機直接跟 OKX 公開 API 拿（實測 CORS 有開）→ bot 不多做任何事、不佔 bot 的 API 額度。
 //   彩色K＝台指「公式版」（用戶：照做、先用他的參數）。模型版是拿台指標註訓練的，幣沒有標註可以驗 → 用公式。
-//   階梯＝用 CME 比特幣期貨的交易時段當窗口（週日~週五 17:00~16:00 芝加哥時間，每天 16:00 起休息 1 小時），
+//   階梯＝用 CME 比特幣期貨的交易時段當窗口（17:00~隔天 16:00 芝加哥時間；週末、假日也照平日每天算——用戶 10-11），
 //   算「這個合約自己的」VWAP 再畫回合約（用戶：時間用他的開盤時間，計算後畫到合約）。
 //   參數二＝整個 CME 交易日；參數一＝CME 開盤後 1 小時 45 分（17:00~18:45，對照台指 09:00~10:45）；16:00 收盤換階。
 //   VWAP＝Σ成交額(USDT)÷Σ成交量（OKX 每根 K 都有這兩欄 → 是真的成交均價，不是拿收盤價近似）。
 //   雙線寬度＝值 ±0.02%（台指 ±9 點 ÷ 約 4.8 萬）。
 //   幣的 K 棒列 = [時間秒(台北當UTC), 開, 高, 低, 收, 量(幣), 顏色, 階梯P2, 階梯P1, 0, CME標記('o'開/'c'收/0)]
 const TXOKX = 'https://www.okx.com/api/v5/market/candles';
-const TXBAR = {'15':'15m', '60':'1H', 'D':'1D', 'W':'1W'};
+const TXBAR = {'15':'15m', '60':'1H', '240':'4H', 'D':'1D', 'W':'1W'};
 const TXHALF = 0.0002, TXWARM = 280;
 const TXCTF = (() => { try{ return new Intl.DateTimeFormat('en-US', {timeZone:'America/Chicago', hourCycle:'h23',
   year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}); }catch(e){ return null; } })();
@@ -2023,19 +2024,15 @@ function txCt(ms){
   return [o.year+'-'+o.month+'-'+o.day, Number(o.hour)*60 + Number(o.minute)];
 }
 function txDayAdd(ymd, k){ const d = new Date(ymd+'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + k); return d.toISOString().slice(0, 10); }
-// 這一刻屬於哪個 CME 交易日：17:00 之後算隔天；16:00~17:00 休息、週六週日不是交易日 → null
+// 這一刻屬於哪個「交易日」：17:00 之後算隔天；16:00~17:00＝CME 休息 → null。週末假日照平日算（幣 24 小時在交易）
 function txCmeDay(ymd, mn){
   if(mn >= 960 && mn < 1020) return null;
-  const d = mn >= 1020 ? txDayAdd(ymd, 1) : ymd;
-  const wd = new Date(d+'T00:00:00Z').getUTCDay();
-  return (wd === 0 || wd === 6) ? null : d;
+  return mn >= 1020 ? txDayAdd(ymd, 1) : ymd;
 }
-// 盤別虛線用：這根是 CME 開盤（17:00 且有交易日）或收盤（16:00、週一~五）
+// 盤別虛線用：這根是 CME 開盤時刻（17:00）或收盤時刻（16:00＝換階），每天都有
 function txCmeMark(ms){
-  const [ymd, mn] = txCt(ms);
-  if(mn === 1020 && txCmeDay(ymd, mn) !== null) return 'o';
-  if(mn === 960){ const wd = new Date(ymd+'T00:00:00Z').getUTCDay(); if(wd >= 1 && wd <= 5) return 'c'; }
-  return 0;
+  const mn = txCt(ms)[1];
+  return mn === 1020 ? 'o' : (mn === 960 ? 'c' : 0);
 }
 // 換階事件：每個 CME 交易日收盤後那一根起生效。第一個交易日資料不是從 17:00 開始（只有半天）→ 不算。
 //   參數一（17:00~18:45）只有 15 分 K 切得出來；1H K 只算參數二（17:00~16:00 整點切得齊，加總跟 15 分一樣）。
@@ -2102,21 +2099,24 @@ async function txOkx(inst, tf, need){
 // 由原始 K 算成圖表列（顏色、階梯、CME 標記）。1H 的參數一要用 15 分那份的換階事件。
 function txCRows(key){
   const R = TXDATA[key]; if(!R || !R.raw || !R.raw.length) return;
-  const raw = R.raw, inst = key.slice(2).split('|')[0], tf = key.split('|')[1], intra = tf === '15' || tf === '60';
+  const raw = R.raw, inst = key.slice(2).split('|')[0], tf = key.split('|')[1], intra = tf === '15' || tf === '60' || tf === '240';
   const col = txFormula(raw.map(r => r[1]), raw.map(r => r[4]));
   let e2 = null, e1 = null;
   if(intra){
     const r15 = TXDATA['C:'+inst+'|15'];
     e1 = (r15 && r15.raw) ? txCmeEvents(r15.raw, true) : [];
-    e2 = tf === '15' ? e1 : txCmeEvents(raw, false);
+    if(tf === '15') e2 = e1;
+    else if(tf === '60') e2 = txCmeEvents(raw, false);
+    else { const r60 = TXDATA['C:'+inst+'|60']; e2 = (r60 && r60.raw) ? txCmeEvents(r60.raw, false) : e1; }   // 4H：收盤落在 4H K 中間 → 收盤後第一根 4H 才換
   }
   R.bars = raw.map((r, i) => [r[0], r[1], r[2], r[3], r[4], r[5], i >= TXWARM ? col[i] : -1,
-    e2 ? txEvAt(e2, r[0], 'p2') : null, e1 ? txEvAt(e1, r[0], 'p1') : null, 0, intra ? txCmeMark(r[7]) : 0]);
+    e2 ? txEvAt(e2, r[0], 'p2') : null, e1 ? txEvAt(e1, r[0], 'p1') : null, 0, (tf === '15' || tf === '60') ? txCmeMark(r[7]) : 0]);
   const lc = raw[raw.length-1][4];
   R.meta = {ok:true, ladder:intra, vol:true, prec:R.prec, half:Number((lc * TXHALF).toFixed(R.prec)), crypto:true};
 }
 async function txFetchC(){
-  const inst = TXS.slice(2), tf = TXTF, keys = tf === '15' ? [TXS+'|15'] : [TXS+'|15', TXS+'|'+tf];   // 摘要＋參數一都靠 15 分
+  const inst = TXS.slice(2), tf = TXTF;      // 摘要＋參數一都靠 15 分；4H 的參數二靠 1H
+  const keys = tf === '15' ? [TXS+'|15'] : (tf === '240' ? [TXS+'|15', TXS+'|60', TXS+'|240'] : [TXS+'|15', TXS+'|'+tf]);
   let first = false;
   for(const k of keys){
     if(TXBUSY[k]) continue;
@@ -2140,7 +2140,7 @@ async function txFetchC(){
     }catch(e){ TXERR = (e && (e.message || e.name)) || 'err'; }
     TXBUSY[k] = 0;
   }
-  if(tf === '60' && TXDATA[TXS+'|60']){ txCRows(TXS+'|60'); }      // 15 分有新換階 → 1H 的參數一跟著更新
+  if((tf === '60' || tf === '240') && TXDATA[TXS+'|'+tf]){ txCRows(TXS+'|'+tf); }   // 15 分／1H 有新換階 → 跟著更新
   if(first) draw();                                                // 第一次拿到資料 → 摘要不用等下一輪 20 秒
 }
 function txCSum(){
@@ -2396,7 +2396,7 @@ function viewTx(){
     + txCoins().map(c => `<span class="wb ${TXS==='C:'+c+'-USDT-SWAP'?'on':''}" onclick="txSel('C:${c}-USDT-SWAP')">${c}</span>`).join(' ')
     + ' <input id="txq" class="txq" placeholder="其他幣" autocomplete="off" onkeydown="txKey(event)"><span class="wb" onclick="txGo()">看</span>'
     + '</div><div class="txbar">'
-    + Object.keys(TXTFN).map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
+    + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
     + ((TXS === 'TX' || isC) && txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
         `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '') + '</div>';
   if(isC) h += txCSum();
@@ -2430,9 +2430,9 @@ function viewTx(){
     + '<br><b>K 棒</b>：台指日K＝前一晚夜盤＋當天日盤（期交所交易日；量跟期交所公布的當日總量一致），1H 日盤從 08:45 起算；加權 1H 從 09:00 起算，13:00 那根含收盤。虛線＝換盤（夜盤／日盤開始）。'
     + '<br>資料：期交所公開 1 分 K（台指對麥門資料量 100%、收 99.7% 相同；加權 267/267 根完全相同、沒有量）。近月合約＝最早到期（結算日日盤還是舊月）。'
     + '<br><b>幣</b>（OKX 永續，K 線由手機直接跟 OKX 拿，最多最近 1440 根）：彩色K＝台指公式版直接套，<b>沒有驗證</b>。'
-    + '階梯＝用 CME 比特幣期貨的交易時段（週日~週五 17:00~16:00 芝加哥時間）當窗口，算這個合約自己的 VWAP（成交額÷成交量）：'
+    + '階梯＝用 CME 比特幣期貨的交易時段（17:00~隔天 16:00 芝加哥時間；週末、假日照平日每天算）當窗口，算這個合約自己的 VWAP（成交額÷成交量）：'
     + '參數二＝整個 CME 交易日、參數一＝開盤後 1 小時 45 分（17:00~18:45），16:00 收盤換階（台灣時間夏令 05:00／冬令 06:00）；'
-    + '雙線寬度 ±0.02%。1H 的參數一要用 15 分 K 才切得出來，所以只有最近約 15 天有。美國假日沒排除。'
+    + '雙線寬度 ±0.02%。1H／4H 的參數一要用 15 分 K 才切得出來，所以只有最近約 15 天有；4H 的參數二用 1H 算（約 60 天），收盤落在 4H K 中間，所以收盤後第一根 4H 才換階、也不畫 CME 開收虛線。'
     + '</div></details>';
   if(!isC) h += '<div class="sub">合約 '+Object.values(P.sym || {}).join(' / ')+'</div>';
   h += '</div>';
