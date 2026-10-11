@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx2"
+VER = "20261011tx3"
 
 
 def _clean(v):
@@ -1966,7 +1966,22 @@ function txChg(v, prec){ return '<span style="color:'+(v>0?'#ef4444':(v<0?'#22c5
 function txCandle(b){ const c = TXC[b[6]] || '#888888', up = b[4] >= b[1];
   return {time:b[0], open:b[1], high:b[2], low:b[3], close:b[4], color: up ? c : txAlpha(c, 0.4), borderColor:c, wickColor:c}; }
 function txVol(b){ return {time:b[0], value:b[5], color: txAlpha(TXC[b[6]] || '#888888', 0.45)}; }
-function txLad(b, i, off){ return (b[i]===null || b[i]===undefined) ? {time:b[0]} : {time:b[0], value:b[i] + off}; }
+// 階梯分段：同一組 (參數二, 參數一) 連續的 K 棒＝一段；每段最後一個點 color 透明 → 連到下一段的那一小段看不見
+//   回傳 3 條的資料（參數二+9、參數二−9、參數一），每條每根都有點（沒值給空白點）
+const TXGAP = 'rgba(0,0,0,0)';
+function txLadSeg(bars, half){
+  const out = [[], [], []]; let prev = null;
+  for(const b of bars){
+    const t = b[0], v = b[7], p1 = b[8];
+    if(v === null || v === undefined){ for(const s of out) s.push({time:t}); prev = null; continue; }
+    const key = v + '|' + p1;
+    if(prev !== null && key !== prev) for(const s of out){ const q = s[s.length - 1]; if(q && q.value !== undefined) q.color = TXGAP; }
+    prev = key;
+    const vals = [v + half, v - half, (p1 === null || p1 === undefined) ? null : p1];
+    for(let j = 0; j < 3; j++) out[j].push(vals[j] === null ? {time:t} : {time:t, value:vals[j]});
+  }
+  return out;
+}
 
 function txLoadLib(){
   if(TXLIBST) return;
@@ -1995,11 +2010,13 @@ function txCreate(){
   const vs = ch.addHistogramSeries({priceScaleId:'vol', priceFormat:{type:'volume'}, lastValueVisible:false, priceLineVisible:false});
   ch.priceScale('vol').applyOptions({scaleMargins:{top:0.82, bottom:0}});
   cs.priceScale().applyOptions({scaleMargins:{top:0.08, bottom:0.22}});
-  const lo = {lineWidth:1, lineType:1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
-  const la = ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo));
-  const lb = ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo));
-  const l1 = ch.addLineSeries(Object.assign({color:'#7c7cc4', lineStyle:2}, lo));
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, la:la, lb:lb, l1:l1, key:'', fit:true, hl:0};
+  // 階梯 3 條：參數二+9、參數二−9、參數一虛線。換階處要斷開（用戶：「斷點突然又連起來了」）：
+  //   這個程式庫的線會「跨過空白點直接連過去」（實測畫出斜線），所以改用逐點顏色——
+  //   「每段最後一個點」塗透明＝從它連到下一段的那一小段看不見（實測：線段顏色取「起點」那個點的 color）。
+  const lo = {lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
+  const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)),
+               ch.addLineSeries(Object.assign({color:'#7c7cc4', lineStyle:2}, lo))];
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, key:'', fit:true, hl:0};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); }catch(e){} }); } };
@@ -2008,16 +2025,15 @@ function txCreate(){
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.la, C.lb, C.l1]) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs].concat(C.lad)) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  C.la.setData(m.ladder ? bars.map(b => txLad(b, 7, m.half)) : []);
-  C.lb.setData(m.ladder ? bars.map(b => txLad(b, 7, -m.half)) : []);
-  C.l1.setData(m.ladder ? bars.map(b => txLad(b, 8, 0)) : []);
+  const seg = m.ladder ? txLadSeg(bars, m.half) : null;
+  C.lad.forEach((s, j) => s.setData(seg ? seg[j] : []));
   txFit(); txHiLo(); txSess(); txLegend(null);
 }
 // 一開始只顯示最近 120 根（日/週 150 根）。★圖表剛建立時寬度還是 0，這時設範圍會被當成「全部擠進 0 寬」
@@ -2033,7 +2049,10 @@ function txUpdate(nb){
   for(const b of nb){
     C.cs.update(txCandle(b));
     if(m.vol) C.vs.update(txVol(b));
-    if(m.ladder){ C.la.update(txLad(b, 7, m.half)); C.lb.update(txLad(b, 7, -m.half)); C.l1.update(txLad(b, 8, 0)); }
+  }
+  if(m.ladder){     // 段號從頭算才知道單雙 → 整串重分段，只把新來的那幾根推進去（舊的段不會變）
+    const all = TXDATA[C.key].bars, seg = txLadSeg(all, m.half);
+    for(let i = all.length - nb.length; i < all.length; i++) C.lad.forEach((s, j) => s.update(seg[j][i]));
   }
   txHiLo(); txSess(); txLegend(null);
 }
@@ -2121,10 +2140,26 @@ function txSvg(){
   const bars = R.bars.slice(-96), m = R.meta, n = bars.length;
   const step = 9, padL = 4, padR = 58, W = padL + n*step + padR, Hp = 260, Hv = m.vol ? 70 : 0, gap = 18, H = Hp + gap + Hv + 18;
   let lo = Infinity, hi = -Infinity, vmax = 1;
-  for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]); }
+  for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]);
+    if(m.ladder && b[7] !== null && b[7] !== undefined){ lo = Math.min(lo, b[7] - 12); hi = Math.max(hi, b[7] + 12); } }
   const pad = (hi - lo)*0.04 || 10; lo -= pad; hi += pad;
   const y = v => Hp - (v - lo)/(hi - lo)*Hp, yv = v => Hp + gap + Hv - v/vmax*Hv;
   let g = '';
+  // 階梯：每一段各畫一條平線（段與段之間不連）
+  if(m.ladder) for(const [k, dash, col] of [[7, '', '#a1a1e8'], [8, '3,3', '#7c7cc4']]){
+    let i0 = 0;
+    for(let i = 1; i <= n; i++){
+      if(i === n || bars[i][k] !== bars[i0][k]){
+        const v = bars[i0][k];
+        if(v !== null && v !== undefined){
+          const x0 = padL + i0*step, x1 = padL + i*step - 1;
+          for(const off of (k === 7 ? [m.half, -m.half] : [0]))
+            g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v + off)+'" y2="'+y(v + off)+'" stroke="'+col+'" stroke-width="1.2"'+(dash ? ' stroke-dasharray="'+dash+'"' : '')+'/>';
+        }
+        i0 = i;
+      }
+    }
+  }
   for(let i = 0; i < n; i++){
     const b = bars[i], x = padL + i*step + step/2, col = TXC[b[6]] || '#888';
     const yo = y(b[1]), yc = y(b[4]);
