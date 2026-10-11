@@ -11,7 +11,7 @@
 saikesi-bot-clean/
 ├── main.py          ← 主體：設定、通知、下單、策略、主迴圈（見下方分區）
 ├── indicators.py    ← 純計算指標（QQE/ATR/ADX/雙底雙頂）★已抽出
-├── mmtx.py          ← 麥門台指三指標（階梯/星/彩色K），儀表板「台指」分頁用，不下單
+├── mmtx.py          ← 麥門指標（台指＋加權；階梯/星/彩色K；15分/1H/日/週），儀表板「台指」分頁用，不下單
 ├── push.sh          ← 推送到 GitHub（Railway 自動部署）
 ├── auto_push.py     ← 監控 main.py 變更自動 push
 └── MODULE_MAP.md    ← 本檔
@@ -205,22 +205,24 @@ saikesi-bot-clean/
 
 驗證腳本：`_chk_dash.py`（27 項，含權杖 fail-closed／OI 公式對齊／未實現 R／**憑證不外洩**／漏斗 Δ）。
 
-### 麥門台指 mmtx.py（2026-10-11，只顯示、不下單，儀表板「台指」分頁）
+### 麥門指標 mmtx.py（2026-10-11，台指＋加權，只顯示、不下單，儀表板「台指」分頁）
 
 | 元件 | 位置 / 定位字串 | 重點 |
 |---|---|---|
 | 模組 | `mmtx.py`（main.py `import mmtx` 包 try；`Thread(target=mmtx.loop, name="mmtx")`） | 載入失敗 `mmtx=None`，網頁顯示「模組未載入」，不影響交易 |
-| 資料 | 期交所 `mis.taifex.com.tw/futures/api/` `getQuoteList`（`near_symbol` 取最早到期）＋`getChartData1M`（免登入） | 欄位 T＝分鐘**結束**時間；夜盤 <15:00 屬隔天；同分鐘重複（046000/050000）留第一筆；量＝單邊口數 |
-| 存檔 | `/data/mmtx_1m.json.gz`（PERSIST_DIR）＋ repo 內 `mmtx_seed.json.gz`（07-17~10-09 種子） | 保留 75 天；未來時間的壞 key 會被 `_trim()` 丟掉；**整個盤 bot 都沒開＝那盤永久缺**（沒做逐筆檔補洞） |
-| 指標 | `ladders()` 階梯＝前日 VWAP；`stars15()` 5 分量≥3000 且 09:00~13:25；`colors()` 彩色K | 彩色K＝`mmtx_model.json.gz`（`_mm_vf/color_export.py` 匯出，純 numpy 推論＝sklearn 誤差 2e-16），讀不到退公式版 |
-| 節拍 | 盤中 60 秒抓一次、盤後 600 秒；資料沒變（`_state["sig"]`）不重算 | 一次重算本機 2.6 秒（跟交易主迴圈共用 GIL，所以不要改回 30 秒硬算） |
-| 過期警示 | `dash_payload()` 的 `stale`（盤中 >5 分沒新資料）／`fetch_err` | 抓不到要在網頁上講，不可默默顯示舊的 |
-| 推播 | `webpush_notify` topic `tx`：**已收盤**的 15 分 K 換色、新的星 | 盤中那根會閃，只比已收盤；任一輪沒資料就不比（避免啟動時把舊星全推） |
-| 視窗深度 | 75 天窗 vs 全史（2023-11 起）：收斂後 3,679 根 100% 一致，前 ~280 根暖機 | 網頁只顯示最後 240 根 |
+| 資料 | 期交所 `mis.taifex.com.tw/futures/api/` `getQuoteList`（`near_symbol` 取最早到期）＋`getChartData1M`（免登入）；**加權＝SymbolID `TXF-S`** | 欄位 T＝分鐘**結束**時間；夜盤 <15:00 屬隔天；同分鐘重複留第一筆；台指量＝單邊口數；加權 10-08 對麥門 267/267 開高低收全同、**量恆 0** |
+| 存檔 | `/data/mmtx_1m.json.gz`（台指 75 天）、`mmtx_tse_1m.json.gz`（加權 150 天）、`mmtx_daily.json.gz`（日K 長期）＋ repo 種子 `mmtx_seed`/`mmtx_tse_seed`/`mmtx_daily_seed`.json.gz | 未來時間的壞 key 會被 `_trim()` 丟掉；**整個盤 bot 都沒開＝那盤永久缺**（沒做逐筆檔補洞） |
+| 週期 | `to15`（台指）／`to15_tse`（13:30 後併入 13:15）／`to60`（台指日盤 08:45 起、夜盤 15:00 起；加權 09:00 起）／`trade_dates`+`update_daily`／`to_week` | 台指日K＝前晚夜盤＋當天日盤（量＝期交所當日總量，10-08 實測 29,250+35,892=65,142 對上）；日K 每輪用最近 10 天 1 分 K 覆蓋（連假前夜盤先暫記下一工作日，日盤進來會改正） |
+| 指標 | `ladders()` 階梯＝前日 VWAP（台指）；`stars15()`（台指 15 分）；`colors(df, inst)` | 台指模型 `mmtx_model.json.gz`（`color_export.py`，CV 95.2%）；加權 `mmtx_model_tse.json.gz`（`color_export_tse.py`，台指＋加權合併、多一欄 src=1，CV 87.7%）；1H/日/週套同模型＝**未驗證** |
+| 暖機 | `WARM=280`：每個週期前 280 根顏色＝-1（灰） | 實測 台指15分/1H、加權15分/1H：窗 vs 全史在 280 根後 **100% 一致**（最晚的差異在第 276 根）；週K只有 ~150 根→全灰 |
+| 網頁 | `/api` 的 `tx`＝摘要（`dash_payload`）；K 棒走 `/d/<tok>/txc?s=TX\|TSE&tf=15\|60\|D\|W&since=秒`（`dash_chart`） | since 對得上只回之後幾根（實測 474 bytes）；前端 lightweight-charts@4.2.0（jsdelivr），圖表物件常駐在 draw() 外（`txMount` 搬回插槽）→ 20 秒重繪不洗縮放；載不到退 SVG |
+| 節拍 | 盤中 60 秒抓、盤後 600 秒；每個商品自己的 `_sig`（最後一根＋近 2 天筆數，不含總數）沒變就不重算 | 兩個商品＋四週期全算本機約 3 秒（共用 GIL） |
+| 過期警示 | `dash_payload()` 的 `stale`／`fetch_err` | 抓不到要在網頁上講，不可默默顯示舊的 |
+| 推播 | `webpush_notify` topic `tx`：台指／加權**已收盤** 15 分 K 換色、台指新的星 | 只比 `closed`；任一輪沒資料就不比 |
 
-驗證：`_chk_dash_js.py` 台指段（盤中標「還沒收」、星、抓不到要警告、空資料不炸；改壞 viewTx 會紅＝已驗）。
+驗證：`_chk_dash_js.py` 麥門段（假的 lightweight-charts 跑 建圖/最高最低/縮放後重算/星/階梯±9/十字線圖例/盤別虛線/增量/切商品/重繪不洗縮放；**故意改壞三處都會紅**＝已驗）。
 ★換月已驗：麥門 TXF.00＝**最早到期**合約，結算日日盤仍是舊月、夜盤起換新月（09-16 逐分鐘 285/285、834/834 同價，`_mm_data/roll_check.py`）；**不可用量最大**（結算日日盤新月量 34,274 > 舊月 26,545，會整盤換錯合約）。
-★已知未驗：Railway 雲端 IP 連不連得到期交所（上線後看網頁 `fetch_err`）。
+★加權顏色不是台指顏色（同時間只 35% 相同）；加權標註只有 2023-12~2024-06，12-21 前在暖機區要排除（不排除時那段只對 13~66%）。
 
 ### 2026-09-24 第三輪：照官方網頁重做（直接登入 datahunterx 抓的原文）
 

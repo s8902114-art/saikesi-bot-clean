@@ -1,20 +1,22 @@
 # -*- coding: utf-8 -*-
-"""麥門「超直覺波段軟體」台指三指標的複刻（2026-10-11）—— **只顯示、不下單、不碰交易邏輯**。
+"""麥門「超直覺波段軟體」台指／加權指標的複刻（2026-10-11）—— **只顯示、不下單、不碰交易邏輯**。
 
 逆推出處：trading-backtest/_mm_vf/、_mm_data/（記憶 project_1010_maimen_ladder_color）。
-  ① 控盤階梯（Ladder_P1/P2）＝前一交易日台指近月 1 分 K 的 VWAP（close×vol）：
+  ① 控盤階梯（Ladder_P1/P2，只有台指）＝前一交易日台指近月 1 分 K 的 VWAP（close×vol）：
        參數二(趨勢)＝08:45~13:30、參數一(盤整)＝09:00~10:45；15:00 夜盤起換階；軟體畫「值 ±9 點」。
        驗證：37 支會議影片 133 天，P2 73/76 天 ≤3 點、P1 26/26 天 ≤2 點。
-  ② 籌碼異常星（BigVol≥3000）＝某根 5 分 K 量 ≥3000 口，且該 5 分 K 開始於加權交易時間 09:00~13:25；
-       15 分 K 圖只要包含任一根符合的 5 分 K 就畫星。（看得清楚的星召回 100%，抽查「規則有、量測無」15/16 其實有星）
+  ② 籌碼異常星（BigVol≥3000，只有台指 15 分）＝某根 5 分 K 量 ≥3000 口，且該 5 分 K 開始於加權交易時間 09:00~13:25。
   ③ 追價氛圍彩色K（15 分 K，黑<金<藍<紅，每根最多動一格）：
-       紅→藍＝收盤 < EMA55（事件 100%／維持誤觸 0.1%）；黑→金＝收盤 > SMA35（99%／0.1%）。
-       金↔藍、進紅、進黑：GBM（只用均線特徵，trading-backtest/_mm_vf/color_export.py 匯出 mmtx_model.json.gz）。
-       四段交叉驗證 95.2%；公式版（COLOR_FORMULA）約 92%，模型檔讀不到時退回公式版。
-資料：期交所公開 1 分 K（mis.taifex.com.tw getChartData1M，免登入）。實測 10-08 日盤 300 根對麥門資料
-  量 100%、高 100%、收 99.7% 相同；單位＝單邊口數（＝逐筆檔 B+S/2），星星門檻 3000 才對得上。
+       紅→藍＝收盤 < EMA55；黑→金＝收盤 > SMA35；金↔藍、進紅、進黑：GBM（只用均線特徵）。
+       台指：影片標註 11,020 根四段交叉驗證 95.2%（color_export.py → mmtx_model.json.gz）。
+       加權：台指顏色直接搬只對 35%、台指公式套加權 86%；台指＋加權標註合併訓練（來源旗標 src=1）
+             排除暖機後 1,128 根四段交叉驗證 ~88%（color_export_tse.py → mmtx_model_tse.json.gz）。
+       ★1H／日／週的顏色是同一個模型套上去的，**沒有標註可以驗**；每個週期前 WARM 根長均線還沒穩 → 不上色。
+資料：期交所公開 1 分 K（mis.taifex.com.tw getChartData1M，免登入）。
+  台指：10-08 日盤 300 根對麥門 量/高 100%、收 99.7%；近月＝最早到期（不可用量最大，見 near_symbol）。
+  加權：SymbolID「TXF-S」＝加權指數 1 分 K，10-08 對麥門 267/267 根開高低收完全相同（沒有量）。
 """
-import os, json, gzip, time, re, itertools, traceback, datetime as dt
+import os, json, gzip, time, re, itertools, traceback, bisect, datetime as dt
 import numpy as np
 import pandas as pd
 import requests
@@ -24,20 +26,34 @@ HDR = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
 TPE = dt.timezone(dt.timedelta(hours=8))
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PERSIST = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else _HERE)
-BARS_FILE = os.path.join(_PERSIST, "mmtx_1m.json.gz")
+BARS_FILE = os.path.join(_PERSIST, "mmtx_1m.json.gz")              # 台指 1 分 K
+TSE_FILE = os.path.join(_PERSIST, "mmtx_tse_1m.json.gz")           # 加權 1 分 K
+DAILY_FILE = os.path.join(_PERSIST, "mmtx_daily.json.gz")          # 兩個商品的日K（長期保存，週K由它組）
 SEED_FILE = os.path.join(_HERE, "mmtx_seed.json.gz")
+SEED_TSE_FILE = os.path.join(_HERE, "mmtx_tse_seed.json.gz")
+SEED_DAILY_FILE = os.path.join(_HERE, "mmtx_daily_seed.json.gz")
 MODEL_FILE = os.path.join(_HERE, "mmtx_model.json.gz")
-KEEP_DAYS = 75                 # 1 分 K 保留天數（日曆日）；EMA233/SMA233 暖機需要約 10 個交易日
-SHOW_BARS = 240                # 網頁顯示最近幾根 15 分 K
+MODEL_TSE_FILE = os.path.join(_HERE, "mmtx_model_tse.json.gz")
+KEEP_DAYS = {"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
+WARM = 280                     # 台指 15 分實測：75 天窗跟全史比，前 ~280 根之後 100% 一致 → 之前不上色
+SHOW = {"15": 1500, "60": 1000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根
+INST_NAME = {"TX": "台指", "TSE": "加權"}
 STAR_VOL = 3000
 LADDER_HALF = 9
 
 NS = [8, 13, 21, 34, 35, 55, 89, 100, 120, 144, 200, 233]
 COLOR_NAME = {0: "黑", 1: "金", 2: "藍", 3: "紅"}
 
-_state = {"ok": False, "err": "", "last_fetch": 0, "last_calc": 0, "sym": {}, "payload": None, "n1m": 0}
-_bars = {}                     # "YYYYmmddHHMM"(台北時間、分鐘開始) -> [o,h,l,c,v]
-_model = None
+_state = {"ok": False, "err": "", "last_fetch": 0, "last_calc": 0, "sym": {}, "payload": None, "n1m": 0,
+          "fetch_err": "", "charts": {}, "summ": {}, "sig": {}}
+_bars = {}                     # 台指："YYYYmmddHHMM"(台北時間、分鐘開始) -> [o,h,l,c,v]
+_bars_tse = {}                 # 加權：同上（量恆為 0）
+_daily = {"TX": {}, "TSE": {}}  # "YYYYmmdd"(交易日) -> [o,h,l,c,v]
+_models = {}
+STORE = {"TX": _bars, "TSE": _bars_tse}
+FILES = {"TX": BARS_FILE, "TSE": TSE_FILE}
+SEEDS = {"TX": SEED_FILE, "TSE": SEED_TSE_FILE}
+MODELS = {"TX": MODEL_FILE, "TSE": MODEL_TSE_FILE}
 
 
 # ───────────────────────── 資料 ─────────────────────────
@@ -108,38 +124,65 @@ def fetch_session(sid):
     return out
 
 
+def _load_json(f):
+    with gzip.open(f, "rt", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _dump(obj, path):
+    tmp = path + ".tmp"
+    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, path)
+
+
 def _load_store():
-    global _bars
-    for f in (SEED_FILE, BARS_FILE):
+    bad = []
+    for inst in ("TX", "TSE"):
+        for f in (SEEDS[inst], FILES[inst]):
+            try:
+                if os.path.exists(f):
+                    STORE[inst].update(_load_json(f))
+            except Exception:
+                bad.append(os.path.basename(f))
+    for f in (SEED_DAILY_FILE, DAILY_FILE):
         try:
             if os.path.exists(f):
-                with gzip.open(f, "rt", encoding="utf-8") as fh:
-                    _bars.update(json.load(fh))
+                d = _load_json(f)
+                for inst in ("TX", "TSE"):
+                    _daily[inst].update(d.get(inst) or {})
         except Exception:
-            _state["err"] = "讀檔失敗 " + os.path.basename(f)
+            bad.append(os.path.basename(f))
+    if bad:
+        _state["err"] = "讀檔失敗 " + "、".join(bad)
 
 
 def _trim():
     now = dt.datetime.now(TPE)
-    cut = (now - dt.timedelta(days=KEEP_DAYS)).strftime("%Y%m%d%H%M")
     fut = (now + dt.timedelta(days=1)).strftime("%Y%m%d%H%M")      # 未來時間的壞資料一旦存進檔就永遠不會被淘汰
-    for k in [k for k in _bars if k < cut or k > fut]:
-        _bars.pop(k, None)
+    for inst, b in STORE.items():
+        cut = (now - dt.timedelta(days=KEEP_DAYS[inst])).strftime("%Y%m%d%H%M")
+        for k in [k for k in b if k < cut or k > fut]:
+            b.pop(k, None)
+    futd = fut[:8]
+    for d in _daily.values():
+        for k in [k for k in d if k > futd]:
+            d.pop(k, None)
 
 
 def _save_store():
     try:
         _trim()
-        tmp = BARS_FILE + ".tmp"
-        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-            json.dump(_bars, fh)
-        os.replace(tmp, BARS_FILE)
-    except Exception:
-        pass
+        for inst in ("TX", "TSE"):
+            _dump(STORE[inst], FILES[inst])
+        _dump(_daily, DAILY_FILE)
+        _state["save_err"] = ""
+    except Exception as e:
+        _state["save_err"] = type(e).__name__
 
 
 def update_data():
-    n = 0; bad = []
+    n = {"TX": 0, "TSE": 0}; bad = []
     for mk_ in ("0", "1"):
         sid = near_symbol(mk_)
         if not sid:
@@ -149,8 +192,13 @@ def update_data():
         if b is None:
             bad.append(sid + " 1分K 抓不到")
         elif b:
-            _bars.update(b); n += len(b)
-    if n:
+            _bars.update(b); n["TX"] += len(b)
+    b = fetch_session("TXF-S")            # 加權指數（期交所的現貨行情，只有日盤）
+    if b is None:
+        bad.append("加權(TXF-S) 1分K 抓不到")
+    elif b:
+        _bars_tse.update(b); n["TSE"] += len(b)
+    if n["TX"] or n["TSE"]:
         _state["last_fetch"] = time.time()
     _state["fetch_err"] = "；".join(bad)      # 抓不到要顯示在網頁上，不可以默默拿舊資料當新的
     return n
@@ -265,15 +313,99 @@ def features(df):
     return np.column_stack(X), cols, p0, (c > P["e55"]).values, (c > P["s35"]).values, Ro, Ko
 
 
-def load_model():
-    global _model
-    if _model is None:
+# ───────────────────────── 各週期 K 棒 ─────────────────────────
+def _agg(x, key):
+    g = x.groupby(key)
+    return pd.DataFrame({"o": g.o.first(), "h": g.h.max(), "l": g.l.min(), "c": g.c.last(), "v": g.v.sum()})
+
+
+def to15_tse(m):
+    """加權 15 分 K：13:30 之後的收盤撮合併入 13:15 那根（＝標註管線 _mm_vf/fast_frame.bars('TSE15') 的切法）。
+    加權沒有量（期交所 TXF-S 量恆 0）→ 不可以用 v>0 篩。"""
+    if m.empty:
+        return m
+    x = m.copy()
+    x.index = x.index.where(~((x.index.hour == 13) & (x.index.minute >= 30)), x.index.normalize() + pd.Timedelta("13:15:00"))
+    return _agg(x, x.index.floor("15min"))
+
+
+def to60(m, inst):
+    """60 分 K：台指日盤從 08:45 起算（08:45、09:45…12:45）、夜盤從 15:00；加權從 09:00（13:00 那根含收盤）。"""
+    if m.empty:
+        return m
+    idx = m.index; mins = idx.hour * 60 + idx.minute; d = idx.normalize()
+    if inst == "TX":
+        anc = np.where((mins >= 525) & (mins < 900), (d + pd.Timedelta(minutes=525)).values,
+                       np.where(mins >= 900, (d + pd.Timedelta(minutes=900)).values,
+                                (d - pd.Timedelta(days=1) + pd.Timedelta(minutes=900)).values))
+        anc = pd.DatetimeIndex(anc)
+    else:
+        anc = d + pd.Timedelta(minutes=540)
+    key = anc + ((idx - anc) // pd.Timedelta(hours=1)) * pd.Timedelta(hours=1)
+    df = _agg(m, key)
+    return df[df.v > 0] if inst == "TX" else df
+
+
+def trade_dates(m, inst):
+    """每根 1 分 K 屬於哪個交易日。加權＝日期；台指＝夜盤算「下一個日盤」那天（期交所慣例，連假前的夜盤算到假後）。
+    還沒有下一個日盤（今晚的夜盤）→ 先記下一個工作日，等日盤資料進來會被改正（update_daily 會整段重算）。"""
+    idx = m.index; d = idx.normalize()
+    if inst != "TX":
+        return d
+    mins = idx.hour * 60 + idx.minute
+    day = (mins >= 525) & (mins < 900)
+    days = np.array(sorted(set(d[day].values)))
+    nst = np.where(mins >= 900, d.values, (d - pd.Timedelta(days=1)).values)      # 這段夜盤開始的那天
+    nxt = (pd.DatetimeIndex(nst) + pd.offsets.BDay(1)).values
+    if len(days):
+        pos = np.searchsorted(days, nst, side="right")
+        td = np.where(pos < len(days), days[np.minimum(pos, len(days) - 1)], nxt)
+    else:
+        td = nxt
+    return pd.DatetimeIndex(np.where(day, d.values, td))
+
+
+def update_daily(inst, m):
+    """用最近 10 天的 1 分 K 重算日K、覆蓋進長期日K存檔（台指從某天 15:00 夜盤開始切，第一根交易日才完整）。"""
+    if m.empty:
+        return
+    d0 = pd.Timestamp(m.index[-1].date()) - pd.Timedelta(days=10)
+    x = m[m.index >= (d0 + pd.Timedelta(hours=15) if inst == "TX" else d0)]
+    if x.empty:
+        return
+    dd = _agg(x, trade_dates(x, inst))
+    if inst == "TX":
+        dd = dd[dd.v > 0]
+    if dd.empty:
+        return
+    D = _daily[inst]; lo = dd.index[0].strftime("%Y%m%d")
+    for k in [k for k in D if k >= lo]:
+        D.pop(k, None)
+    for t, r in zip(dd.index, dd.itertuples()):
+        D[t.strftime("%Y%m%d")] = [float(r.o), float(r.h), float(r.l), float(r.c), float(r.v)]
+
+
+def daily_df(inst):
+    D = _daily[inst]
+    if not D:
+        return pd.DataFrame(columns=["o", "h", "l", "c", "v"])
+    ks = sorted(D)
+    return pd.DataFrame(np.array([D[k] for k in ks], float), index=pd.to_datetime(ks, format="%Y%m%d"), columns=["o", "h", "l", "c", "v"])
+
+
+def to_week(dd):
+    if dd.empty:
+        return dd
+    return _agg(dd, dd.index - pd.to_timedelta(dd.index.weekday, unit="D"))
+
+
+def load_model(inst="TX"):
+    if inst not in _models:
         try:
-            with gzip.open(MODEL_FILE, "rt", encoding="utf-8") as fh:
-                _model = json.load(fh)
+            _models[inst] = _load_json(MODELS[inst])
         except Exception:
-            _model = {}
-    return _model
+            _models[inst] = {}
+    return _models[inst]
 
 
 def gbm_proba(mdl, X):
@@ -294,10 +426,13 @@ def gbm_proba(mdl, X):
     return 1.0 / (1.0 + np.exp(-raw))
 
 
-def colors(df):
-    """回傳 (模型版顏色, 公式版顏色, 是否用到模型)。"""
+
+def colors(df, inst="TX"):
+    """回傳 (模型版顏色, 公式版顏色, 是否用到模型)。加權模型多一欄來源旗標 src=1（台指＋加權合併訓練）。"""
     X, cols, p0, ce55, cs35, Ro, Ko = features(df)
-    mdl = load_model()
+    mdl = load_model(inst)
+    if inst != "TX":
+        X = np.column_stack([X, np.ones(len(X))]); cols = cols + ["src"]
     if not mdl or mdl.get("cols") != cols:
         return p0, p0, False
     pb = gbm_proba(mdl["weak"], X); pr = gbm_proba(mdl["red"], X); pk = gbm_proba(mdl["black"], X)
@@ -317,38 +452,75 @@ def colors(df):
     return out, p0, True
 
 
-def compute():
-    m = minute_df()
-    _state["n1m"] = len(m)
+# ───────────────────────── 組裝 ─────────────────────────
+def _ts(t):
+    """台北時間「當成 UTC」的秒數：圖表程式庫照 UTC 顯示 → 畫面上剛好是台北時間。（naive Timestamp.timestamp() 視為 UTC）"""
+    return int(pd.Timestamp(t).timestamp())
+
+
+def _lad(P, index):
+    if P is None or not len(index):
+        return None
+    v = P.reindex(index, method="ffill").values
+    return [None if x != x else round(float(x), 1) for x in v]
+
+
+def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500):
+    """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無)]。"""
+    n = len(df); i0 = max(0, n - n_show); nd = 0 if inst == "TX" else 2
+    o, h, l, c, v = (df[k].values for k in ("o", "h", "l", "c", "v"))
+    out = []
+    for i in range(i0, n):
+        t = df.index[i]
+        out.append([_ts(t), round(float(o[i]), nd), round(float(h[i]), nd), round(float(l[i]), nd), round(float(c[i]), nd),
+                    int(v[i]), int(col[i]) if i >= WARM else -1,
+                    lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0])
+    return out
+
+
+def _bar_end(inst, t):
+    if inst == "TSE" and t.hour == 13 and t.minute == 15:
+        return t.normalize() + pd.Timedelta("13:31:00")       # 加權最後一根含收盤撮合
+    return t + pd.Timedelta(minutes=14)
+
+
+def compute_inst(inst):
+    """回傳 (摘要, {週期: 圖表列})。摘要只看 15 分 K（標註驗證過的週期）。"""
+    m = minute_df(STORE[inst])
     if len(m) < 3000:
-        return {"ok": False, "err": f"1 分 K 不足（{len(m)} 根），等資料累積"}
-    df = to15(m)
-    col, col_f, used_model = colors(df)
-    P2, P1 = ladders(m)
-    st = stars15(m)
-    lad2 = P2.reindex(df.index, method="ffill") if P2 is not None else pd.Series(np.nan, index=df.index)
-    lad1 = P1.reindex(df.index, method="ffill") if P1 is not None else pd.Series(np.nan, index=df.index)
-    n = min(SHOW_BARS, len(df))
-    rows = []
-    for i in range(len(df) - n, len(df)):
-        t = df.index[i]; r = df.iloc[i]
-        rows.append([t.strftime("%m-%d %H:%M"), r.o, r.h, r.l, r.c, int(r.v), int(col[i]), int(col_f[i]),
-                     None if np.isnan(lad2.iloc[i]) else round(float(lad2.iloc[i]), 1),
-                     None if np.isnan(lad1.iloc[i]) else round(float(lad1.iloc[i]), 1),
-                     int(st.get(t, 0))])
-    # 最近一次換色
+        return {"ok": False, "err": f"{INST_NAME[inst]} 1 分 K 不足（{len(m)} 根），等資料累積"}, {}
+    charts = {}
+    df = to15(m) if inst == "TX" else to15_tse(m)
+    col, col_f, used = colors(df, inst)
+    P2 = P1 = None; st = {}
+    if inst == "TX":
+        P2, P1 = ladders(m); st = stars15(m)
+    charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"])
+    d60 = to60(m, inst)
+    c60, _, _ = colors(d60, inst)
+    charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"])
+    update_daily(inst, m)
+    dd = daily_df(inst)
+    if len(dd) >= 3:
+        cD, _, _ = colors(dd, inst); charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"])
+        wk = to_week(dd)
+        cW, _, _ = colors(wk, inst); charts["W"] = _rows(wk, cW, inst, n_show=SHOW["W"])
+    lt = m.index[-1]
+    live = bool(lt < _bar_end(inst, df.index[-1]))           # 最後一根 15 分 K 還沒走完（盤中）
+    ci = len(df) - 2 if live and len(df) > 1 else len(df) - 1
     last_chg = None
-    for i in range(len(col) - 1, 0, -1):
+    for i in range(len(col) - 1, max(WARM, 1) - 1, -1):
         if col[i] != col[i - 1]:
             last_chg = [df.index[i].strftime("%m-%d %H:%M"), COLOR_NAME[int(col[i - 1])], COLOR_NAME[int(col[i])]]
             break
-    lt = m.index[-1]
-    live_bar = bool(lt < df.index[-1] + pd.Timedelta(minutes=14))     # 最後一根 15 分 K 還沒走完（盤中）
-    return {"ok": True, "err": "", "bars": rows, "live_bar": live_bar, "model": used_model, "color": COLOR_NAME[int(col[-1])],
-            "color_formula": COLOR_NAME[int(col_f[-1])], "last_change": last_chg,
-            "ladder2": rows[-1][8], "ladder1": rows[-1][9], "half": LADDER_HALF,
-            "last_minute": lt.strftime("%m-%d %H:%M"), "sym": dict(_state["sym"]),
-            "fetched": int(_state["last_fetch"]), "n1m": len(m)}
+    s = {"ok": True, "err": "", "name": INST_NAME[inst], "model": used, "live_bar": live,
+         "color": COLOR_NAME[int(col[-1])], "c": int(col[-1]), "color_formula": COLOR_NAME[int(col_f[-1])],
+         "closed": [df.index[ci].strftime("%m-%d %H:%M"), int(col[ci])], "last_change": last_chg,
+         "last": round(float(df.c.iloc[-1]), 2), "last_minute": lt.strftime("%m-%d %H:%M"), "n1m": len(m)}
+    if inst == "TX":
+        s["ladder2"] = charts["15"][-1][7]; s["ladder1"] = charts["15"][-1][8]; s["half"] = LADDER_HALF
+        s["stars"] = [[t.strftime("%m-%d %H:%M"), int(v)] for t, v in sorted(st.items())[-12:]]
+    return s, charts
 
 
 def in_session(now=None):
@@ -361,6 +533,7 @@ def in_session(now=None):
 
 
 def dash_payload():
+    """/api 用的摘要（不含 K 棒；K 棒走 dash_chart）。永不拋例外。"""
     try:
         p = _state.get("payload")
         if p:
@@ -374,21 +547,59 @@ def dash_payload():
         return {"ok": False, "err": type(e).__name__}
 
 
+def dash_chart(inst, tf, since=None):
+    """圖表 K 棒。since＝前端手上最後一根的時間秒：對得上就只回那根之後（含那根，它可能還在變），對不上回全部。"""
+    try:
+        if inst not in STORE or tf not in SHOW:
+            return {"ok": False, "err": "參數錯誤"}
+        rows = (_state.get("charts") or {}).get((inst, tf))
+        if not rows:
+            return {"ok": False, "err": _state.get("err") or "尚未算完第一次"}
+        meta = {"ok": True, "s": inst, "tf": tf, "ladder": inst == "TX" and tf in ("15", "60"),
+                "vol": inst == "TX", "prec": 0 if inst == "TX" else 2, "half": LADDER_HALF, "n": len(rows)}
+        if since is not None:
+            ts = [r[0] for r in rows]
+            i = bisect.bisect_left(ts, since)
+            if i < len(rows) and rows[i][0] == since:
+                return dict(meta, bars=rows[i:], full=False)
+        return dict(meta, bars=rows, full=True)
+    except Exception as e:
+        return {"ok": False, "err": type(e).__name__}
+
+
+def _sig(inst):
+    b = STORE[inst]
+    if not b:
+        return None
+    k = max(b)
+    rec = (dt.datetime.strptime(k, "%Y%m%d%H%M") - dt.timedelta(days=2)).strftime("%Y%m%d%H%M")
+    return (k, tuple(b[k]), sum(1 for x in b if x >= rec))     # 不含總筆數：每輪淘汰舊資料不該觸發重算
+
+
 def run_once():
     try:
         update_data()
         _trim()
-        k = max(_bars) if _bars else ""
-        sig = (len(_bars), k, tuple(_bars.get(k) or ()))
-        if sig == _state.get("sig") and _state.get("payload"):
-            return                      # 資料沒變 → 不重算（一次 2~3 秒 CPU，跟交易主迴圈共用 GIL）
+        sigs = {i: _sig(i) for i in STORE}
+        todo = [i for i in STORE if sigs[i] != _state["sig"].get(i) or i not in _state["summ"]]
+        if not todo:
+            return                      # 資料沒變 → 不重算（跟交易主迴圈共用 GIL）
+        charts = dict(_state["charts"]); summ = dict(_state["summ"])
+        for inst in todo:
+            s, ch = compute_inst(inst)
+            summ[inst] = s
+            for tf, rows in ch.items():
+                charts[(inst, tf)] = rows
+            if s.get("ok"):
+                _state["sig"][inst] = sigs[inst]
         _save_store()
-        p = compute()
-        _state["sig"] = sig
-        _state["payload"] = p
+        _state["charts"] = charts; _state["summ"] = summ
+        _state["payload"] = {"ok": any(v.get("ok") for v in summ.values()), "err": "",
+                             "TX": summ.get("TX") or {"ok": False}, "TSE": summ.get("TSE") or {"ok": False},
+                             "sym": dict(_state["sym"]), "fetched": int(_state["last_fetch"]), "warm": WARM}
         _state["last_calc"] = time.time()
-        _state["err"] = p.get("err", "")
-        _state["ok"] = p.get("ok", False)
+        _state["err"] = "；".join(v.get("err", "") for v in summ.values() if v.get("err"))
+        _state["ok"] = _state["payload"]["ok"]
     except Exception as e:
         _state["err"] = f"{type(e).__name__}: {e}"[:200]
         traceback.print_exc()

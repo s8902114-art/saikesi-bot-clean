@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx1"
+VER = "20261011tx2"
 
 
 def _clean(v):
@@ -835,6 +835,26 @@ def register(app, G):
         r.headers["Cache-Control"] = "no-store"
         return r
 
+    @app.route("/d/<tok>/txc")
+    def _dash_txc(tok):
+        # ★麥門指標圖表 K 棒（2026-10-11）：只讀 mmtx 已算好的列；since＝前端手上最後一根 → 只回之後的（20 秒一次不用整包重抓）
+        if not _token_ok(tok):
+            return "", 404
+        try:
+            m = G.get("mmtx")
+            try:
+                since = int(request.args.get("since")) if request.args.get("since") else None
+            except (TypeError, ValueError):
+                since = None
+            r = jsonify(m.dash_chart(request.args.get("s", "TX"), request.args.get("tf", "15"), since) if m
+                        else {"ok": False, "err": "模組未載入"})
+        except Exception as e:
+            r = jsonify({"ok": False, "err": type(e).__name__})
+        r.headers["X-Robots-Tag"] = "noindex, nofollow"
+        r.headers["Cache-Control"] = "no-store"
+        r.headers["Access-Control-Allow-Origin"] = "*"
+        return r
+
     @app.route("/d/<tok>/push", methods=["GET", "POST"])
     def _dash_push(tok):
         if not _token_ok(tok):
@@ -1044,6 +1064,15 @@ _HTML = """<!doctype html>
   .wb{padding:4px 12px;border:1px solid var(--line);border-radius:7px;background:#0f141c;
       color:var(--dim);cursor:pointer;font-size:12px}
   .wb.on{color:var(--fg);border-color:var(--accent);background:#16233a}
+  .txbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
+  .txsp{flex:0 0 10px}
+  .txb{display:inline-block;padding:0 6px;border-radius:5px;font-weight:700;color:#fff;font-size:11px;line-height:17px}
+  .txwrap{position:relative;width:100%;height:440px;margin:6px 0}
+  .txbox{position:absolute;left:0;top:0;right:0;bottom:0}
+  .txov{position:absolute;left:0;top:0;right:60px;bottom:0;pointer-events:none;z-index:2;overflow:hidden}
+  .txlg{position:absolute;left:6px;top:4px;z-index:3;font-size:12px;pointer-events:none;background:rgba(11,14,20,.72);
+        padding:2px 6px;border-radius:4px;line-height:1.6;max-width:calc(100% - 76px)}
+  @media (max-width:600px){ .txwrap{height:380px} .txlg{font-size:11px} }
   .sc{width:100%;max-width:560px;height:auto;display:block;margin:2px auto 6px;overflow:hidden}
   .sc .ql{font-size:9px;font-weight:600;opacity:.85}
   .sc .qr{text-anchor:end}
@@ -1314,12 +1343,13 @@ function draw(){
   if(FOCUS_TABS.indexOf(TAB) >= 0){ try{ fb = focusBar(); }catch(e){ fb = ''; } }
   let nb = ''; try{ nb = notiBar(); }catch(e){ nb = ''; }     // 每一頁都有自己的通知開關；壞了不能拖垮整頁
   v.innerHTML = nb + fb + body;
+  if(TAB==='tx'){ try{ txMount(); }catch(e){ TXERR = e.name+' '+e.message; } }   // 圖表常駐在 draw() 外，搬回新插槽
 }
 
 // ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
 //   每支手機各自記住哪幾頁要通知（存伺服器，redeploy 不掉；本機也存一份給畫面用）。
 const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
-const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', tx:'彩色K換色（15 分 K 收盤確認）、出現籌碼異常星', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
+const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', tx:'台指／加權彩色K換色（15 分 K 收盤確認）、台指籌碼異常星', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
   anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
   diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
 let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
@@ -1905,82 +1935,247 @@ function viewDhx(){
     + '</details></div>';
 }
 
-// ★麥門台指（2026-10-11）：只顯示 mmtx 已算好的值（D.tx），不打 API、不下單。
-//   bars 每根 = [時間, 開, 高, 低, 收, 量, 顏色(模型), 顏色(公式), 階梯P2, 階梯P1, 星(該15K內最大的5K量,0=無)]
-const TXC = {0:'#6b7280', 1:'#eab208', 2:'#2c8ce3', 3:'#d15d5d'};   // 黑在暗底看不到 → 用深灰；金/藍/紅＝軟體原色
-const TXN = {0:'黑', 1:'金', 2:'藍', 3:'紅'};
-let TXBARS = 96;
-function txBadge(c){ return '<span style="display:inline-block;padding:1px 8px;border-radius:6px;font-weight:700;color:#fff;background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
-function txChart(bars){
-  const n = bars.length; if(!n) return '<div class="empty">沒有K棒</div>';
-  const step = 9, padL = 4, padR = 58, W = padL + n*step + padR, Hp = 260, Hv = 70, gap = 18, H = Hp + gap + Hv + 18;
-  let lo = Infinity, hi = -Infinity, vmax = 1;
-  for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]);
-    if(b[8]!=null){ lo = Math.min(lo, b[8]-12); hi = Math.max(hi, b[8]+12); } }
-  const pad = (hi-lo)*0.04 || 10; lo -= pad; hi += pad;
-  const y = v => Hp - (v-lo)/(hi-lo)*Hp;
-  const yv = v => Hp + gap + Hv - v/vmax*Hv;
-  let g = '';
-  // 階梯（參數二）值±9 淡紫雙線；參數一 虛線
-  for(const [k,dash,col] of [[8,'',"#a1a1e8"],[9,'3,3',"#7c7cc4"]]){
-    let i0 = 0;
-    for(let i=1;i<=n;i++){
-      if(i===n || bars[i][k]!==bars[i0][k]){
-        const v = bars[i0][k];
-        if(v!=null){
-          const x0 = padL + i0*step, x1 = padL + i*step - 1;
-          if(k===8){ g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v+9)+'" y2="'+y(v+9)+'" stroke="'+col+'" stroke-width="1.2"/>'
-                        + '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v-9)+'" y2="'+y(v-9)+'" stroke="'+col+'" stroke-width="1.2"/>'; }
-          else { g += '<line x1="'+x0+'" x2="'+x1+'" y1="'+y(v)+'" y2="'+y(v)+'" stroke="'+col+'" stroke-width="1" stroke-dasharray="'+dash+'"/>'; }
-        }
-        i0 = i;
-      }
+// ★麥門指標（台指／加權，2026-10-11）：摘要讀 D.tx；K 棒走 /txc（只有這頁開著才抓，之後只抓最後一根）。
+//   圖表＝TradingView lightweight-charts（滾輪/雙指縮放、拖曳、十字線看價）。圖表物件放在 draw() 外面常駐，
+//   每 20 秒重繪只把它搬回新的插槽 → 縮放位置不會被洗掉。程式庫載不到時退回簡易 SVG。
+//   K 棒每根 = [時間秒(台北當UTC), 開, 高, 低, 收, 量, 顏色(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無)]
+const TXC = {'-1':'#4b5563', 0:'#6b7280', 1:'#eab208', 2:'#2c8ce3', 3:'#d15d5d'};   // 黑在暗底看不到 → 深灰
+const TXN = {'-1':'暖機', 0:'黑', 1:'金', 2:'藍', 3:'紅'};
+const TXTFN = {'15':'15分', '60':'1H', 'D':'日', 'W':'週'};
+const TXAPI = API.slice(0, -3) + 'txc';
+const TXLIB = 'https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';
+let TXS = 'TX', TXTF = '15', TXCH = null, TXDATA = {}, TXLIBST = '', TXERR = '', TXBUSY = {};
+try{ const v = JSON.parse(localStorage.getItem('txsel')||'{}'); if(v.s==='TX'||v.s==='TSE') TXS = v.s; if(TXTFN[v.tf]) TXTF = v.tf; }catch(e){}
+function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} draw(); }
+function txBadge(c){ return '<span class="txb" style="background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
+function txAlpha(hex, a){ const n = parseInt(String(hex).slice(1), 16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
+function txP2(n){ return String(n).padStart(2, '0'); }
+function txTime(t, intra){ const d = new Date(t*1000);
+  return intra ? txP2(d.getUTCMonth()+1)+'-'+txP2(d.getUTCDate())+' '+txP2(d.getUTCHours())+':'+txP2(d.getUTCMinutes())
+               : d.getUTCFullYear()+'-'+txP2(d.getUTCMonth()+1)+'-'+txP2(d.getUTCDate()); }
+function txTick(t, k){ const d = new Date(t*1000);
+  if(k===0) return String(d.getUTCFullYear());
+  if(k===1) return (d.getUTCMonth()+1)+'月';
+  if(k===2) return (d.getUTCMonth()+1)+'/'+d.getUTCDate();
+  return txP2(d.getUTCHours())+':'+txP2(d.getUTCMinutes()); }
+function txNum(v, prec){ return (v===null||v===undefined||isNaN(v)) ? '—' : Number(v).toFixed(prec); }
+function txIntra(){ return TXTF==='15' || TXTF==='60'; }
+// 台股慣例：漲紅跌綠
+function txChg(v, prec){ return '<span style="color:'+(v>0?'#ef4444':(v<0?'#22c55e':'var(--dim)'))+'">'+(v>0?'+':'')+txNum(v, prec)+'</span>'; }
+
+function txCandle(b){ const c = TXC[b[6]] || '#888888', up = b[4] >= b[1];
+  return {time:b[0], open:b[1], high:b[2], low:b[3], close:b[4], color: up ? c : txAlpha(c, 0.4), borderColor:c, wickColor:c}; }
+function txVol(b){ return {time:b[0], value:b[5], color: txAlpha(TXC[b[6]] || '#888888', 0.45)}; }
+function txLad(b, i, off){ return (b[i]===null || b[i]===undefined) ? {time:b[0]} : {time:b[0], value:b[i] + off}; }
+
+function txLoadLib(){
+  if(TXLIBST) return;
+  TXLIBST = 'loading';
+  const s = document.createElement('script'); s.src = TXLIB; s.async = true;
+  s.onload = () => { TXLIBST = 'ok'; draw(); };
+  s.onerror = () => { TXLIBST = 'fail'; draw(); };
+  (document.head || document.body).appendChild(s);
+}
+function txCreate(){
+  const LW = LightweightCharts;
+  const el = document.createElement('div'); el.className = 'txwrap';
+  const box = document.createElement('div'); box.className = 'txbox'; el.appendChild(box);
+  const ov = document.createElement('div'); ov.className = 'txov'; el.appendChild(ov);
+  const lg = document.createElement('div'); lg.className = 'txlg'; el.appendChild(lg);
+  const ch = LW.createChart(box, {autoSize:true,
+    layout:{background:{type:'solid', color:'transparent'}, textColor:'#8b97ab', fontSize:11},
+    grid:{vertLines:{color:'rgba(139,151,171,0.06)'}, horzLines:{color:'rgba(139,151,171,0.06)'}},
+    crosshair:{mode: LW.CrosshairMode.Normal},
+    rightPriceScale:{borderVisible:false},
+    timeScale:{borderVisible:false, rightOffset:4, timeVisible:true, secondsVisible:false, tickMarkFormatter: txTick},
+    localization:{locale:'zh-TW', timeFormatter: t => txTime(t, txIntra())},
+    handleScroll:{mouseWheel:true, pressedMouseMove:true, horzTouchDrag:true, vertTouchDrag:false},   // 上下滑還是捲頁面
+    handleScale:{mouseWheel:true, pinch:true, axisPressedMouseMove:true}});
+  const cs = ch.addCandlestickSeries({priceLineVisible:true, lastValueVisible:true});
+  const vs = ch.addHistogramSeries({priceScaleId:'vol', priceFormat:{type:'volume'}, lastValueVisible:false, priceLineVisible:false});
+  ch.priceScale('vol').applyOptions({scaleMargins:{top:0.82, bottom:0}});
+  cs.priceScale().applyOptions({scaleMargins:{top:0.08, bottom:0.22}});
+  const lo = {lineWidth:1, lineType:1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
+  const la = ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo));
+  const lb = ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo));
+  const l1 = ch.addLineSeries(Object.assign({color:'#7c7cc4', lineStyle:2}, lo));
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, la:la, lb:lb, l1:l1, key:'', fit:true, hl:0};
+  ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
+  const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
+  const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); }catch(e){} }); } };
+  ch.timeScale().subscribeVisibleLogicalRangeChange(redo);
+  if(ch.timeScale().subscribeSizeChange) ch.timeScale().subscribeSizeChange(redo);
+}
+function txApply(){
+  const C = TXCH, R = TXDATA[C.key];
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.la, C.lb, C.l1]) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+    C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; return; }
+  const bars = R.bars, m = R.meta;
+  C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
+  C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
+  C.cs.setData(bars.map(txCandle));
+  C.vs.setData(m.vol ? bars.map(txVol) : []);
+  C.la.setData(m.ladder ? bars.map(b => txLad(b, 7, m.half)) : []);
+  C.lb.setData(m.ladder ? bars.map(b => txLad(b, 7, -m.half)) : []);
+  C.l1.setData(m.ladder ? bars.map(b => txLad(b, 8, 0)) : []);
+  txFit(); txHiLo(); txSess(); txLegend(null);
+}
+// 一開始只顯示最近 120 根（日/週 150 根）。★圖表剛建立時寬度還是 0，這時設範圍會被當成「全部擠進 0 寬」
+//   → 等它有寬度（尺寸變化回呼）再設；stub 環境沒有 clientWidth 就直接設。
+function txFit(){
+  const C = TXCH; if(!C || !C.fit) return; const R = TXDATA[C.key]; if(!R || !R.bars.length) return;
+  const w = C.box.clientWidth; if(w !== undefined && !(w > 0)) return;
+  C.fit = false; const n = R.bars.length;
+  C.ch.timeScale().setVisibleLogicalRange({from: Math.max(0, n - (txIntra() ? 120 : 150)), to: n + 3});
+}
+function txUpdate(nb){
+  const C = TXCH, m = TXDATA[C.key].meta;
+  for(const b of nb){
+    C.cs.update(txCandle(b));
+    if(m.vol) C.vs.update(txVol(b));
+    if(m.ladder){ C.la.update(txLad(b, 7, m.half)); C.lb.update(txLad(b, 7, -m.half)); C.l1.update(txLad(b, 8, 0)); }
+  }
+  txHiLo(); txSess(); txLegend(null);
+}
+// 畫面範圍內的最高／最低標數值；台指的籌碼異常星畫在量上
+function txHiLo(){
+  const C = TXCH; if(!C) return; const R = TXDATA[C.key]; if(!R || !R.bars.length) return;
+  const bars = R.bars, m = R.meta, r = C.ch.timeScale().getVisibleLogicalRange();
+  let i0 = 0, i1 = bars.length - 1;
+  if(r){ i0 = Math.max(0, Math.ceil(r.from)); i1 = Math.min(bars.length - 1, Math.floor(r.to)); }
+  if(i1 < i0) return;
+  let ih = i0, il = i0;
+  for(let i = i0; i <= i1; i++){ if(bars[i][2] > bars[ih][2]) ih = i; if(bars[i][3] < bars[il][3]) il = i; }
+  const mk = [{time:bars[ih][0], position:'aboveBar', color:'#e6edf7', shape:'arrowDown', text:'高 '+txNum(bars[ih][2], m.prec)},
+              {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}];
+  mk.sort((a, b) => a.time - b.time);
+  C.cs.setMarkers(mk);
+  const st = [];
+  if(m.vol) for(const b of bars) if(b[9] > 0) st.push({time:b[0], position:'aboveBar', color:'#ffd166', shape:'circle', text:'★'});
+  C.vs.setMarkers(st);
+}
+// 盤別分隔：兩根 K 之間有休市空檔＝新的一盤開始 → 淡淡的虛線＋「夜盤／日盤」（用戶：台指夜盤要看得出來）
+function txSess(){
+  const C = TXCH; if(!C) return; const R = TXDATA[C.key];
+  if(!R || !R.bars.length || !txIntra()){ C.ov.innerHTML = ''; return; }
+  const bars = R.bars, ts = C.ch.timeScale(), step = (TXTF==='15' ? 15 : 60) * 60;
+  const r = ts.getVisibleLogicalRange();
+  const i0 = r ? Math.max(1, Math.floor(r.from)) : 1, i1 = r ? Math.min(bars.length - 1, Math.ceil(r.to)) : bars.length - 1;
+  const H = Math.max(0, (C.box.clientHeight || 0) - 26);
+  let g = '', lastX = -1e9;
+  for(let i = i0; i <= i1; i++){
+    if(bars[i][0] - bars[i-1][0] <= step) continue;
+    const xa = ts.timeToCoordinate(bars[i-1][0]), xb = ts.timeToCoordinate(bars[i][0]);
+    if(xa === null || xb === null) continue;
+    const x = Math.round((xa + xb) / 2) + 0.5, hr = new Date(bars[i][0]*1000).getUTCHours();
+    const night = hr >= 15 || hr < 5;
+    g += '<line x1="'+x+'" x2="'+x+'" y1="0" y2="'+H+'" stroke="'+(night ? 'rgba(161,161,232,0.35)' : 'rgba(139,151,171,0.28)')+'" stroke-width="1" stroke-dasharray="3,4"/>';
+    if(x - lastX >= 34){ lastX = x;      // 縮很小時線很密 → 字只標放得下的
+      g += '<text x="'+(x+3)+'" y="'+(H-4)+'" font-size="9" fill="'+(night ? 'rgba(161,161,232,0.8)' : 'rgba(139,151,171,0.7)')+'">'+(night ? '夜盤' : '日盤')+'</text>'; }
+  }
+  C.ov.innerHTML = g ? '<svg width="100%" height="100%">'+g+'</svg>' : '';
+}
+function txLegend(t){
+  const C = TXCH; if(!C) return; const R = TXDATA[C.key]; if(!R || !R.bars.length) return;
+  const bars = R.bars, m = R.meta; let i = bars.length - 1;
+  if(t !== null && t !== undefined){ let lo = 0, hi = bars.length - 1;
+    while(lo < hi){ const mid = (lo + hi + 1) >> 1; if(bars[mid][0] <= t) lo = mid; else hi = mid - 1; } i = lo; }
+  const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
+  C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(b[6])
+    + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
+    + (m.vol ? ' 量 '+b[5] : '') + (m.ladder && b[7] !== null && b[7] !== undefined ? ' 階梯 '+b[7] : '') + (b[9] > 0 ? ' ★'+b[9] : '');
+}
+async function txFetch(){
+  const key = TXS+'|'+TXTF; if(TXBUSY[key]) return; TXBUSY[key] = 1;
+  const cur = TXDATA[key];
+  let url = TXAPI+'?s='+TXS+'&tf='+TXTF;
+  if(cur && cur.bars.length) url += '&since='+cur.bars[cur.bars.length-1][0];
+  try{
+    const r = await (await fetch(url, {cache:'no-store'})).json();
+    if(!r || !r.ok){ TXERR = (r && r.err) || '抓不到'; }
+    else {
+      TXERR = '';
+      if(r.full || !cur){ TXDATA[key] = {bars:r.bars, meta:r}; if(TXCH && TXCH.key === key) txApply(); else if(TXLIBST === 'fail') draw(); }
+      else { cur.bars.pop(); for(const b of r.bars) cur.bars.push(b); cur.meta = r; if(TXCH && TXCH.key === key) txUpdate(r.bars); }
     }
+  }catch(e){ TXERR = e.name || 'err'; }
+  TXBUSY[key] = 0;
+}
+// draw() 之後呼叫：把常駐的圖表搬進這次的插槽
+function txMount(){
+  const slot = document.getElementById('txslot'); if(!slot) return;
+  if(typeof LightweightCharts === 'undefined'){
+    if(TXLIBST !== 'fail'){ txLoadLib(); slot.innerHTML = '<div class="empty">圖表載入中…</div>'; }
+    else slot.innerHTML = '<div class="warn">互動圖表程式庫載不到（cdn.jsdelivr.net），先用簡易圖</div>' + txSvg();
+    txFetch(); return;
   }
-  // K棒＋量＋星
-  for(let i=0;i<n;i++){
-    const b = bars[i], x = padL + i*step + step/2, col = TXC[b[6]]||'#888';
-    const yo = y(b[1]), yc = y(b[4]), top = Math.min(yo,yc), hgt = Math.max(1, Math.abs(yo-yc));
-    g += '<line x1="'+x+'" x2="'+x+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'" stroke-width="1"/>';
-    g += '<rect x="'+(x-3)+'" y="'+top+'" width="6" height="'+hgt+'" fill="'+(b[4]>=b[1] ? col : col)+'" fill-opacity="'+(b[4]>=b[1] ? '1' : '0.55')+'" stroke="'+col+'"/>';
-    const vy = yv(b[5]);
-    g += '<rect x="'+(x-3)+'" y="'+vy+'" width="6" height="'+(Hp+gap+Hv-vy)+'" fill="'+col+'" fill-opacity="0.45"/>';
-    if(b[10]>0) g += '<text x="'+x+'" y="'+(vy-3)+'" text-anchor="middle" font-size="11" fill="#ffd166">★</text>';
-    if(i%16===0) g += '<text x="'+x+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="#8b97ab">'+b[0]+'</text>';
+  if(!TXCH) txCreate();
+  slot.appendChild(TXCH.el);
+  const key = TXS+'|'+TXTF;
+  if(TXCH.key !== key){ TXCH.key = key; TXCH.fit = true; txApply(); }
+  txFetch();
+}
+// 程式庫載不到時的簡易圖（最近 96 根，不能縮放）
+function txSvg(){
+  const R = TXDATA[TXS+'|'+TXTF]; if(!R || !R.bars.length) return '<div class="empty">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</div>';
+  const bars = R.bars.slice(-96), m = R.meta, n = bars.length;
+  const step = 9, padL = 4, padR = 58, W = padL + n*step + padR, Hp = 260, Hv = m.vol ? 70 : 0, gap = 18, H = Hp + gap + Hv + 18;
+  let lo = Infinity, hi = -Infinity, vmax = 1;
+  for(const b of bars){ lo = Math.min(lo, b[3]); hi = Math.max(hi, b[2]); vmax = Math.max(vmax, b[5]); }
+  const pad = (hi - lo)*0.04 || 10; lo -= pad; hi += pad;
+  const y = v => Hp - (v - lo)/(hi - lo)*Hp, yv = v => Hp + gap + Hv - v/vmax*Hv;
+  let g = '';
+  for(let i = 0; i < n; i++){
+    const b = bars[i], x = padL + i*step + step/2, col = TXC[b[6]] || '#888';
+    const yo = y(b[1]), yc = y(b[4]);
+    g += '<line x1="'+x+'" x2="'+x+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'"/>'
+       + '<rect x="'+(x-3)+'" y="'+Math.min(yo, yc)+'" width="6" height="'+Math.max(1, Math.abs(yo - yc))+'" fill="'+col+'" fill-opacity="'+(b[4] >= b[1] ? 1 : 0.45)+'" stroke="'+col+'"/>';
+    if(Hv){ const vy = yv(b[5]); g += '<rect x="'+(x-3)+'" y="'+vy+'" width="6" height="'+(Hp + gap + Hv - vy)+'" fill="'+col+'" fill-opacity="0.45"/>'; }
+    if(i % 16 === 0) g += '<text x="'+x+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="#8b97ab">'+txTime(b[0], txIntra())+'</text>';
   }
-  // 價格刻度
-  for(let k=0;k<=4;k++){ const v = lo + (hi-lo)*k/4;
-    g += '<text x="'+(W-padR+4)+'" y="'+(y(v)+3)+'" font-size="9" fill="#8b97ab">'+Math.round(v)+'</text>'; }
-  const last = bars[n-1];
-  g += '<line x1="'+padL+'" x2="'+(W-padR)+'" y1="'+y(last[4])+'" y2="'+y(last[4])+'" stroke="#e6edf7" stroke-width="0.5" stroke-dasharray="2,3"/>'
-     + '<text x="'+(W-padR+4)+'" y="'+(y(last[4])+3)+'" font-size="10" font-weight="700" fill="#e6edf7">'+Math.round(last[4])+'</text>';
-  // 容器 dir=rtl → 捲軸一打開就停在最右邊（最新那根），不用 JS；svg 本身再設回 ltr
+  for(let k = 0; k <= 4; k++){ const v = lo + (hi - lo)*k/4; g += '<text x="'+(W - padR + 4)+'" y="'+(y(v) + 3)+'" font-size="9" fill="#8b97ab">'+txNum(v, m.prec)+'</text>'; }
   return '<div dir="rtl" style="overflow-x:auto"><svg dir="ltr" viewBox="0 0 '+W+' '+H+'" width="'+Math.max(W, 320)+'" height="'+H+'" style="max-width:none;display:block">'+g+'</svg></div>';
 }
 function viewTx(){
-  const p = D.tx || {};
-  if(!p.ok) return '<div class="card"><h2>台指・麥門指標</h2><div class="empty">沒有資料（'+(p.err||'未知')+'）</div></div>';
-  const all = p.bars || [], bars = all.slice(-TXBARS), last = all[all.length-1] || [];
-  let h = '<div class="card"><h2>台指・麥門指標<span>期交所 1 分 K・最後一分鐘 '+(p.last_minute||'—')+'・'+(p.age!=null ? p.age+' 秒前算' : '')+'</span></h2>';
-  if(p.stale || p.fetch_err) h += '<div class="warn">⚠ '+(p.stale ? '盤中超過 5 分鐘沒抓到新資料，下面是舊的。' : '')+(p.fetch_err||'')+'</div>';
-  const cl = p.live_bar ? (all[all.length-2] || []) : last;   // 已收盤的最後一根（盤中那根顏色還會變）
-  h += '<div class="fpsum">'+(p.live_bar ? '盤中這根 '+txBadge(last[6])+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(cl[6]) : '現在 '+txBadge(last[6]))
-     + (p.model ? '' : ' <span class="warn">（模型檔沒讀到，用公式版）</span>')
-     + (p.last_change ? '　最近換色 <b>'+p.last_change[0]+'</b> '+p.last_change[1]+' → '+p.last_change[2] : '')
-     + '<br>收盤 <b>'+pf(last[4])+'</b>　階梯(參數二) <b>'+pf(p.ladder2)+'</b> ±'+(p.half||9)+'　階梯(參數一) <b>'+pf(p.ladder1)+'</b>'
-     + (last[7]!==last[6] ? '<br><span class="dim">公式版這根是 '+TXN[last[7]]+'（模型與公式不同時以模型為準）</span>' : '') + '</div>';
-  h += '<div style="margin:6px 0">' + [48,96,240].map(k => '<span class="wb '+(TXBARS===k?'on':'')+'" onclick="TXBARS='+k+';draw()">'+k+' 根</span>').join(' ') + '</div>';
-  h += txChart(bars);
-  const st = all.filter(b => b[10]>0).slice(-8).reverse();
-  h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(b => '<div class="sub">★ '+b[0]+'　5 分 K 量 <b>'+b[10]+'</b> 口　收 '+pf(b[4])+'</div>').join('') : '<div class="empty">最近 '+all.length+' 根內沒有</div>');
+  const P = D.tx || {};
+  if(!P.TX && !P.TSE) return '<div class="card"><h2>麥門指標</h2><div class="empty">沒有資料（'+(P.err||'未知')+'）</div></div>';
+  const p = P[TXS] || {};
+  let h = '<div class="card"><h2>麥門指標<span>期交所 1 分 K・'+(P.age != null ? P.age+' 秒前算' : '')+'</span></h2>';
+  if(P.stale || P.fetch_err) h += '<div class="warn">⚠ '+(P.stale ? '盤中超過 5 分鐘沒抓到新資料，下面是舊的。' : '')+(P.fetch_err || '')+'</div>';
+  h += '<div class="txbar">' + [['TX','台指'],['TSE','加權']].map(([k, n]) => {
+      const q = P[k] || {};
+      return `<span class="wb ${TXS===k?'on':''}" onclick="txSel('${k}')">${n} ${q.ok ? txBadge(q.c) : ''}</span>`; }).join(' ')
+    + '<span class="txsp"></span>'
+    + Object.keys(TXTFN).map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ') + '</div>';
+  if(!p.ok) h += '<div class="empty">'+(p.err || '沒有資料')+'</div>';
+  else {
+    h += '<div class="fpsum">' + (p.live_bar ? '15 分盤中這根 '+txBadge(p.c)+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(p.closed[1])
+                                             : '15 分 現在 '+txBadge(p.c))
+       + (p.model ? '' : ' <span class="warn">（模型檔沒讀到，用公式版）</span>')
+       + (p.last_change ? '　最近換色 <b>'+p.last_change[0]+'</b> '+p.last_change[1]+' → '+p.last_change[2] : '')
+       + '<br>最新 <b>'+txNum(p.last, TXS==='TX' ? 0 : 2)+'</b>'
+       + (TXS==='TX' ? '　階梯(參數二) <b>'+txNum(p.ladder2, 1)+'</b> ±'+(p.half || 9)+'　階梯(參數一) <b>'+txNum(p.ladder1, 1)+'</b>' : '')
+       + '　<span class="dim">最後一分鐘 '+(p.last_minute || '—')+'</span>'
+       + (p.color_formula !== p.color ? '<br><span class="dim">公式版這根是 '+p.color_formula+'（模型與公式不同時以模型為準）</span>' : '') + '</div>';
+  }
+  if(TXTF !== '15') h += '<div class="sub dim">⚠ '+TXTFN[TXTF]+' 的顏色是 15 分模型直接套用，沒有標註可以驗證；只有 15 分驗過。</div>';
+  h += '<div id="txslot"></div>';
+  h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
+  if(TXS === 'TX' && p.ok){
+    const st = (p.stars || []).slice().reverse();
+    h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(s => '<div class="sub">★ '+s[0]+'　5 分 K 量 <b>'+s[1]+'</b> 口</div>').join('') : '<div class="empty">最近沒有</div>');
+  }
   h += '<details><summary class="sech">規則與準確度</summary><div class="note">'
-    + '<b>彩色K（追價氛圍，15 分 K）</b>：黑&lt;金&lt;藍&lt;紅，每根最多動一格。紅→藍＝收盤跌破 EMA55；黑→金＝收盤站上 SMA35（這兩條吻合 99~100%）。'
-    + '金↔藍、進紅、進黑由均線特徵模型判斷；對影片畫面 11,020 根標註（2023-12~2024-09）做四段時間交叉驗證 <b>95%</b>（公式版約 92.6%）；2025 以後沒有標註可以對。'
-    + '<br><b>階梯</b>：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；軟體畫值 ±9 點（實線＝參數二、虛線＝參數一）。'
-    + '<br><b>籌碼異常星</b>：加權開盤時間（09:00~13:25 開始）內某根 5 分 K 量 ≥3000 口；15 分 K 只要包含一根就標星。'
-    + '<br>資料：期交所公開 1 分 K（對麥門資料量 100%、高 100%、收 99.7% 相同）。加權的彩色K公式對不上（76%），沒有放。'
+    + '<b>彩色K（追價氛圍）</b>：黑&lt;金&lt;藍&lt;紅，每根最多動一格。紅→藍＝收盤跌破 EMA55；黑→金＝收盤站上 SMA35。金↔藍、進紅、進黑由均線特徵模型判斷。'
+    + '<br>・<b>台指</b> 15 分：影片畫面 11,020 根標註（2023-12~2024-09）四段時間交叉驗證 <b>95%</b>（公式版 92.6%）。'
+    + '<br>・<b>加權</b> 15 分：台指顏色直接搬只對 35%（兩邊各算各的）；台指公式套加權 86%；台指＋加權標註合併訓練 <b>約 88%</b>（加權標註只有 1,128 根、2023-12~2024-06，最弱那段 72%）。'
+    + '<br>・1H／日／週：同一個模型套上去，<b>沒有驗證</b>；週K只有 2023-12 起約 150 根，長均線算不出來，所以整條灰色。'
+    + '<br><b>階梯</b>（只有台指）：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；畫值 ±9 點（實線＝參數二、虛線＝參數一）。'
+    + '<br><b>籌碼異常星</b>（只有台指 15 分）：加權開盤時間（09:00~13:25 開始）內某根 5 分 K 量 ≥3000 口。'
+    + '<br><b>K 棒</b>：台指日K＝前一晚夜盤＋當天日盤（期交所交易日；量跟期交所公布的當日總量一致），1H 日盤從 08:45 起算；加權 1H 從 09:00 起算，13:00 那根含收盤。虛線＝換盤（夜盤／日盤開始）。'
+    + '<br>資料：期交所公開 1 分 K（台指對麥門資料量 100%、收 99.7% 相同；加權 267/267 根完全相同、沒有量）。近月合約＝最早到期（結算日日盤還是舊月）。'
     + '</div></details>';
-  h += '<div class="sub">合約 '+Object.values(p.sym||{}).join(' / ')+'・1 分 K '+(p.n1m||0)+' 根</div></div>';
+  h += '<div class="sub">合約 '+Object.values(P.sym || {}).join(' / ')+'</div></div>';
   return h;
 }
 
