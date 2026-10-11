@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx8"
+VER = "20261011tx9"
 
 
 def _clean(v):
@@ -1968,6 +1968,70 @@ function txLadIdx(){ return TXLAD === '2' ? 7 : 8; }
 function txLadSel(k){ TXLAD = k; try{ localStorage.setItem('txlad', k); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ txLadApply(); txLegend(null); }catch(e){} }
   draw(); }
+// ★上下線（麥門「到價推撥」的上線／下線＝帳號自己設的警示價，不是公式；2026-10-11）：值從麥門文章圖讀出（mmtx_updown.json，±3 點）。
+//   用戶：「做個開關，我看一下有什麼跡象」「要分段，不然同時太多會不知道什麼時間點的」
+//   → 每條線只畫「這次讀到 → 下次讀到不同值」那一段，段首標時間與值；段的起點＝那張圖的上傳時間（圖檔 UUIDv7）。
+//   不參與縱軸自動縮放（離價格很遠的線不可以把 K 棒壓扁）；看不到時圖例與下方紀錄照樣有數值。
+const TXUDC = {up:'#bf57aa', dn:'#4f7fd6'};
+let TXUD = '1';
+try{ const v = localStorage.getItem('txud'); if(v === '0' || v === '1') TXUD = v; }catch(e){}
+function txUdSel(){ TXUD = TXUD === '1' ? '0' : '1'; try{ localStorage.setItem('txud', TXUD); }catch(e){}
+  if(TXCH && TXDATA[TXCH.key]){ try{ txUdApply(); txLegend(null); }catch(e){} }
+  draw(); }
+function txUdObs(){ const U = (D && D.tx && D.tx.updown) || {}; return txIsC(TXS) ? [] : (U[TXS] || []); }
+function txUdSegs(k){      // [{s:起點秒, v:值, d:'MM-DD HH:MM'}]；±5 點內＝同一條線（讀數誤差）→ 不換段
+  const out = [];
+  for(const o of txUdObs()){
+    const v = o[k]; if(v === null || v === undefined) continue;
+    const last = out[out.length-1];
+    if(last && Math.abs(last.v - v) <= 5) continue;
+    out.push({s:o.ts, v:v, d:String(o.t).slice(5)});
+  }
+  return out;
+}
+function txUdAt(segs, t){ let r = null; for(const g of segs){ if(g.s <= t) r = g; else break; } return r; }
+function txUdData(bars, segs, k){
+  const pts = [], mk = []; let j = -1, pj = -1;
+  for(const b of bars){
+    while(j + 1 < segs.length && segs[j+1].s <= b[0]) j++;
+    if(j < 0){ pts.push({time:b[0]}); continue; }
+    if(j !== pj){
+      if(pj >= 0){ const q = pts[pts.length-1]; if(q && q.value !== undefined) q.color = TXGAP; }    // 換段處斷開
+      mk.push({time:b[0], position:(k === 'up' ? 'aboveBar' : 'belowBar'), color:TXUDC[k], shape:'circle',
+               text:(k === 'up' ? '上 ' : '下 ')+segs[j].d.slice(0, 5)});
+      pj = j;
+    }
+    pts.push({time:b[0], value:segs[j].v});
+  }
+  return {pts:pts, mk:mk};
+}
+function txUdApply(){
+  const C = TXCH; if(!C || !C.uu) return; const R = TXDATA[C.key];
+  const on = TXUD === '1' && !txIsC(TXS) && R && R.bars && R.bars.length;
+  for(const [k, sr] of [['up', C.uu], ['dn', C.ud]]){
+    if(!on){ sr.setData([]); sr.setMarkers([]); continue; }
+    const r = txUdData(R.bars, txUdSegs(k), k); sr.setData(r.pts); C.udm[k] = r.mk;
+  }
+  if(on) txUdMarks();
+}
+// 段首標籤：縮小時很密會疊在一起（用戶：同時太多會不知道什麼時間點）→ 跟前一個標籤距離不到 60px 的只留點不寫字；縮放後重排
+function txUdMarks(){
+  const C = TXCH; if(!C || !C.uu || TXUD !== '1' || txIsC(TXS)) return; const ts = C.ch.timeScale();
+  for(const [k, sr] of [['up', C.uu], ['dn', C.ud]]){
+    let lastX = -1e9; const out = [];
+    for(const m of (C.udm[k] || [])){
+      const x = ts.timeToCoordinate(m.time), show = x !== null && x - lastX >= 60;
+      if(show) lastX = x;
+      out.push(Object.assign({}, m, {text: show ? m.text : ''}));
+    }
+    sr.setMarkers(out);
+  }
+}
+function txUdLeg(t){
+  if(TXUD !== '1' || txIsC(TXS)) return '';
+  const u = txUdAt(txUdSegs('up'), t), d = txUdAt(txUdSegs('dn'), t);
+  return (u ? ' <span style="color:'+TXUDC.up+'">上線 '+Math.round(u.v)+'</span>' : '') + (d ? ' <span style="color:'+TXUDC.dn+'">下線 '+Math.round(d.v)+'</span>' : '');
+}
 function txBadge(c){ return '<span class="txb" style="background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
 function txAlpha(hex, a){ const n = parseInt(String(hex).slice(1), 16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
 function txP2(n){ return String(n).padStart(2, '0'); }
@@ -2198,23 +2262,25 @@ function txCreate(){
   //   「每段最後一個點」塗透明＝從它連到下一段的那一小段看不見（實測：線段顏色取「起點」那個點的 color）。
   const lo = {lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false};
   const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo))];
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, key:'', fit:true, hl:0};
+  const uo = {lineWidth:2, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, autoscaleInfoProvider: () => null};
+  const uu = ch.addLineSeries(Object.assign({color:TXUDC.up}, uo)), ud = ch.addLineSeries(Object.assign({color:TXUDC.dn}, uo));
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, key:'', fit:true, hl:0};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
-  const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); }catch(e){} }); } };
+  const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); txUdMarks(); }catch(e){} }); } };
   ch.timeScale().subscribeVisibleLogicalRangeChange(redo);
   if(ch.timeScale().subscribeSizeChange) ch.timeScale().subscribeSizeChange(redo);
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs].concat(C.lad)) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud].concat(C.lad)) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  txLadApply();
+  txLadApply(); txUdApply();
   txFit(); txHiLo(); txSess(); txLegend(null);
 }
 function txLadApply(){
@@ -2246,6 +2312,13 @@ function txUpdate(nb){
   if(m.ladder){     // 段號從頭算才知道單雙 → 整串重分段，只把新來的那幾根推進去（舊的段不會變）
     const all = TXDATA[C.key].bars, seg = txLadSeg(all, m.half, txLadIdx());
     for(let i = all.length - nb.length; i < all.length; i++) C.lad.forEach((s, j) => s.update(seg[j][i]));
+  }
+  if(TXUD === '1' && !txIsC(TXS) && C.uu){
+    const all = TXDATA[C.key].bars;
+    for(const [k, sr] of [['up', C.uu], ['dn', C.ud]]){
+      const r = txUdData(all, txUdSegs(k), k);
+      for(let i = all.length - nb.length; i < all.length; i++) sr.update(r.pts[i]);
+    }
   }
   txHiLo(); txSess(); txLegend(null);
 }
@@ -2307,7 +2380,7 @@ function txLegend(t){
   const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(b[6])
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
-    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+b[9] : '');
+    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+b[9] : '') + txUdLeg(b[0]);
 }
 async function txFetch(){
   if(txIsC(TXS)) return txFetchC();                // 幣：手機直接跟 OKX 拿
@@ -2400,7 +2473,8 @@ function viewTx(){
     + '</div><div class="txbar">'
     + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
     + ((TXS === 'TX' || isC) && txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
-        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '') + '</div>';
+        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '')
+    + (!isC ? `<span class="txsp"></span><span class="wb ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '') + '</div>';
   if(isC) h += txCSum();
   else if(!p.ok) h += '<div class="empty">'+(p.err || P.err || '沒有資料')+'</div>';
   else {
@@ -2418,6 +2492,14 @@ function viewTx(){
   else if(TXTF !== '15') h += '<div class="sub dim">⚠ '+TXTFN[TXTF]+' 的顏色是 15 分模型直接套用，沒有標註可以驗證；只有 15 分驗過。</div>';
   h += '<div id="txslot"></div>';
   h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
+  if(!isC && TXUD === '1'){
+    const ob = txUdObs().slice().reverse();
+    h += '<div class="sech">上下線紀錄 <span class="dim">（麥門文章圖讀出、±3 點；時間＝圖上傳時間）</span></div>'
+       + (ob.length ? ob.map(o => '<div class="sub">'+o.t+'　<span style="color:'+TXUDC.up+'">上線 '+(o.up == null ? '—' : o.up)+'</span>'
+           + '　<span style="color:'+TXUDC.dn+'">下線 '+(o.dn == null ? '—' : o.dn)+'</span>　<span class="dim">'+o.tf+'圖</span></div>').join('')
+         : '<div class="empty">這個商品沒有紀錄</div>')
+       + '<div class="sub dim">「—」＝那張圖上沒讀到（可能在畫面外），不是被取消。</div>';
+  }
   if(TXS === 'TX' && p.ok){
     const st = (p.stars || []).slice().reverse();
     h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(s => '<div class="sub">★ '+s[0]+'　5 分 K 量 <b>'+s[1]+'</b> 口</div>').join('') : '<div class="empty">最近沒有</div>');
@@ -2428,6 +2510,8 @@ function viewTx(){
     + '<br>・<b>加權</b> 15 分：台指顏色直接搬只對 35%（兩邊各算各的）；台指公式套加權 86%；台指＋加權標註合併訓練 <b>約 88%</b>（加權標註只有 1,128 根、2023-12~2024-06，最弱那段 72%）。'
     + '<br>・1H／日／週：同一個模型套上去，<b>沒有驗證</b>；週K只有 2023-12 起約 150 根，長均線算不出來，所以整條灰色。'
     + '<br><b>階梯</b>（只有台指）：前一交易日台指 VWAP，參數二＝08:45~13:30、參數一＝09:00~10:45，15:00 夜盤起換階；畫值 ±9 點的雙線；跟麥門一樣一次只畫一個，按鈕切換（預設參數一）。'
+    + '<br><b>上下線</b>（按鈕開關）：麥門的「到價推撥」上線／下線是帳號自己設的警示價（不是公式）；這裡是從麥門文章圖讀出來的歷史值，'
+    + '每條只畫「這次讀到 → 下次改值」那一段，段首標時間；時間＝那張圖的上傳時間，讀數 ±3 點；不參與縱軸縮放（太遠的線會在畫面外）。'
     + '<br><b>籌碼異常星</b>（只有台指 15 分）：加權開盤時間（09:00~13:25 開始）內某根 5 分 K 量 ≥3000 口。'
     + '<br><b>K 棒</b>：台指日K＝前一晚夜盤＋當天日盤（期交所交易日；量跟期交所公布的當日總量一致），1H 日盤從 08:45 起算；加權 1H 從 09:00 起算，13:00 那根含收盤。虛線＝換盤（夜盤／日盤開始）。'
     + '<br>資料：期交所公開 1 分 K（台指對麥門資料量 100%、收 99.7% 相同；加權 267/267 根完全相同、沒有量）。近月合約＝最早到期（結算日日盤還是舊月）。'

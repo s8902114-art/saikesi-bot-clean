@@ -34,6 +34,13 @@ SEED_TSE_FILE = os.path.join(_HERE, "mmtx_tse_seed.json.gz")
 SEED_DAILY_FILE = os.path.join(_HERE, "mmtx_daily_seed.json.gz")
 MODEL_FILE = os.path.join(_HERE, "mmtx_model.json.gz")
 MODEL_TSE_FILE = os.path.join(_HERE, "mmtx_model_tse.json.gz")
+# 麥門「上線／下線」（到價推撥＝帳號自己設的警示價，不是公式）：從麥門文章圖讀出來的歷史值（_mm_data/updown_export.py 產生）
+UPDOWN_FILE = os.path.join(_HERE, "mmtx_updown.json")
+try:
+    with open(UPDOWN_FILE, encoding="utf-8") as _fh:
+        _UPDOWN = {k: v for k, v in json.load(_fh).items() if k in ("TX", "TSE")}
+except Exception:
+    _UPDOWN = {}
 KEEP_DAYS = {"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
 WARM = 280                     # 台指 15 分實測：75 天窗跟全史比，前 ~280 根之後 100% 一致 → 之前不上色
 SHOW = {"15": 1500, "60": 1000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根
@@ -541,6 +548,7 @@ def dash_payload():
             p["fetch_err"] = _state.get("fetch_err") or ""
             # 盤中超過 5 分鐘沒抓到新資料 = 過期（期交所擋雲端 IP、或斷線）
             p["stale"] = bool(in_session() and time.time() - (_state.get("last_fetch") or 0) > 300)
+            p["updown"] = _UPDOWN
             return p
         return {"ok": False, "err": _state.get("err") or "尚未算完第一次"}
     except Exception as e:
