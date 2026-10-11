@@ -35,7 +35,7 @@ _MAX_SIG = 40   # 最近訊號只留這麼多筆，避免記憶體無限長
 # ★版本戳記：加到手機主畫面的 PWA 沒有網址列也沒有重新整理鍵，iOS 會拿舊快照，
 #   推了新版使用者卻看到舊畫面（2026-09-24 用戶回報「沒改阿」就是這個）。
 #   頁面內嵌這個字串，開頁後跟 /api 回的比對，不一樣就自動重載一次。
-VER = "20261011tx9"
+VER = "20261011tx10"
 
 
 def _clean(v):
@@ -2009,8 +2009,15 @@ function txUdApply(){
   const C = TXCH; if(!C || !C.uu) return; const R = TXDATA[C.key];
   const on = TXUD === '1' && !txIsC(TXS) && R && R.bars && R.bars.length;
   for(const [k, sr] of [['up', C.uu], ['dn', C.ud]]){
+    for(const pl of (C.udpl[k] || [])){ try{ sr.removePriceLine(pl); }catch(e){} }
+    C.udpl[k] = [];
     if(!on){ sr.setData([]); sr.setMarkers([]); continue; }
-    const r = txUdData(R.bars, txUdSegs(k), k); sr.setData(r.pts); C.udm[k] = r.mk;
+    const segs = txUdSegs(k), r = txUdData(R.bars, segs, k); sr.setData(r.pts); C.udm[k] = r.mk;
+    // ★目前生效的那條：整條橫跨圖面的虛線＋價格軸標籤（跟麥門軟體一樣）。
+    //   用戶 10-11：「你哪有畫到加權」——10-10 晚上設的線，後面還沒有 K 棒，分段畫不出來 → 現值一律用橫線顯示
+    const cur = segs[segs.length - 1];
+    if(cur && sr.createPriceLine) C.udpl[k].push(sr.createPriceLine({price:cur.v, color:TXUDC[k], lineWidth:1, lineStyle:2,
+      axisLabelVisible:true, title:(k === 'up' ? '上線 ' : '下線 ') + cur.d.slice(0, 5)}));
   }
   if(on) txUdMarks();
 }
@@ -2264,7 +2271,7 @@ function txCreate(){
   const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo))];
   const uo = {lineWidth:2, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, autoscaleInfoProvider: () => null};
   const uu = ch.addLineSeries(Object.assign({color:TXUDC.up}, uo)), ud = ch.addLineSeries(Object.assign({color:TXUDC.dn}, uo));
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, key:'', fit:true, hl:0};
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); txUdMarks(); }catch(e){} }); } };
