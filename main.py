@@ -10971,8 +10971,7 @@ def build_dynamic_symbols() -> bool:
         print(f"[SYMBOLS] 快取寫入失敗: {e}", flush=True)
 
     msg = f"🔄 幣種列表已動態更新：市值前100 × OKX 永續，共 **{len(SYMBOLS)}** 個"
-    print(f"[SYMBOLS] ✅ {msg}", flush=True)
-    dc_log(msg)
+    print(f"[SYMBOLS] ✅ {msg}", flush=True)       # ★2026-10-14 用戶：「DC 一直跳很煩，你看的到就好」→ 只留 log，不發 Discord（16 天發了 55 次）
     global _movers_last_updated
     _movers_last_updated = time.time()   # 全量更新已含最新漲跌幅榜,重置獨立計時避免立刻又觸發輕量刷新
     return True
