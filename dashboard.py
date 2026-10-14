@@ -1003,6 +1003,8 @@ _HTML = """<!doctype html>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0b0e14">
 <link rel="manifest" href="?m=1">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Martian+Mono:wght@700&display=swap" rel="stylesheet">
 <title>盤面</title>
 <style>
   .sps{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 10px}
@@ -1139,6 +1141,54 @@ _HTML = """<!doctype html>
   .nbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 8px;font-size:12px}
   input.f{background:#0f141c;border:1px solid var(--line);color:var(--fg);border-radius:8px;
           padding:6px 10px;font-size:13px;width:100%;margin-bottom:10px}
+  /* ── OI 排名（2026-10-15 改版，用戶：「你做的畫面真的醜」→ frontend-design 重做）──
+     羅盤：上排 OI 增、下排 OI 減（實測 285/285 跟 OI 正負一致）；
+     左右是「偏空／偏多」不是單純漲跌 —— q24 套了市場結構覆寫，前 20 有 6 個跟 24H 漲跌不同號。 */
+  .rk{--tkf:"Martian Mono",ui-monospace,monospace;--nmf:"IBM Plex Mono",ui-monospace,monospace}
+  .rkc{position:relative;margin:16px 0 0}
+  .rkg{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);
+       border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .rkq{all:unset;cursor:pointer;background:var(--card);padding:12px 12px 11px;min-height:96px;
+       display:flex;flex-direction:column;justify-content:space-between;gap:4px}
+  .rkq:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .rkq .nm{font-size:14px;font-weight:700;display:flex;flex-direction:column;gap:2px;line-height:1.3}
+  .rkq .nm small{font-weight:400;color:var(--dim);font-size:11px}
+  .rkq .ct{font:700 26px/1 var(--tkf);letter-spacing:-.02em}
+  .rkq .ct.z{color:var(--line)}
+  .rkq .dl{font:12px/1 var(--nmf);color:var(--dim)}
+  .rkq[aria-pressed="true"]{box-shadow:inset 0 0 0 2px var(--fg)}
+  .rkg.f .rkq[aria-pressed="false"]{opacity:.45}
+  .rkv{position:absolute;left:50%;font:10px/1 var(--nmf);color:var(--dim);background:var(--bg);
+       padding:2px 6px;border-radius:99px;border:1px solid var(--line);z-index:2;pointer-events:none}
+  .rkv.t{top:0;transform:translate(-50%,-50%)} .rkv.b{bottom:0;transform:translate(-50%,50%)}
+  .rkx{display:flex;justify-content:space-between;font:11px/1 var(--nmf);color:var(--dim);margin:7px 2px 0}
+  .rkd{margin:12px 0 0;font-size:13px;color:var(--dim)}
+  .rkd b{color:var(--fg);font-weight:500}
+  .rkgh{display:flex;align-items:baseline;gap:8px;padding:22px 0 8px;border-bottom:1px solid var(--line)}
+  .rkgh b{font-size:14px} .rkgh span{color:var(--dim);font-size:12px}
+  .rkgh i{margin-left:auto;font:normal 12px var(--nmf);color:var(--dim)}
+  .rk ol{list-style:none;margin:0;padding:0}
+  .rkr{display:grid;grid-template-columns:1fr auto;column-gap:12px;row-gap:5px;
+       padding:12px 0 11px;border-bottom:1px solid var(--line)}
+  .rkr .tk{font:700 15px/1.2 var(--tkf);letter-spacing:-.01em;display:flex;align-items:baseline;gap:6px;min-width:0}
+  .rkr .tk .cl{text-decoration:none}
+  .rkr .rks{font:500 11px/1 var(--nmf);padding:3px 5px;border-radius:4px;border:1px solid var(--line);color:var(--dim);margin-left:2px}
+  .rkr .rks.up{color:var(--up);border-color:currentColor} .rkr .rks.down{color:var(--down);border-color:currentColor}
+  .rkr .oi{font:600 17px/1.2 var(--nmf);text-align:right}
+  .rkb{grid-column:1/-1;height:6px;border-radius:99px;background:var(--line);overflow:hidden;position:relative}
+  .rkb i{position:absolute;top:0;bottom:0;left:0;border-radius:99px;background:currentColor}
+  .rkb.over i::after{content:"";position:absolute;right:0;top:0;bottom:0;width:10px;
+       background:repeating-linear-gradient(90deg,var(--card) 0 2px,transparent 2px 4px)}
+  .rkr .r2{grid-column:1/-1;font:12px/1.4 var(--nmf);color:var(--dim);display:flex;flex-wrap:wrap;gap:4px 14px}
+  .rkr .r2 em{font-style:normal;color:var(--fg)}
+  .rkr .r2 em.up{color:var(--up)} .rkr .r2 em.down{color:var(--down)}
+  /* ★可信度墨色：OI 金額越大條越實；<5M 一張大單就推得動 → 整列淡、條改斜線（取代原本的灰字＋註腳） */
+  .rkr.lo .tk,.rkr.lo .oi{opacity:.5}
+  .rkr.lo .rkb i{background:repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 5px);opacity:.8}
+  .rkr.mid .rkb i{opacity:.62}
+  .rklg{display:flex;flex-wrap:wrap;gap:6px 16px;margin:18px 0 0;font-size:12px;color:var(--dim);align-items:center}
+  .rksw{display:inline-block;width:28px;height:6px;border-radius:99px;margin-right:6px;vertical-align:middle;background:currentColor}
+  .rksw.mid{opacity:.62} .rksw.lo{background:repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 5px)}
 </style></head><body>
 
 <div class="top">
@@ -3081,11 +3131,15 @@ function viewMkt(){
 //   金額差 12~45 倍（實測 SUI 857.8M vs 37.0M、VVV 190M vs 4.2M）。
 //   不把金額擺出來的話，OKX 上只有 $1M 未平倉的小幣（一張大單就 +10%）
 //   會跟 $800M 的大幣在榜上長得一樣大 —— 那不是「主力建倉」。
-const RANK_COLS = ['#','幣種','價格','OI變化','OI金額','OI/市值','價24H'];
-// ★欄寬全部寫死、不留 auto：留 auto 的那一欄會在寬螢幕上把剩餘寬度全吃掉，
-//   加上第二欄以後預設靠右，結果 # 在最左、其他擠在最右，中間一片空白
-//   （用戶 2026-09-24：「這是比目魚才能看嗎 隔那麼遠」）。
-const RANK_W    = ['32px','120px','92px','84px','86px','78px','78px'];
+// ★2026-10-15 改版：7 欄表 → 兩行一筆（手機不用左右滑），四象限做成座標羅盤可點選篩選；
+//   金額改用「墨色深淺」表現（≥50M 實、5~50M 中、<5M 淡＋斜線），不再靠灰字加註腳。
+//   拿掉 ★（an===2＝|OI%| 全市場前 5%）：這頁本來就是前 20，實測 20 個裡 15 個有星，沒有鑑別力。
+// 羅盤位置＝座標：上排 OI 增、下排 OI 減；左欄偏空、右欄偏多。
+const RK_GRID = [['空頭建倉','down'],['多頭建倉','up'],['多頭平倉','down'],['空頭平倉','up']];
+const RK_SIDE = Object.fromEntries(RK_GRID);
+const RK_CAP  = 0.10;   // 條長以 10% 封頂，超過畫斜線尾巴；數字照實寫
+let RKQ = null;         // 目前點選的象限（null＝全部）
+function rkSet(q){ RKQ = (RKQ===q) ? null : q; draw(); }
 
 // ★通用分段表：一張 <table>、表頭只出現一次，分組當標題列插在表身。
 //   訊號類的頁面原本是一張平表全部擠在一起（用戶 2026-09-24：「全都擠在一起很難看」）。
@@ -3116,49 +3170,69 @@ function viewRank(){
   const m=D.mkt, rows=m.rows||[];
   if(!rows.length) return noData(m);
   const top20 = rows.slice(0,20);      // ★官方：全部一起排取前 20，再分四組
-  let body = '';
-  for(const q of QUADS){
-    const g = top20.filter(r=>(r.q24||r.q)===q);
-    if(!g.length) continue;
-    const meta = (m.quads&&m.quads[q]) ? m.quads[q] : ['',''];
-    body += `<tr class="sec"><td colspan="${RANK_COLS.length}">`
-          + `<b style="color:${QCLR[q]}">${q}</b>`
-          + `<span class="dim" style="margin-left:8px">${meta[0]}</span></td></tr>`;
-    g.forEach((r,i)=>{
-      const s = r.sc24 || r.sc || {};   // 排名上的小分數也用主尺度（24H）
-      body += '<tr>'
-        + `<td class="dim">${i+1}</td>`
-        + `<td>${tag(r.inst)}<a class="cl" onclick="openCard('${r.inst}')">`
-          + (r.an===2?'<span class="star">★</span>':'')
-          + r.inst.replace('-USDT-SWAP','') + '</a>'
-          + (s.total!==undefined
-             ? `<span class="scp ${s.total>=20?'up':(s.total<=-20?'down':'dim')}">`
-               + `${s.total>0?'+':''}${s.total}</span>` : '')
-        + '</td>'
-        + `<td>${pf(r.last)}</td>`
-        + `<td class="${cls(r.oi)}">${pct(r.oi)}</td>`
-        + `<td class="${(r.oiu||0)<5e6?'dim':''}">${r.oiu?big(r.oiu):'—'}</td>`
-        + `<td>${r.oimc?f(r.oimc*100,2)+'%':'—'}</td>`
-        + `<td class="${cls(r.chg24h)}">${pct(r.chg24h)}</td>`
-        + '</tr>';
-    });
+  const qOf  = r => r.q24 || r.q;
+  const meta = q => (m.quads && m.quads[q]) ? m.quads[q] : ['',''];
+  const net  = g => g.reduce((s,r)=>s+(r.d_usd||0), 0);
+  // 淨額常常不到 1M，全站的 big() 那一段會印成「31372」→ 這頁自己補 K 單位（不動 big()，別頁沿用原樣）
+  const sgnBig = v => { const a=Math.abs(v), s=v<0?'−':'+';
+    return s + (a>=1e6 ? f(a/1e6,1)+'M' : (a>=1e3 ? f(a/1e3,0)+'K' : f(a,0))); };
+  if(RKQ && !RK_SIDE[RKQ]) RKQ = null;
+
+  const grid = RK_GRID.map(([q,side])=>{
+    const g = top20.filter(r=>qOf(r)===q);
+    return `<button class="rkq" aria-pressed="${RKQ===q}" onclick="rkSet('${q}')">`
+      + `<span class="nm"><b class="${side}">${q}</b><small>${meta(q)[0]}</small></span>`
+      + `<span class="ct ${g.length?'':'z'}">${g.length}</span>`
+      + `<span class="dl">${g.length ? 'OI 淨 '+sgnBig(net(g)) : '本窗沒有'}</span></button>`;
+  }).join('');
+
+  const row = r => {
+    const s = (r.sc24 || r.sc || {}).total;   // 排名上的小分數也用主尺度（24H）
+    const u = r.oiu || 0;
+    const a = Math.abs(r.oi || 0);
+    return `<li class="rkr ${u>=50e6?'hi':(u>=5e6?'mid':'lo')}">`
+      + `<span class="tk">${tag(r.inst)}<a class="cl" onclick="openCard('${r.inst}')">`
+        + r.inst.replace('-USDT-SWAP','') + '</a>'
+        + (s!==undefined ? `<span class="rks ${s>=20?'up':(s<=-20?'down':'')}" title="評分（24H）">${s>0?'+':''}${s}</span>` : '')
+      + '</span>'
+      + `<span class="oi ${cls(r.oi)}">${pct(r.oi)}</span>`
+      + `<span class="rkb ${cls(r.oi)} ${a>RK_CAP?'over':''}"><i style="width:${Math.min(a/RK_CAP,1)*100}%"></i></span>`
+      + '<span class="r2">'
+        + `<span>${pf(r.last)}</span>`
+        + `<span>OI <em>${u?big(u):'—'}</em></span>`
+        + `<span>佔市值 <em>${r.oimc?f(r.oimc*100,1)+'%':'—'}</em></span>`
+        + `<span>24H <em class="${cls(r.chg24h)}">${pct(r.chg24h)}</em></span>`
+      + '</span></li>';
+  };
+
+  let list = '';
+  for(const q of (RKQ ? [RKQ] : QUADS)){
+    const g = top20.filter(r=>qOf(r)===q);
+    if(!g.length){ if(RKQ) list += `<div class="empty">這個窗的前 20 名裡沒有${q}。再點一次羅盤回到全部。</div>`; continue; }
+    list += `<div class="rkgh"><b class="${RK_SIDE[q]}">${q}</b><span>${meta(q)[0]}</span><i>${g.length} 個</i></div>`
+          + '<ol>' + g.map(row).join('') + '</ol>';
   }
-  return '<div class="card">' + winBar()
+
+  return '<div class="card rk">' + winBar()
     + `<h2>OI 異動排名<span>${m.win_h}H 持倉量變化・依 |OI 變化%| 取前 20</span></h2>`
     + scaleBar()
-    + '<div class="scroll"><table class="fx">'
-    + '<colgroup>' + RANK_W.map(w=>`<col style="width:${w}">`).join('') + '</colgroup>'
-    + '<thead><tr>' + RANK_COLS.map(c=>`<th>${c}</th>`).join('') + '</tr></thead>'
-    + '<tbody>' + body + '</tbody></table></div>'
-    + '<div class="sub" style="margin-top:8px">'
-    + (m.agg ? `★OI 已改為<b>跨所聚合</b>（${m.agg_ex||'OKX+幣安+Bitget+Gate'}）。`
-             + '★<b>拿不到 Bybit</b>：三個網域從雲端都被 CloudFront 擋 403，'
-             + '實測它約佔三到四成 —— 所以這不是全市場，也不會跟官方逐筆相同。'
+    + '<div class="rkc"><span class="rkv t">OI 增</span>'
+    + `<div class="rkg ${RKQ?'f':''}">${grid}</div>`
+    + '<span class="rkv b">OI 減</span></div>'
+    + '<div class="rkx"><span>← 偏空</span><span>偏多 →</span></div>'
+    + `<div class="rkd">${RKQ ? `<b>${RKQ}</b>　${meta(RKQ)[1]||''}` : '點一格只看那個象限，再點一次回到全部。'}</div>`
+    + list
+    + '<div class="rklg"><span><i class="rksw"></i>OI ≥ 50M</span>'
+    + '<span><i class="rksw mid"></i>5M ~ 50M</span>'
+    + '<span><i class="rksw lo"></i>&lt; 5M，一張大單就推得動，別當主力建倉</span></div>'
+    + '<div class="sub" style="margin-top:12px">'
+    + (m.agg ? `OI 是 ${m.agg_ex||'OKX+幣安+Bitget+Gate'} 加總，<b>沒有 Bybit</b>`
+             + '（三個網域從雲端都被 CloudFront 擋 403，實測約佔三到四成），不會跟官方逐筆相同。'
              : '★<b>OI 目前只有 OKX</b>（聚合還在累積）：官方是 CoinGlass 跨所加總，'
              + '同一幣金額差 12~45 倍、變化% 甚至方向相反。')
-    + '<b>金額小的（灰字，&lt;5M）一張大單就能推到 +10%，別當成主力建倉。</b><br>'
-    + '象限已套用官方的市場結構覆寫層'
-    + '（評分裡的「主動做多／主動做空／多頭出場／空頭出場」會蓋過單純的 OI×價格方向）。</div>'
+    + '<br>左右是<b>偏多／偏空</b>，不是單純漲跌：象限套了官方的市場結構覆寫層'
+    + '（主動做多／主動做空／多頭出場／空頭出場會蓋過 OI×24H 價格方向），所以 24H 漲跌跟左右欄不一定同號。'
+    + '條長以 10% 封頂，超過的尾巴畫斜線。</div>'
     + '</div>';
 }
 
