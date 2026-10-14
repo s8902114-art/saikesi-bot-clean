@@ -1072,6 +1072,7 @@ _HTML = """<!doctype html>
   .txwrap{position:relative;width:100%;height:440px;margin:6px 0}
   .txbox{position:absolute;left:0;top:0;right:0;bottom:0}
   .txov{position:absolute;left:0;top:0;right:60px;bottom:0;pointer-events:none;z-index:2;overflow:hidden}
+  .txsr{position:absolute;left:0;top:0;right:60px;bottom:0;pointer-events:none;z-index:1;overflow:hidden}
   .txlg{position:absolute;left:6px;top:4px;z-index:3;font-size:12px;pointer-events:none;background:rgba(11,14,20,.72);
         padding:2px 6px;border-radius:4px;line-height:1.6;max-width:calc(100% - 76px)}
   @media (max-width:600px){ .txwrap{height:380px} .txlg{font-size:11px} }
@@ -1764,6 +1765,7 @@ function cardHTML(){
         + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
         + (txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
             `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '')
+        + '<span class="txsp"></span>' + txTglBar()
         + '</div>' + txCSum() + '<div id="txslotc"></div>'
         + '<div class="sub dim">雙指／滾輪縮放、左右拖曳、按住看那根的價；彩色K＝台指公式直接套（沒驗證）、階梯＝CME 時段 VWAP、灰色＝暖機。</div>' : '')
     // 欄位順序與名稱對齊官方字卡（2026-09-24 實際抓到的版面）
@@ -2039,6 +2041,225 @@ function txUdLeg(t){
   const u = txUdAt(txUdSegs('up'), t), d = txUdAt(txUdSegs('dn'), t);
   return (u ? ' <span style="color:'+TXUDC.up+'">上線 '+Math.round(u.v)+'</span>' : '') + (d ? ' <span style="color:'+TXUDC.dn+'">下線 '+Math.round(d.v)+'</span>' : '');
 }
+// ★威廉指標／支撐壓力／型態（2026-10-14，用戶：「幫我在網頁上新增威廉指標和開關」「在圖上畫支撐壓力 一樣要有開關 型態可以的話一樣加上去」）
+//   ・威廉 %R(14)＝(14 根最高 − 收) ÷ (14 根最高 − 14 根最低) × −100；−20 以上超買、−80 以下超賣（4J 10/11~13 直播用的設定）。畫在量的下面。
+//   ・支撐壓力＝用戶第 9~10 輪看圖判過的那套（上層 _lib_swing_pats.py）：明顯轉折＝zigzag 2×ATR(14)；近 200 根內、價差 ≤0.5×ATR 的
+//     轉折高點（壓力）或低點（支撐）≥2 個圍成一區（上下緣＝那幾個影線的最高／最低）。只畫到最新收盤都還沒被收盤穿過的區。
+//   ・型態＝用戶判過 8 成以上的：壓力區突破（17/21）、支撐區跌破（21/21）、上升／下降三角形（教科書版 17/18、16/18，上層 _lib_tri3.py）；
+//     濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）；只用已收盤的 K（盤中那根不算）。
+//   ・<txsr> ~ </txsr> 之間的函數由上層 _chk_txsr_port.py 抽出來，跟 Python 原碼在同一批 K 上逐筆對拍。
+//   ★只在加密貨幣 4H 判過／回測過（型態本身扣費後≈不賺），其他週期、台指加權沒驗證。
+// <txsr>
+function txAtrW(h, l, c, n){            // = _lib_dhx_patterns.atr：前 n 根用 TR 平均當起點，之後 Wilder 遞迴
+  const N = h.length, tr = new Array(N), out = new Array(N);
+  for(let i = 0; i < N; i++){ const pc = i ? c[i-1] : c[0]; tr[i] = Math.max(h[i] - l[i], Math.abs(h[i] - pc), Math.abs(l[i] - pc)); }
+  const m = Math.min(n, N); let s = 0; for(let i = 0; i < m; i++) s += tr[i];
+  for(let i = 0; i < m; i++) out[i] = s / m;
+  for(let i = n; i < N; i++) out[i] = (out[i-1] * (n - 1) + tr[i]) / n;
+  return out;
+}
+function txZig(h, l, a, k){             // = _lib_dhx_patterns.zigzag：[極值idx, 價, +1高/-1低, 確認idx]
+  const piv = []; let d = 0, hi_i = 0, hi_p = h[0], lo_i = 0, lo_p = l[0], ex_i = 0, ex_p = 0;
+  for(let i = 1; i < h.length; i++){
+    if(d === 0){
+      if(h[i] > hi_p){ hi_i = i; hi_p = h[i]; }
+      if(l[i] < lo_p){ lo_i = i; lo_p = l[i]; }
+      if(h[i] >= lo_p + k * a[i]){ piv.push([lo_i, lo_p, -1, i]); d = 1; ex_i = i; ex_p = h[i]; }
+      else if(l[i] <= hi_p - k * a[i]){ piv.push([hi_i, hi_p, 1, i]); d = -1; ex_i = i; ex_p = l[i]; }
+    } else if(d === 1){
+      if(h[i] > ex_p){ ex_i = i; ex_p = h[i]; }
+      else if(l[i] <= ex_p - k * a[i]){ piv.push([ex_i, ex_p, 1, i]); d = -1; ex_i = i; ex_p = l[i]; }
+    } else {
+      if(l[i] < ex_p){ ex_i = i; ex_p = l[i]; }
+      else if(h[i] >= ex_p + k * a[i]){ piv.push([ex_i, ex_p, -1, i]); d = 1; ex_i = i; ex_p = h[i]; }
+    }
+  }
+  return piv;
+}
+function txWr(h, l, c, n){              // 威廉 %R
+  const o = new Array(c.length).fill(null);
+  for(let i = n - 1; i < c.length; i++){
+    let hh = -Infinity, ll = Infinity;
+    for(let j = i - n + 1; j <= i; j++){ if(h[j] > hh) hh = h[j]; if(l[j] < ll) ll = l[j]; }
+    o[i] = hh > ll ? (hh - c[i]) / (hh - ll) * -100 : null;
+  }
+  return o;
+}
+function txGroups(P, a, t, sgn){        // = _lib_swing_pats._cands 區的那段：近 200 根、同種轉折照價排序，相鄰差 >0.5×ATR 就分組，≥2 個才算區
+  const S = P.filter(p => p[2] === sgn && p[0] >= t - 200).sort((x, y) => x[1] - y[1]), G = []; let cur = [];
+  for(const p of S){ if(cur.length && p[1] - cur[cur.length-1][1] > 0.5 * a[t]){ G.push(cur); cur = []; } cur.push(p); }
+  if(cur.length) G.push(cur);
+  return G.filter(g => g.length >= 2);
+}
+function txVma(v, t){ if(t < 30) return NaN; let s = 0; for(let j = t - 30; j < t; j++) s += v[j]; return s / 30; }   // 前 30 根均量（不含當根）
+function txZoneEv(h, l, c, v, a, piv, n){   // = _lib_swing_pats.detect 的 壓力區突破／支撐區跌破
+  const ev = [], done = {}, P = []; let j = 0;
+  for(let t = 40; t < n; t++){
+    while(j < piv.length && piv[j][3] <= t - 1){ P.push(piv[j]); j++; }
+    if(P.length < 4) continue;
+    for(const sgn of [1, -1]) for(const g of txGroups(P, a, t, sgn)){
+      let lo = Infinity, hi = -Infinity, first = Infinity, lastp = -1;
+      for(const p of g){ lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); first = Math.min(first, p[0]); lastp = Math.max(lastp, p[0]); }
+      const edge = sgn > 0 ? hi : lo, key = sgn + '|' + first;
+      if(done[key]) continue;
+      let opp = null; for(const p of P) if(p[2] === -sgn && p[0] < t) opp = p;
+      if(!opp) continue;
+      if(!((c[t] - edge) * sgn > 0 && (c[t-1] - edge) * sgn <= 0)) continue;
+      let crossed = false; for(let m = first + 1; m < t; m++) if((c[m] - edge) * sgn > 0){ crossed = true; break; }
+      if(crossed) continue;
+      let ext = sgn > 0 ? Infinity : -Infinity; for(let m = first; m < t; m++) ext = sgn > 0 ? Math.min(ext, l[m]) : Math.max(ext, h[m]);
+      const stop = opp[1], height = Math.abs(edge - ext);
+      if((c[t] - stop) * sgn <= 0 || !(height > 0)) continue;
+      done[key] = 1; const vm = txVma(v, t);
+      ev.push({i:t, pat:(sgn > 0 ? '壓力區突破' : '支撐區跌破'), dir:sgn, level:edge, stop:stop, height:height, hatr:height / a[t],
+               volx:(vm > 0 ? v[t] / vm : NaN), lo:lo, hi:hi, first:first, lastp:lastp, nz:g.length});
+    }
+  }
+  return ev;
+}
+function txTriCollect(P6){              // = _lib_tri3._collect（只看最近 6 個轉折，三種都收、同數量時上升/下降優先）
+  let best = null;
+  const span = A => Math.max(...A.map(p => p[1])) - Math.min(...A.map(p => p[1]));
+  for(const pat of ['上升三角', '下降三角', '對稱三角']){
+    let k = P6.length;
+    while(k > 0){
+      const S = P6.slice(k - 1), Hs = S.filter(p => p[2] > 0), Ls = S.filter(p => p[2] < 0);
+      if(Hs.length >= 1 && Ls.length >= 1){
+        const rng = span(S); let okH = true, okL = true;
+        if(pat !== '上升三角'){ for(let m = 0; m < Hs.length - 1; m++) if(!(Hs[m+1][1] < Hs[m][1])) okH = false; } else okH = span(Hs) <= 0.10 * rng;
+        if(pat !== '下降三角'){ for(let m = 0; m < Ls.length - 1; m++) if(!(Ls[m+1][1] > Ls[m][1])) okL = false; } else okL = span(Ls) <= 0.10 * rng;
+        if(!(okH && okL)) break;
+      }
+      k--;
+    }
+    const S = P6.slice(k), Hs = S.filter(p => p[2] > 0), Ls = S.filter(p => p[2] < 0);
+    if(S.length >= 6 && Hs.length >= 2 && Ls.length >= 2
+       && (pat === '對稱三角' || (pat === '上升三角' && Ls[Ls.length-1][1] > Ls[0][1]) || (pat === '下降三角' && Hs[Hs.length-1][1] < Hs[0][1]))
+       && (best === null || S.length > best[1].length)) best = [pat, S];
+  }
+  return best;
+}
+function txTriEv(h, l, c, v, a, piv, n){    // = _lib_tri3.detect
+  const ev = [], done = {}, P = []; let j = 0;
+  for(let t = 30; t < n; t++){
+    while(j < piv.length && piv[j][3] <= t - 1){ P.push(piv[j]); j++; }
+    if(P.length < 6) continue;
+    const r = txTriCollect(P.slice(-6)); if(!r) continue;
+    const pat = r[0], S = r[1], key = pat + '|' + S[0][0];
+    if(done[key]) continue;
+    const Hs = S.filter(p => p[2] > 0), Ls = S.filter(p => p[2] < 0), last = S[S.length-1][0];
+    const hlv = pat === '上升三角' ? Math.max(...Hs.map(p => p[1])) : Hs[Hs.length-1][1];
+    const llv = pat === '下降三角' ? Math.min(...Ls.map(p => p[1])) : Ls[Ls.length-1][1];
+    const height = S[0][2] > 0 ? S[0][1] - S[1][1] : S[1][1] - S[0][1];
+    const sw = []; for(let m = 0; m < S.length - 1; m++) sw.push(Math.abs(S[m+1][1] - S[m][1]));
+    if(pat === '對稱三角' && sw[sw.length-1] > 0.5 * sw[1]) continue;
+    for(const [dr, lv, stop] of [[1, hlv, Ls[Ls.length-1][1]], [-1, llv, Hs[Hs.length-1][1]]]){
+      if((pat === '上升三角' && dr < 0) || (pat === '下降三角' && dr > 0)) continue;
+      if(!((c[t] - lv) * dr > 0 && (c[t-1] - lv) * dr <= 0)) continue;
+      let crossed = false; for(let m = last + 1; m < t; m++) if((c[m] - lv) * dr > 0){ crossed = true; break; }
+      if(crossed) continue;
+      if((c[t] - stop) * dr <= 0) continue;
+      const vm = txVma(v, t);
+      ev.push({i:t, pat:(pat === '對稱三角' ? (dr > 0 ? '對稱三角↑' : '對稱三角↓') : pat), dir:dr, level:lv, stop:stop, height:Math.abs(height),
+               hatr:Math.abs(height) / a[t], volx:(vm > 0 ? v[t] / vm : NaN), pts:S.map(p => [p[0], p[1], p[2]])});
+      done[key] = 1; break;
+    }
+  }
+  return ev;
+}
+function txActiveZones(h, l, c, a, piv, n){  // 最新一根收盤時還有效的區：壓力＝第一個轉折之後沒收盤站上上緣、支撐＝沒收盤跌破下緣
+  const t = n - 1; if(t < 40) return [];
+  const P = piv.filter(p => p[3] <= t), out = [];
+  for(const sgn of [1, -1]) for(const g of txGroups(P, a, t, sgn)){
+    let lo = Infinity, hi = -Infinity, first = Infinity;
+    for(const p of g){ lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); first = Math.min(first, p[0]); }
+    let ok = true; for(let m = first + 1; m <= t; m++) if(sgn > 0 ? c[m] > hi : c[m] < lo){ ok = false; break; }
+    if(ok) out.push({sgn:sgn, lo:lo, hi:hi, first:first, n:g.length});
+  }
+  return out;
+}
+function txStudyArr(h, l, c, v, n){         // 已收盤的前 n 根 → {zones, pats}（濾網同回測）
+  const hh = h.slice(0, n), ll = l.slice(0, n), cc = c.slice(0, n), vv = v.slice(0, n);
+  const a = txAtrW(hh, ll, cc, 14), piv = txZig(hh, ll, a, 2.0);
+  const ze = txZoneEv(hh, ll, cc, vv, a, piv, n).filter(e => e.hatr >= 2.5 && e.volx >= 1);
+  const te = txTriEv(hh, ll, cc, vv, a, piv, n).filter(e => (e.pat === '上升三角' || e.pat === '下降三角') && e.hatr >= 2.5 && e.volx >= 1);
+  return {zones:txActiveZones(hh, ll, cc, a, piv, n), pats:ze.concat(te).sort((x, y) => x.i - y.i)};
+}
+// </txsr>
+const TXSTC = {res:'#e0675a', sup:'#3fb27f', wr:'#b48ef0'};
+let TXWR = '1', TXSR = '1', TXPT = '1';
+try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
+  if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d; }catch(e){}
+function txTgl(k){
+  if(k === 'wr') TXWR = TXWR === '1' ? '0' : '1'; else if(k === 'sr') TXSR = TXSR === '1' ? '0' : '1'; else TXPT = TXPT === '1' ? '0' : '1';
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); }catch(e){}
+  if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txHiLo(); txLegend(null); }catch(e){} }
+  draw();
+}
+function txTglBar(){ return [['wr', '威廉%R', TXWR], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT]]
+  .map(([k, n, v]) => `<span class="wb ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(' '); }
+// 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
+function txStudy(R){
+  const bars = R.bars, N = bars.length; if(!N) return null;
+  const lc = bars[N-1][4];
+  if(R.st && R.st.N === N && R.st.lc === lc && R.st.t0 === bars[0][0]) return R.st;
+  const h = bars.map(b => b[2]), l = bars.map(b => b[3]), c = bars.map(b => b[4]), v = bars.map(b => Number(b[5]) || 0);
+  const live = (R.raw && R.raw[N-1]) ? R.raw[N-1][8] !== '1' : true, n = live ? N - 1 : N;
+  const st = {N:N, lc:lc, t0:bars[0][0], wr:txWr(h, l, c, 14), zones:[], pats:[]};
+  if(n > 60){ const r = txStudyArr(h, l, c, v, n); st.zones = r.zones; st.pats = r.pats; }
+  R.st = st; return st;
+}
+function txStApply(){
+  const C = TXCH; if(!C || !C.wr) return; const R = TXDATA[C.key];
+  const st = (R && R.bars && R.bars.length) ? txStudy(R) : null, on = TXWR === '1' && !!st;
+  C.wr.setData(on ? R.bars.map((b, i) => st.wr[i] === null ? {time:b[0]} : {time:b[0], value:st.wr[i]}) : []);
+  C.cs.priceScale().applyOptions({scaleMargins: on ? {top:0.06, bottom:0.36} : {top:0.08, bottom:0.22}});
+  C.ch.priceScale('vol').applyOptions({scaleMargins: on ? {top:0.66, bottom:0.2} : {top:0.82, bottom:0}});
+  txSrDraw();
+}
+// 支撐壓力區＝半透明框（從第一個轉折畫到右邊）；型態＝區突破畫虛線框到突破那根、三角形畫頸線（平的）＋另一邊轉折的回歸線。縮放後重畫。
+function txSrDraw(){
+  const C = TXCH; if(!C || !C.sr) return; const R = TXDATA[C.key];
+  if(!R || !R.bars || !R.bars.length || (TXSR !== '1' && TXPT !== '1' && TXWR !== '1')){ C.sr.innerHTML = ''; return; }
+  const st = txStudy(R), ts = C.ch.timeScale(), cs = C.cs;
+  if(!st || typeof ts.logicalToCoordinate !== 'function' || typeof cs.priceToCoordinate !== 'function'){ C.sr.innerHTML = ''; return; }
+  const W = C.sr.clientWidth || Math.max(0, (C.box.clientWidth || 0) - 60), prec = R.meta ? R.meta.prec : 2;
+  if(!(W > 0)){ C.sr.innerHTML = ''; return; }          // 圖剛建立還沒有寬度 → 等尺寸回呼（redo）再畫
+  const X = i => ts.logicalToCoordinate(i), Y = p => cs.priceToCoordinate(p), bad = q => q === null || q === undefined || isNaN(q);
+  let g = '';
+  // %R 跟 K 線共用右邊的價格軸（程式庫 4.x 不能分窗格）→ 在 −20／−80 虛線上直接寫字，免得把右軸的價格當成 %R
+  if(TXWR === '1' && C.wr && typeof C.wr.priceToCoordinate === 'function') for(const [p, t] of [[-20, '-20 超買'], [-80, '-80 超賣']]){
+    const y = C.wr.priceToCoordinate(p); if(!bad(y)) g += '<text x="44" y="'+(y - 2)+'" font-size="9" fill="'+txAlpha(TXSTC.wr, 0.85)+'">'+t+'</text>';   // x=44：左下角有程式庫的標誌
+  }
+  if(TXSR === '1') for(const z of st.zones){
+    const x0 = X(z.first), y1 = Y(z.hi), y2 = Y(z.lo); if(bad(x0) || bad(y1) || bad(y2)) continue;
+    const xa = Math.max(0, x0), col = z.sgn > 0 ? TXSTC.res : TXSTC.sup, top = Math.min(y1, y2), hg = Math.max(2, Math.abs(y2 - y1));
+    if(xa >= W) continue;
+    g += '<rect x="'+xa+'" y="'+top+'" width="'+(W - xa)+'" height="'+hg+'" fill="'+txAlpha(col, 0.13)+'" stroke="'+txAlpha(col, 0.5)+'" stroke-width="1"/>'
+       + '<text x="'+(W - 4)+'" y="'+(top - 3)+'" text-anchor="end" font-size="10" fill="'+txAlpha(col, 0.95)+'">'+(z.sgn > 0 ? '壓力 ' : '支撐 ')+txNum(z.lo, prec)+'~'+txNum(z.hi, prec)+'（碰 '+z.n+' 次）</text>';
+  }
+  if(TXPT === '1') for(const e of st.pats){
+    const col = e.dir > 0 ? '#ef4444' : '#22c55e', x1 = X(e.i); if(bad(x1)) continue;
+    if(e.lo !== undefined){     // 被突破的區：從最後一次碰到畫到突破那根（從第一次碰到畫會拉滿整張圖，太亂）
+      const x0 = X(e.lastp !== undefined ? e.lastp : e.first), y1 = Y(e.hi), y2 = Y(e.lo); if(bad(x0) || bad(y1) || bad(y2) || x1 < 0 || x0 > W) continue;
+      g += '<rect x="'+x0+'" y="'+Math.min(y1, y2)+'" width="'+Math.max(1, x1 - x0)+'" height="'+Math.max(2, Math.abs(y2 - y1))+'" fill="none" stroke="'+col+'" stroke-width="1.3" stroke-dasharray="4,3"/>';
+    } else {
+      const Hs = e.pts.filter(p => p[2] > 0), Ls = e.pts.filter(p => p[2] < 0), flat = e.pat === '上升三角' ? Hs : Ls, sl = e.pat === '上升三角' ? Ls : Hs;
+      const n = sl.length, mx = sl.reduce((s, p) => s + p[0], 0) / n, my = sl.reduce((s, p) => s + p[1], 0) / n;
+      const vx = sl.reduce((s, p) => s + (p[0] - mx) * (p[0] - mx), 0), k = vx > 0 ? sl.reduce((s, p) => s + (p[0] - mx) * (p[1] - my), 0) / vx : 0;
+      const xf = X(flat[0][0]), xs = X(sl[0][0]), yl = Y(e.level), ys0 = Y(my + k * (sl[0][0] - mx)), ys1 = Y(my + k * (e.i - mx));
+      if([xf, xs, yl, ys0, ys1].some(bad) || x1 < 0) continue;
+      g += '<line x1="'+xf+'" y1="'+yl+'" x2="'+x1+'" y2="'+yl+'" stroke="'+col+'" stroke-width="1.6"/>'
+         + '<line x1="'+xs+'" y1="'+ys0+'" x2="'+x1+'" y2="'+ys1+'" stroke="'+col+'" stroke-width="1.6"/>';
+    }
+  }
+  C.sr.innerHTML = g ? '<svg width="100%" height="100%">'+g+'</svg>' : '';
+}
+function txPtMarks(R){
+  if(TXPT !== '1' || !R) return []; const st = txStudy(R); if(!st) return [];
+  return st.pats.filter(e => R.bars[e.i]).map(e => ({time:R.bars[e.i][0], position:(e.dir > 0 ? 'belowBar' : 'aboveBar'), color:(e.dir > 0 ? '#ef4444' : '#22c55e'),
+    shape:(e.dir > 0 ? 'arrowUp' : 'arrowDown'), text:e.pat}));
+}
 function txBadge(c){ return '<span class="txb" style="background:'+(TXC[c]||'#555')+'">'+(TXN[c]||'?')+'</span>'; }
 function txAlpha(hex, a){ const n = parseInt(String(hex).slice(1), 16); return 'rgba('+((n>>16)&255)+','+((n>>8)&255)+','+(n&255)+','+a+')'; }
 function txP2(n){ return String(n).padStart(2, '0'); }
@@ -2271,23 +2492,29 @@ function txCreate(){
   const lad = [ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo)), ch.addLineSeries(Object.assign({color:'#a1a1e8'}, lo))];
   const uo = {lineWidth:2, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, autoscaleInfoProvider: () => null};
   const uu = ch.addLineSeries(Object.assign({color:TXUDC.up}, uo)), ud = ch.addLineSeries(Object.assign({color:TXUDC.dn}, uo));
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0};
+  // 威廉 %R：自己一個縱軸（固定 −100~0），放在量的下面；−20／−80 兩條虛線
+  const wr = ch.addLineSeries({priceScaleId:'wr', color:TXSTC.wr, lineWidth:1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false,
+    autoscaleInfoProvider: () => ({priceRange:{minValue:-100, maxValue:0}})});
+  ch.priceScale('wr').applyOptions({scaleMargins:{top:0.8, bottom:0.02}});
+  if(wr.createPriceLine) for(const p of [-20, -80]) wr.createPriceLine({price:p, color:'rgba(139,151,171,0.45)', lineWidth:1, lineStyle:2, axisLabelVisible:false, title:String(p)});
+  const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, sr:sr};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
-  const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); txUdMarks(); }catch(e){} }); } };
+  const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txFit(); txHiLo(); txSess(); txUdMarks(); txSrDraw(); }catch(e){} }); } };
   ch.timeScale().subscribeVisibleLogicalRangeChange(redo);
   if(ch.timeScale().subscribeSizeChange) ch.timeScale().subscribeSizeChange(redo);
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud].concat(C.lad)) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
-    C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; return; }
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad)) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+    C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; C.sr.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  txLadApply(); txUdApply();
+  txLadApply(); txUdApply(); txStApply();
   txFit(); txHiLo(); txSess(); txLegend(null);
 }
 function txLadApply(){
@@ -2327,6 +2554,7 @@ function txUpdate(nb){
       for(let i = all.length - nb.length; i < all.length; i++) sr.update(r.pts[i]);
     }
   }
+  txStApply();                // 威廉 %R 每根都可能變（盤中那根）→ 整條重餵；型態／區只在收盤後才會變（txStudy 有快取）
   txHiLo(); txSess(); txLegend(null);
 }
 // 畫面範圍內的最高／最低標數值；台指的籌碼異常星畫在量上
@@ -2339,7 +2567,7 @@ function txHiLo(){
   let ih = i0, il = i0;
   for(let i = i0; i <= i1; i++){ if(bars[i][2] > bars[ih][2]) ih = i; if(bars[i][3] < bars[il][3]) il = i; }
   const mk = [{time:bars[ih][0], position:'aboveBar', color:'#e6edf7', shape:'arrowDown', text:'高 '+txNum(bars[ih][2], m.prec)},
-              {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}];
+              {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}].concat(txPtMarks(R));
   mk.sort((a, b) => a.time - b.time);
   C.cs.setMarkers(mk);
   const st = [];
@@ -2387,7 +2615,13 @@ function txLegend(t){
   const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(b[6])
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
-    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+b[9] : '') + txUdLeg(b[0]);
+    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+b[9] : '') + txUdLeg(b[0])
+    + txWrLeg(R, i);
+}
+function txWrLeg(R, i){
+  if(TXWR !== '1') return ''; const st = txStudy(R); if(!st || st.wr[i] === null || st.wr[i] === undefined) return '';
+  const w = st.wr[i], z = w >= -20 ? '超買' : (w <= -80 ? '超賣' : '');
+  return ' <span style="color:'+TXSTC.wr+'">%R '+w.toFixed(1)+(z ? ' '+z : '')+'</span>';
 }
 async function txFetch(){
   if(txIsC(TXS)) return txFetchC();                // 幣：手機直接跟 OKX 拿
@@ -2481,7 +2715,8 @@ function viewTx(){
     + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
     + ((TXS === 'TX' || isC) && txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
         `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '')
-    + (!isC ? `<span class="txsp"></span><span class="wb ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '') + '</div>';
+    + (!isC ? `<span class="txsp"></span><span class="wb ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '')
+    + '<span class="txsp"></span>' + txTglBar() + '</div>';
   if(isC) h += txCSum();
   else if(!p.ok) h += '<div class="empty">'+(p.err || P.err || '沒有資料')+'</div>';
   else {
@@ -2527,6 +2762,13 @@ function viewTx(){
     + '參數二＝整個 CME 交易日（台灣夏令 06:00→隔天 05:00）、參數一＝美股開盤後 1 小時 45 分（紐約 09:30~11:15＝台灣夏令 21:30~23:15，'
     + 'OKX 實測一天中成交額最大的 105 分鐘，對照台指＝加權開盤 09:00~10:45），16:00 收盤換階（台灣時間夏令 05:00／冬令 06:00）；'
     + '雙線寬度 ±0.02%。1H／4H 的參數一要用 15 分 K 才切得出來，所以只有最近約 15 天有；4H 的參數二用 1H 算（約 60 天），收盤落在 4H K 中間，所以收盤後第一根 4H 才換階、也不畫 CME 開收虛線。'
+    + '<br><b>威廉%R</b>（按鈕開關，紫線在量的下面）：(14 根最高 − 收) ÷ (14 根最高 − 14 根最低) × −100；−20 以上超買、−80 以下超賣（4J 的設定）。'
+    + '4J 自己說不能單看：要先看高低點有沒有被突破／跌破，回踩那條線時剛好超賣才做多（空單反過來）。<b>回測</b>（BTC/ETH/SOL 2021~2026、停損 1%／目標 +2%、扣費）照他講的做每筆約 −0.1%，沒有優勢。'
+    + '<br><b>支撐壓力</b>（按鈕開關）：你第 9~10 輪看圖判過的那套——明顯轉折（反向走 2 倍 ATR 才算）、近 200 根內價差 ≤0.5 ATR 的轉折高點（紅框＝壓力）或低點（綠框＝支撐）≥2 個圍成一區；'
+    + '只畫到最新收盤都還沒被收盤穿過的區，框上寫區間價和碰了幾次。'
+    + '<br><b>型態</b>（按鈕開關）：你判過 8 成對的——壓力區突破（17/21）、支撐區跌破（21/21）、上升三角形（17/18）、下降三角形（16/18）；濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）。'
+    + '箭頭＝突破那根（紅↑做多、綠↓做空），虛線框＝被突破的區，兩條線＝三角形的頸線和另一邊；只用已收盤的 K。'
+    + '<b>注意</b>：這些只在加密貨幣 4H 判過、回測過，型態本身扣費後跟隨機進場差不多；其他週期、台指加權沒驗證。'
     + '</div></details>';
   if(!isC) h += '<div class="sub">合約 '+Object.values(P.sym || {}).join(' / ')+'</div>';
   h += '</div>';
