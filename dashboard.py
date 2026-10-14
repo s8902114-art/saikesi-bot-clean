@@ -2116,7 +2116,7 @@ function txZoneEv(h, l, c, v, a, piv, n){   // = _lib_swing_pats.detect 的 壓�
       if((c[t] - stop) * sgn <= 0 || !(height > 0)) continue;
       done[key] = 1; const vm = txVma(v, t);
       ev.push({i:t, pat:(sgn > 0 ? '壓力區突破' : '支撐區跌破'), dir:sgn, level:edge, stop:stop, height:height, hatr:height / a[t],
-               volx:(vm > 0 ? v[t] / vm : NaN), lo:lo, hi:hi, first:first, lastp:lastp, nz:g.length});
+               volx:(vm > 0 ? v[t] / vm : NaN), lo:lo, hi:hi, first:first, lastp:lastp, nz:g.length, pts:g.map(p => [p[0], p[1]])});
     }
   }
   return ev;
@@ -2178,7 +2178,7 @@ function txActiveZones(h, l, c, a, piv, n){  // 最新一根收盤時還有效�
     let lo = Infinity, hi = -Infinity, first = Infinity;
     for(const p of g){ lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); first = Math.min(first, p[0]); }
     let ok = true; for(let m = first + 1; m <= t; m++) if(sgn > 0 ? c[m] > hi : c[m] < lo){ ok = false; break; }
-    if(ok) out.push({sgn:sgn, lo:lo, hi:hi, first:first, n:g.length});
+    if(ok) out.push({sgn:sgn, lo:lo, hi:hi, first:first, n:g.length, pts:g.map(p => [p[0], p[1]])});
   }
   return out;
 }
@@ -2187,59 +2187,56 @@ function txStudyArr(h, l, c, v, n){         // 已收盤的前 n 根 → {zones,
   const a = txAtrW(hh, ll, cc, 14), piv = txZig(hh, ll, a, 2.0);
   const ze = txZoneEv(hh, ll, cc, vv, a, piv, n).filter(e => e.hatr >= 2.5 && e.volx >= 1);
   const te = txTriEv(hh, ll, cc, vv, a, piv, n).filter(e => (e.pat === '上升三角' || e.pat === '下降三角') && e.hatr >= 2.5 && e.volx >= 1);
-  return {zones:txActiveZones(hh, ll, cc, a, piv, n), pats:ze.concat(te).sort((x, y) => x.i - y.i), life:txZoneLife(hh, ll, cc, a, piv, n), atr:a[n - 1]};
+  const act = txActiveZones(hh, ll, cc, a, piv, n), sp = txSrPick(hh, ll, cc, a, act, ze, n);
+  return {zones:act, pats:ze.concat(te).sort((x, y) => x.i - y.i), life:sp.life, open:sp.open, atr:a[n - 1]};
 }
 // </txsr>
-// ★畫圖用的「區的一生」（用戶 10-14：「支撐壓力照我之前要你判斷的圖那種 支撐用綠色 壓力用淡紫色 不用寫支撐壓力
-//   如果是有支撐壓力互換 或是回來測試的 那就延長」）。區的定義同上（txGroups）；形狀在第一次被收盤穿過時凍結。
-//   ★延長規則是我定的（他沒給細節）：從沒被穿過＝畫到最右邊；被收盤穿過＝角色互換（顏色跟著換）；
-//    互換後價格回來碰到區＝延長到那一根，之後到現在都沒再被反穿＝延長到最右邊；穿過後再也沒回來＝畫到穿過那根為止。
-//   每一段 [起, 迄, 角色(+1 壓力/-1 支撐), 是否到最右邊]。區成形前價格就已經收盤穿過的，不算區。
-//   ★分組＝判圖那套 txGroups（試過「整區 ≤0.5 ATR」的緊分組，一個區被拆成好幾個小區，用戶：「改掉之後變更醜了啦 密密麻麻給誰看」）；
-//    只把串成超過 1 ATR 寬的拿掉（「那個大綠框」）。
-function txZoneLife(h, l, c, a, piv, n){
-  const Z = {}, P = [], out = []; let j = 0;
-  for(let t = 40; t < n; t++){
-    while(j < piv.length && piv[j][3] <= t - 1){ P.push(piv[j]); j++; }
-    if(P.length >= 4) for(const sgn of [1, -1]) for(const g of txGroups(P, a, t, sgn)){
-      let lo = Infinity, hi = -Infinity, first = Infinity;
-      for(const p of g){ lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); first = Math.min(first, p[0]); }
-      const key = sgn + '|' + first, z = Z[key];
-      if(z && (z.bad || z.broke >= 0)) continue;
-      if(hi - lo > 1.0 * a[t]) continue;      // ★串成超過 1 ATR 寬的不算區（「那個大綠框」）；已經存在的區被撐寬時保留原形狀（我定的）
-      const edge = sgn > 0 ? hi : lo; let crossed = false;
-      for(let m = first + 1; m < t; m++) if((c[m] - edge) * sgn > 0){ crossed = true; break; }
-      if(crossed){ if(!z) Z[key] = {bad:true}; continue; }
-      if(!z) Z[key] = {sgn:sgn, lo:lo, hi:hi, first:first, n:g.length, pts:g.map(p => [p[0], p[1]]), from:t, broke:-1};
-      else { z.lo = lo; z.hi = hi; z.n = g.length; z.pts = g.map(p => [p[0], p[1]]); }
+// ★畫圖用的支撐壓力（第六版，用戶 10-14：「還是很醜啊 同時那麼多區間哪有鑑別度 用最原始我教你判斷圖的方式下去修正」）
+//   判圖時每張圖只有一個區＝被帶量突破的那個區（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量），畫法＝從第一個轉折到突破那根的帶狀＋上下緣＋轉折點。
+//   所以圖上只畫兩種：
+//   ① 被突破的區（＝型態偵測抓到的壓力區突破／支撐區跌破，同一套濾網）：第一個轉折 → 突破那根，原本的角色顏色；
+//      突破後角色互換（壓力變支撐、支撐變壓力），價格從另一邊回來碰到 → 延到最後一次碰到；被收盤反穿 → 延到反穿那根；沒回來就停在突破那根。
+//   ② 還沒被突破的區（同一套分組、區的邊到另一邊極端 ≥2.5 ATR）：只有被選去「延到最右邊」的才畫。
+//   延到最右邊（用戶：「價格還沒來這裡測的支撐壓力再延伸 或是價格有支撐壓力區互換的這種也延伸」）：
+//      候選＝還沒被突破的區＋突破後互換、到現在還沒被反穿的區；★只留離現價最近的壓力一個、支撐一個（我定的，為了鑑別度）。
+//   ★還沒被突破的區超過 1 ATR 寬的不算（我定的，「那個大綠框」）；被突破的區照判圖時原樣，不加寬度限制。
+//   每一段 [起, 迄, 角色(+1 壓力/-1 支撐), 是否到最右邊]。回傳 {life:要畫的區, open:所有夠大、還沒被突破的區（型態頁「還沒突破」用）}。
+function txSrPick(h, l, c, a, act, ze, n){
+  const t = n - 1, last = c[t], brk = [], open = [];
+  for(const e of ze){
+    if(e.lo === undefined) continue;
+    const role = -e.dir, z = {sgn:e.dir, lo:e.lo, hi:e.hi, first:e.first, n:e.nz, pts:e.pts, i:e.i, role:role, kind:'brk', live:false,
+                              seg:[[e.first, e.i, e.dir, false]]};
+    let touch = -1, back = -1;
+    for(let m = e.i + 1; m < n; m++){
+      if(role > 0 ? c[m] > e.hi : c[m] < e.lo){ back = m; break; }        // 互換後又被收盤反穿
+      if(role > 0 ? h[m] >= e.lo : l[m] <= e.hi) touch = m;               // 從另一邊回來碰到
     }
-    for(const k in Z){ const z = Z[k]; if(!z.bad && z.broke < 0 && (z.sgn > 0 ? c[t] > z.hi : c[t] < z.lo)) z.broke = t; }
+    z.alive = back < 0;
+    if(back >= 0 || touch >= 0) z.seg.push([e.i, back >= 0 ? back : touch, role, false]);
+    brk.push(z);
   }
-  for(const k in Z){
-    const z = Z[k]; if(z.bad) continue;
-    // ★大小門檻＝判圖時同一道（用戶 10-14：「在很小的盤整內認支撐壓力」）：區的邊到「第一個轉折之後的另一邊極端」≥2.5 ATR；
-    //   被穿過的區用穿過那根的 ATR、還沒穿過的用最新一根（＝型態偵測 hatr 的算法）
-    const te = z.broke >= 0 ? z.broke : n - 1; let ext = z.sgn > 0 ? Infinity : -Infinity;
-    for(let m = z.first; m < te; m++) ext = z.sgn > 0 ? Math.min(ext, l[m]) : Math.max(ext, h[m]);
-    if(!(Math.abs((z.sgn > 0 ? z.hi : z.lo) - ext) >= 2.5 * a[te])) continue;
-    const seg = []; let role = z.sgn, s0 = z.first, tested = false, flips = 0;
-    for(let m = z.from; m < n; m++){
-      if(role > 0 ? c[m] > z.hi : c[m] < z.lo){ seg.push([s0, m, role, false]); role = -role; s0 = m; tested = false; flips++; continue; }
-      if(flips && m > s0 && (role > 0 ? h[m] >= z.lo : l[m] <= z.hi)) tested = true;      // 互換後從另一邊回來測
+  for(const q of act){
+    if(q.hi - q.lo > 1.0 * a[t]) continue;
+    let ext = q.sgn > 0 ? Infinity : -Infinity;
+    for(let m = q.first; m < n; m++) ext = q.sgn > 0 ? Math.min(ext, l[m]) : Math.max(ext, h[m]);
+    if(!(Math.abs((q.sgn > 0 ? q.hi : q.lo) - ext) >= 2.5 * a[t])) continue;
+    open.push({sgn:q.sgn, lo:q.lo, hi:q.hi, first:q.first, n:q.n, pts:q.pts || [], role:q.sgn, kind:'open', alive:true, live:false, seg:[]});
+  }
+  const cand = open.concat(brk.filter(z => z.alive));
+  for(const role of [1, -1]){
+    let best = null, bd = Infinity;
+    for(const z of cand){
+      if(z.role !== role) continue;
+      const d = Math.max(0, role > 0 ? z.lo - last : last - z.hi) + 1e-9 * Math.abs((z.lo + z.hi) / 2 - last);
+      if(d < bd){ bd = d; best = z; }
     }
-    // 用戶 10-14：「有那種價格還沒來這裡測的支撐壓力再延伸 或是價格有支撐壓力區互換的這種也延伸」→ 沒被穿過、或互換後回測到現在還守住 → 延到最右邊
-    if(!flips || tested) seg.push([s0, n - 1, role, true]);
-    out.push({sgn:z.sgn, lo:z.lo, hi:z.hi, first:z.first, n:z.n, pts:z.pts, seg:seg, role:role, live:(!flips || tested)});
+    if(!best) continue;
+    best.live = true;
+    if(best.kind === 'open') best.seg = [[best.first, t, role, true]];
+    else best.seg = [best.seg[0], [best.i, t, role, true]];
   }
-  // ★價位重疊、時間也重疊的區只留碰最多次的那個（★我定的；用戶 10-14：「在很小的盤整內認支撐壓力」＝大區裡又包小區）
-  out.sort((x, y) => y.n - x.n || (y.hi - y.lo) - (x.hi - x.lo));
-  const keep = [], span = z => [z.first, z.seg.length ? z.seg[z.seg.length - 1][1] : z.first];
-  for(const z of out){
-    const [a0, a1] = span(z);
-    if(keep.some(k => { const [b0, b1] = span(k); return z.lo <= k.hi && z.hi >= k.lo && a0 <= b1 && b0 <= a1; })) continue;
-    keep.push(z);
-  }
-  return keep.sort((x, y) => x.first - y.first);
+  return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0'};     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
 let TXWR = '1', TXSR = '1', TXPT = '1';
@@ -2288,11 +2285,8 @@ function txSrDraw(){
   }
   // 區與型態只畫在 K 線那一塊（下面是量和 %R）：K 線區下緣＝圖高 ×（1 − K 線的下邊界比例）
   const Hb = C.box.clientHeight, yMax = Hb > 0 ? Hb * (1 - (TXWR === '1' ? 0.36 : 0.22)) : 1e6;
-  // 支撐壓力（用戶 10-14 第二版：「我不要這樣 太亂太醜了」）：只畫「現在還有效」的區（沒被穿過，或互換後回測過、到現在還守住），
-  //   一個區一條帶（帶狀＋上下緣＋轉折點，照判圖時的畫法），從第一個轉折畫到最右邊，顏色＝現在的角色（壓力紅、支撐綠），不寫字；
-  //   ★只留離現價最近的壓力 2 個、支撐 2 個（我定的）。已經結束的舊區不畫。
-  //   用戶 10-14 第五版：「支撐壓力就一段一段的 有那種價格還沒來這裡測的支撐壓力再延伸 或是價格有支撐壓力區互換的這種也延伸」
-  //   → 每個區每一段都畫成一樣的帶狀（判圖那種：帶狀＋上下緣＋轉折點），顏色＝那一段的角色；只有「還沒被穿過」「互換後回測守住」的最後一段延到最右邊。
+  // 支撐壓力（第六版，挑哪些區見 txSrPick）：每一段都畫成判圖那種帶狀（帶狀＋上下緣＋轉折點），顏色＝那一段的角色（壓力紅、支撐綠），不寫字；
+  //   轉折點顏色＝區原本的角色。
   if(TXSR === '1') for(const z of (st.life || [])){
     const y1 = Y(z.hi), y2 = Y(z.lo); if(bad(y1) || bad(y2)) continue;
     const top = Math.min(y1, y2), hg = Math.max(2, Math.abs(y2 - y1)); let drawn = false;
@@ -2836,9 +2830,10 @@ function viewTx(){
     + '<br><b>威廉%R</b>（按鈕開關，紫線在量的下面）：(14 根最高 − 收) ÷ (14 根最高 − 14 根最低) × −100；−20 以上超買、−80 以下超賣（4J 的設定）。'
     + '4J 自己說不能單看：要先看高低點有沒有被突破／跌破，回踩那條線時剛好超賣才做多（空單反過來）。<b>回測</b>（BTC/ETH/SOL 2021~2026、停損 1%／目標 +2%、扣費）照他講的做每筆約 −0.1%，沒有優勢。'
     + '<br><b>支撐壓力</b>（按鈕開關）：你第 9~10 輪看圖判過的那套——明顯轉折（反向走 2 倍 ATR 才算）、近 200 根內價差 ≤0.5 ATR 的轉折高點（紅＝壓力）或低點（綠＝支撐）≥2 個圍成一區，點＝那幾個轉折。'
-    + '每個區一段一段畫（帶狀＋上下緣＋轉折點），顏色＝那一段的角色（壓力紅、支撐綠）。'
-    + '價格還沒回來穿過的區、或被穿過後支撐壓力互換且價格從另一邊回來測、到現在還守住的區 → 延伸到最右邊；被穿過後沒回來的 → 畫到穿過那根為止。'
-    + '跟判圖時一樣只畫夠大的區（區的邊到另一邊極端 ≥2.5 ATR）。<b>我自己定的</b>：轉折串成超過 1 ATR 寬的不算區；價位和時間都重疊的區只留碰最多次的。'
+    + '跟判圖時一樣，只畫<b>被帶量突破的區</b>（區夠大：邊到另一邊極端 ≥2.5 ATR；突破那根量 ≥ 前 30 根均量），從第一個轉折畫到突破那根；'
+    + '突破後支撐壓力互換、換色，價格從另一邊回來測 → 延到最後一次測（又被收盤穿回去 → 延到穿回那根），沒回來測就停在突破那根。'
+    + '延伸到最右邊的只有兩個：離現價最近的壓力、最近的支撐（還沒被突破的區，或互換後到現在還沒被穿回去的區）。'
+    + '<b>我自己定的</b>：最右邊只留最近的各一個（為了鑑別度）；還沒被突破的區，轉折串成超過 1 ATR 寬的不算。'
     + '<br><b>型態</b>（按鈕開關）：你判過 8 成對的——壓力區突破（17/21）、支撐區跌破（21/21）、上升三角形（17/18）、下降三角形（16/18）；濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）。'
     + '箭頭＝突破那根（紅↑做多、綠↓做空），虛線框＝被突破的區，兩條線＝三角形的頸線和另一邊；只用已收盤的 K。'
     + '<b>注意</b>：這些只在加密貨幣 4H 判過、回測過，型態本身扣費後跟隨機進場差不多；其他週期、台指加權沒驗證。'
@@ -2868,7 +2863,7 @@ function txPatNow(raw){
   const post = R.pats.filter(e => e.i >= n - PAT_POST).map(e => ({dir:e.dir, pat:e.pat, level:e.level, stop:e.stop, target:e.level + e.dir * e.height,
     t:raw[e.i][0], ago:n - 1 - e.i, volx:e.volx, hatr:e.hatr}));
   const pre = [];
-  for(const z of (R.life || []).filter(q => q.live)){   // 圖上畫的那些「現在還有效」的區（同一套）：壓力＝做多候選（等突破上緣）、支撐＝做空候選（等跌破下緣）
+  for(const z of (R.open || [])){   // 還沒被突破、夠大的區（跟圖上同一套，圖上只畫最近的那個）：壓力＝做多候選（等突破上緣）、支撐＝做空候選（等跌破下緣）
     const dr = z.role, edge = dr > 0 ? z.hi : z.lo, dist = (edge - last) * dr;
     if(!(dist >= 0 && dist <= PAT_NEAR * A)) continue;
     let ext = dr > 0 ? Infinity : -Infinity; for(let m = z.first; m < n; m++) ext = dr > 0 ? Math.min(ext, ll[m]) : Math.max(ext, hh[m]);
