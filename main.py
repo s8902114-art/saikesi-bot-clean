@@ -9638,9 +9638,16 @@ def _dhx_trap(inst, hi, lo, cl, n, cv=None, sv=None, ts=None):
         ex["entry_source"] = "trigger_market"
         r = _dhx_pack(inst, "SHORT_TRAP" if side == "short_trap" else "LONG_TRAP",
                       "LONG" if side == "short_trap" else "SHORT", i1, i2, back, cl, sl, n, ex)
+        # ★2026-10-14 補停損距門檻（吸收/衰竭早就有，只有這條漏掉）：官方 v0908 假突破 38/38 停損距都在 1.5~12.5%。
+        #   線上 10-13~14 一天：停損 <1.5% 的假突破結 17 筆、每筆 −0.85R（最小 0.12%，手續費就吃掉 0.8R）
+        if r and not (DHX_MIN_SL_PCT <= r["sl_dist_pct"] <= DHX_TRAP_MAX_SL_PCT):
+            continue
         if r:
             return r
     return None
+
+
+DHX_TRAP_MAX_SL_PCT = 12.5
 
 
 # ★★★幅度閘（2026-09-25）——我的偵測器三道閘原本**只判符號、沒有幅度**
