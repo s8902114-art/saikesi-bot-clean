@@ -18,6 +18,7 @@
 import os
 import time
 import hmac
+import hashlib
 from threading import Lock
 
 # ── 被動快照：由 main.py 的掃描迴圈餵進來（零額外 API） ──────────────────────
@@ -826,7 +827,7 @@ def register(app, G):
             return r
         if request.args.get("m"):
             r = jsonify({"name": "盤面", "short_name": "盤面", "start_url": f"/d/{tok}", "scope": "/d/",
-                         "display": "standalone", "background_color": "#0b0e14", "theme_color": "#0b0e14"})
+                         "display": "standalone", "background_color": "#131416", "theme_color": "#131416"})
             r.headers["Content-Type"] = "application/manifest+json"
             return r
         r = make_response(_HTML.replace("__VER__", VER))
@@ -1001,7 +1002,7 @@ _HTML = """<!doctype html>
 <meta name="robots" content="noindex, nofollow">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#0b0e14">
+<meta name="theme-color" content="#131416">
 <link rel="manifest" href="?m=1">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Martian+Mono:wght@700&display=swap" rel="stylesheet">
@@ -1189,6 +1190,109 @@ _HTML = """<!doctype html>
   .rklg{display:flex;flex-wrap:wrap;gap:6px 16px;margin:18px 0 0;font-size:12px;color:var(--dim);align-items:center}
   .rksw{display:inline-block;width:28px;height:6px;border-radius:99px;margin-right:6px;vertical-align:middle;background:currentColor}
   .rksw.mid{opacity:.62} .rksw.lo{background:repeating-linear-gradient(-45deg,currentColor 0 2px,transparent 2px 5px)}
+
+  /* ════ 2026-10-15 全站視覺改版層（用戶：「其他頁面跟著改一改 不然醜死了」）════
+     放在最後、同層級選擇器覆蓋上面的舊樣式；舊規則沒刪是為了好對照、好退版。
+     原則：①選取狀態＝反白（墨色底、深字），不再用藍框藍底 ②按鈕三種：分頁（底線）、切換（反白）、開關（小圓點）
+          ③框線能省就省，用底色深淺分層 ④數字一律等寬字 ⑤說明文字收合（見 clampNotes） */
+  :root{
+    --bg:#131416; --card:#1c1d20; --raise:#26282c; --line:#2f3136; --fg:#ebe7df; --dim:#8f8c85;
+    --up:#4cc38a; --down:#f2706a; --warn:#e3b04b; --accent:#ebe7df; --sel:#ebe7df; --selfg:#131416;
+    --num:"IBM Plex Mono",ui-monospace,Menlo,Consolas,monospace;
+  }
+  body{background:var(--bg);font-family:-apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
+  /* 頁首：一行字，不要四顆膠囊 */
+  .top{gap:12px;margin:2px 0 14px;align-items:baseline}
+  h1{font-size:18px;font-weight:800;letter-spacing:.04em}
+  .top .pill,.top .ver{border:0;background:none;padding:0;font:12px/1.4 var(--num);color:var(--dim);border-radius:0}
+  .top .pill.live{color:var(--up)}
+  .top .pill.live::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;
+                          background:var(--up);margin-right:5px;vertical-align:1px;box-shadow:0 0 0 3px rgba(76,195,138,.18)}
+  .top .pill.paper{color:var(--warn)}
+  .top .ver{margin-left:auto}
+  /* 分頁：純文字＋底線，不要 14 個方框 */
+  .tabs{gap:2px;margin:0 -12px 16px;padding:0 8px;border-bottom:1px solid var(--line);scrollbar-width:none}
+  .tabs::-webkit-scrollbar{display:none}
+  .tab{border:0;border-radius:0;background:none;padding:9px 9px 10px;font-size:14px;color:var(--dim);
+       box-shadow:inset 0 -2px 0 transparent}
+  .tab:hover{color:var(--fg)}
+  .tab.on{background:none;color:var(--fg);font-weight:700;box-shadow:inset 0 -2px 0 var(--fg)}
+  /* 卡片：靠底色分層，標題正常大小寫 */
+  .card{background:var(--card);border:0;border-radius:14px;padding:14px;margin-bottom:14px}
+  .card h2{font-size:15px;color:var(--fg);font-weight:700;text-transform:none;letter-spacing:0;margin:0 0 12px;line-height:1.35}
+  .card h2 span{font-size:12px;color:var(--dim);font-weight:400;text-align:right}
+  .sech{font-size:14px;font-weight:700;margin:20px 0 8px}
+  .sech .dim{font-weight:400;font-size:12px}
+  /* 切換鈕（時框、篩選…）：灰底、選到的反白；不准讓中文被擠成一字一行 */
+  .wb,.qc,.bt,.rl{border:1px solid transparent;background:var(--raise);white-space:nowrap}
+  .wb{color:var(--dim);border-radius:8px;padding:6px 11px;font-size:13px;line-height:1.3}
+  .wb:hover,.rl:hover{color:var(--fg)}
+  .wb.on{background:var(--sel);color:var(--selfg);border-color:var(--sel);font-weight:600}
+  .wins{flex-wrap:wrap;align-items:center;gap:6px}
+  .wins .src{border:0;padding:0;background:none;font:11px var(--num)}
+  .wins .src:empty{flex:0 0 1px;align-self:stretch;margin:2px 4px;background:var(--line)}
+  .qc{border-radius:10px}
+  .qc.on{background:var(--raise);border-color:var(--fg)}
+  .bt{border-radius:10px;font-weight:600}
+  .bt.bo{background:var(--sel);color:var(--selfg);border-color:var(--sel)}
+  .rl{border-radius:8px;font-family:var(--num)}
+  /* 開關（疊圖類）：小圓點表示開/關，跟「切換」分開長相 */
+  .wb.tg2{padding-left:24px;position:relative;background:transparent;border-color:var(--line)}
+  .wb.tg2::before{content:"";position:absolute;left:10px;top:50%;width:7px;height:7px;margin-top:-3.5px;
+                  border-radius:50%;border:1.5px solid var(--dim)}
+  .wb.tg2.on{background:transparent;color:var(--fg);border-color:var(--dim);font-weight:500}
+  .wb.tg2.on::before{background:var(--fg);border-color:var(--fg)}
+  /* 控制列：左邊一個小標籤說明這一排在選什麼 */
+  .ctl{display:flex;align-items:flex-start;gap:8px;margin:0 0 8px}
+  .ctl>label{flex:0 0 28px;font-size:11px;color:var(--dim);letter-spacing:.06em;padding-top:7px}
+  .ctl .ci{flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+  .ctl .gap{flex:0 0 1px;align-self:stretch;margin:3px 3px;background:var(--line)}
+  .ctl .txqw{display:inline-flex;gap:6px}
+  .ctl .txq{width:76px;padding:6px 8px;font-size:13px}
+  /* 表格：表頭小、橫線淡、數字等寬 */
+  th{font-size:11.5px;color:var(--dim);font-weight:500;padding:6px 10px 8px;border-bottom:1px solid var(--line)}
+  td{padding:9px 10px;border-bottom:1px solid rgba(235,231,223,.05);font-family:var(--num);font-size:12.5px}
+  tbody tr:hover td{background:rgba(235,231,223,.025)}
+  tr.sec td{background:var(--raise);font-family:inherit;font-size:12px;padding:8px 10px;border-bottom:0}
+  .scroll{scrollbar-width:thin}
+  /* 數值格 */
+  .kv{background:var(--raise);border-radius:8px;padding:7px 10px;font-size:12.5px;align-items:baseline}
+  .kv b{font-family:var(--num);font-weight:500}
+  .kv b.z{color:var(--dim);opacity:.45;font-weight:400}
+  .grid{gap:6px}
+  /* 說明文字：行距鬆一點；警示框只留左邊一條 */
+  .sub{font-size:12px;line-height:1.65}
+  .note{font-size:12.5px;line-height:1.65;padding:9px 12px;margin:6px 0 12px;border-left:2px solid var(--warn);
+        background:rgba(227,176,75,.06);border-radius:0 8px 8px 0}
+  .fpsum{font-size:13.5px;line-height:1.75}
+  .fpsum b{font-family:var(--num)}
+  .empty{font-size:12.5px;padding:10px 0}
+  details>summary{cursor:pointer;list-style:none}
+  details>summary::-webkit-details-marker{display:none}
+  details>summary::before{content:"▸";display:inline-block;width:1em;color:var(--dim);transition:transform .15s}
+  details[open]>summary::before{transform:rotate(90deg)}
+  /* ★長說明收成三行，點一下展開（展開狀態記在 NOTE_OPEN，20 秒自動重繪不會又收回去） */
+  .clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;cursor:pointer}
+  /* 收合時底部內距會露出半截第四行（overflow 只裁到 padding 外緣）→ 內距改用透明下框補 */
+  .note.clamp{padding-bottom:0;border-bottom:9px solid transparent}
+  .more{display:inline-block;margin:-4px 0 10px;font-size:11.5px;color:var(--dim);cursor:pointer;
+        border-bottom:1px dotted var(--dim)}
+  /* 聚焦列、通知列 */
+  .fbar{background:var(--card);border:0;border-radius:12px;padding:10px 12px;margin:0 0 14px;gap:6px 8px}
+  .fchip{background:var(--raise);border-color:transparent;font-size:12.5px;padding:3px 9px}
+  .fchip.up{box-shadow:inset 2px 0 0 var(--up)} .fchip.down{box-shadow:inset 2px 0 0 var(--down)}
+  .nbar{margin:0 0 14px;gap:8px}
+  .nbar .wb{font-size:12px;padding:5px 10px}
+  /* 輸入框、字卡、進度條 */
+  input.f,.txq{background:var(--raise);border:1px solid transparent;border-radius:8px;color:var(--fg)}
+  input.f:focus,.txq:focus{outline:none;border-color:var(--dim)}
+  .bar{background:var(--raise)}
+  .cd{background:var(--card);border:0;box-shadow:0 -10px 40px rgba(0,0,0,.45)}
+  .ovl{background:rgba(0,0,0,.55)}
+  .cr{border-bottom-color:rgba(235,231,223,.06)}
+  .cr b,.cr>span+*{font-family:var(--num)}
+  :focus-visible{outline:2px solid var(--warn);outline-offset:2px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style></head><body>
 
 <div class="top">
@@ -1398,6 +1502,7 @@ function draw(){
   if(FOCUS_TABS.indexOf(TAB) >= 0){ try{ fb = focusBar(); }catch(e){ fb = ''; } }
   let nb = ''; try{ nb = notiBar(); }catch(e){ nb = ''; }     // 每一頁都有自己的通知開關；壞了不能拖垮整頁
   v.innerHTML = nb + fb + body;
+  try{ clampNotes(v); }catch(e){}                                    // 收合長說明；壞了不影響畫面
   if(TAB==='tx' || CARD){ try{ txMount(); }catch(e){ TXERR = e.name+' '+e.message; } }   // 圖表常駐在 draw() 外，搬回新插槽
   if(TAB==='pat'){ try{ patScan(); }catch(e){} }                                          // 型態分頁：開著才掃（10 分鐘內掃過就不重掃）
 }
@@ -1542,10 +1647,10 @@ function scatter(rows){
   const Y = v => clamp(cy - (v*100/my)*((y1-y0)/2), y0+2, y1-2);
   const hit = r => Math.abs(r.oi*100)>=OITH && Math.abs(r.px*100)<=PXTH;
   let s = `<svg viewBox="0 0 ${Wd} ${Ht}" class="sc">`;
-  s += `<rect x="${cx}" y="${y0}" width="${x1-cx}" height="${cy-y0}" fill="#35d07f" opacity=".07"/>`
-    +  `<rect x="${x0}" y="${y0}" width="${cx-x0}" height="${cy-y0}" fill="#35d07f" opacity=".03"/>`
-    +  `<rect x="${cx}" y="${cy}" width="${x1-cx}" height="${y1-cy}" fill="#ff5c6c" opacity=".07"/>`
-    +  `<rect x="${x0}" y="${cy}" width="${cx-x0}" height="${y1-cy}" fill="#ff5c6c" opacity=".03"/>`;
+  s += `<rect x="${cx}" y="${y0}" width="${x1-cx}" height="${cy-y0}" fill="#4cc38a" opacity=".07"/>`
+    +  `<rect x="${x0}" y="${y0}" width="${cx-x0}" height="${cy-y0}" fill="#4cc38a" opacity=".03"/>`
+    +  `<rect x="${cx}" y="${cy}" width="${x1-cx}" height="${y1-cy}" fill="#f2706a" opacity=".07"/>`
+    +  `<rect x="${x0}" y="${cy}" width="${cx-x0}" height="${y1-cy}" fill="#f2706a" opacity=".03"/>`;
   // ★官方條件：|OI| ≥ 下限 **且** |價格| ≤ 上限 → 命中區是「左右兩塊 × 中央水平帶」，
   //   不是四個角。要找的是「OI 大動、價格還沒動」＝主力安靜建倉。
   const byT = Y(PXTH/100), byB = Y(-PXTH/100);
@@ -1554,12 +1659,12 @@ function scatter(rows){
        fill="#6aa3ff" fill-opacity=".05" stroke="#6aa3ff" stroke-width="1"
        stroke-dasharray="3 3" opacity=".65"/>`;
   });
-  s += `<line x1="${x0}" y1="${cy}" x2="${x1}" y2="${cy}" stroke="#2c3646"/>`
-    +  `<line x1="${cx}" y1="${y0}" x2="${cx}" y2="${y1}" stroke="#2c3646"/>`
+  s += `<line x1="${x0}" y1="${cy}" x2="${x1}" y2="${cy}" stroke="#2f3136"/>`
+    +  `<line x1="${cx}" y1="${y0}" x2="${cx}" y2="${y1}" stroke="#2f3136"/>`
     +  `<text x="${x0+3}" y="${y0+11}" class="ql" fill="#6fd3a8">空頭平倉</text>`
-    +  `<text x="${x1-3}" y="${y0+11}" class="ql qr" fill="#35d07f">多頭建倉</text>`
+    +  `<text x="${x1-3}" y="${y0+11}" class="ql qr" fill="#4cc38a">多頭建倉</text>`
     +  `<text x="${x0+3}" y="${y1-4}" class="ql" fill="#e08a94">多頭平倉</text>`
-    +  `<text x="${x1-3}" y="${y1-4}" class="ql qr" fill="#ff5c6c">空頭建倉</text>`
+    +  `<text x="${x1-3}" y="${y1-4}" class="ql qr" fill="#f2706a">空頭建倉</text>`
     +  `<text x="3" y="${y0+9}" class="ax">+${my.toFixed(0)}</text>`
     +  `<text x="3" y="${y1}" class="ax">-${my.toFixed(0)}</text>`
     +  `<text x="${x0}" y="${Ht-6}" class="ax">-${mx.toFixed(0)}</text>`
@@ -2299,7 +2404,7 @@ function txTgl(k){
   draw();
 }
 function txTglBar(){ return [['wr', '威廉%R', TXWR], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT]]
-  .map(([k, n, v]) => `<span class="wb ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(' '); }
+  .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
   const bars = R.bars, N = bars.length; if(!N) return null;
@@ -2589,7 +2694,7 @@ function txCreate(){
   const ov = document.createElement('div'); ov.className = 'txov'; el.appendChild(ov);
   const lg = document.createElement('div'); lg.className = 'txlg'; el.appendChild(lg);
   const ch = LW.createChart(box, {autoSize:true,
-    layout:{background:{type:'solid', color:'transparent'}, textColor:'#8b97ab', fontSize:11},
+    layout:{background:{type:'solid', color:'transparent'}, textColor:'#8f8c85', fontSize:11},
     grid:{vertLines:{color:'rgba(139,151,171,0.06)'}, horzLines:{color:'rgba(139,151,171,0.06)'}},
     crosshair:{mode: LW.CrosshairMode.Normal},
     rightPriceScale:{borderVisible:false},
@@ -2801,9 +2906,9 @@ function txSvg(){
     g += '<line x1="'+x+'" x2="'+x+'" y1="'+y(b[2])+'" y2="'+y(b[3])+'" stroke="'+col+'"/>'
        + '<rect x="'+(x-3)+'" y="'+Math.min(yo, yc)+'" width="6" height="'+Math.max(1, Math.abs(yo - yc))+'" fill="'+col+'" fill-opacity="'+(b[4] >= b[1] ? 1 : 0.45)+'" stroke="'+col+'"/>';
     if(Hv){ const vy = yv(b[5]); g += '<rect x="'+(x-3)+'" y="'+vy+'" width="6" height="'+(Hp + gap + Hv - vy)+'" fill="'+col+'" fill-opacity="0.45"/>'; }
-    if(i % 16 === 0) g += '<text x="'+x+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="#8b97ab">'+txTime(b[0], txIntra())+'</text>';
+    if(i % 16 === 0) g += '<text x="'+x+'" y="'+(H-4)+'" text-anchor="middle" font-size="9" fill="#8f8c85">'+txTime(b[0], txIntra())+'</text>';
   }
-  for(let k = 0; k <= 4; k++){ const v = lo + (hi - lo)*k/4; g += '<text x="'+(W - padR + 4)+'" y="'+(y(v) + 3)+'" font-size="9" fill="#8b97ab">'+txNum(v, m.prec)+'</text>'; }
+  for(let k = 0; k <= 4; k++){ const v = lo + (hi - lo)*k/4; g += '<text x="'+(W - padR + 4)+'" y="'+(y(v) + 3)+'" font-size="9" fill="#8f8c85">'+txNum(v, m.prec)+'</text>'; }
   return '<div dir="rtl" style="overflow-x:auto"><svg dir="ltr" viewBox="0 0 '+W+' '+H+'" width="'+Math.max(W, 320)+'" height="'+H+'" style="max-width:none;display:block">'+g+'</svg></div>';
 }
 function txCoins(){        // 幣的快捷鈕：BTC/ETH/SOL＋持倉的幣＋正在看的
@@ -2820,18 +2925,21 @@ function viewTx(){
   const p = isC ? {} : (P[TXS] || {});
   let h = '<div class="card"><h2>麥門指標<span>'+(isC ? 'OKX 永續・手機直接抓 K 線' : '期交所 1 分 K・'+(P.age != null ? P.age+' 秒前算' : ''))+'</span></h2>';
   if(!isC && (P.stale || P.fetch_err)) h += '<div class="warn">⚠ '+(P.stale ? '盤中超過 5 分鐘沒抓到新資料，下面是舊的。' : '')+(P.fetch_err || '')+'</div>';
-  h += '<div class="txbar">' + [['TX','台指'],['TSE','加權']].map(([k, n]) => {
+  // ★控制列分三排、每排一個小標籤（2026-10-15 改版：原本 18 顆一模一樣的按鈕擠成一團，看不出哪些是選商品、哪些是開關）
+  //   商品／週期／階梯參數＝「選一個」→ 反白；上下線／威廉／支撐壓力／型態＝「開或關」→ 小圓點（.tg2）
+  h += '<div class="ctl"><label>商品</label><div class="ci">' + [['TX','台指'],['TSE','加權']].map(([k, n]) => {
       const q = P[k] || {};
-      return `<span class="wb ${TXS===k?'on':''}" onclick="txSel('${k}')">${n} ${q.ok ? txBadge(q.c) : ''}</span>`; }).join(' ')
-    + '<span class="txsp"></span>'
-    + txCoins().map(c => `<span class="wb ${TXS==='C:'+c+'-USDT-SWAP'?'on':''}" onclick="txSel('C:${c}-USDT-SWAP')">${c}</span>`).join(' ')
-    + ' <input id="txq" class="txq" placeholder="其他幣" autocomplete="off" onkeydown="txKey(event)"><span class="wb" onclick="txGo()">看</span>'
-    + '</div><div class="txbar">'
-    + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
-    + ((TXS === 'TX' || isC) && txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
-        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join(' ') : '')
-    + (!isC ? `<span class="txsp"></span><span class="wb ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '')
-    + '<span class="txsp"></span>' + txTglBar() + '</div>';
+      return `<span class="wb ${TXS===k?'on':''}" onclick="txSel('${k}')">${n} ${q.ok ? txBadge(q.c) : ''}</span>`; }).join('')
+    + '<span class="gap"></span>'
+    + txCoins().map(c => `<span class="wb ${TXS==='C:'+c+'-USDT-SWAP'?'on':''}" onclick="txSel('C:${c}-USDT-SWAP')">${c}</span>`).join('')
+    + '<span class="txqw"><input id="txq" class="txq" placeholder="其他幣" autocomplete="off" onkeydown="txKey(event)"><span class="wb" onclick="txGo()">看</span></span>'
+    + '</div></div><div class="ctl"><label>週期</label><div class="ci">'
+    + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join('')
+    + ((TXS === 'TX' || isC) && txIntra() ? '<span class="gap"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
+        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">階梯${n}</span>`).join('') : '')
+    + '</div></div><div class="ctl"><label>疊圖</label><div class="ci">'
+    + (!isC ? `<span class="wb tg2 ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '')
+    + txTglBar() + '</div></div>';
   if(isC) h += txCSum();
   else if(!p.ok) h += '<div class="empty">'+(p.err || P.err || '沒有資料')+'</div>';
   else {
@@ -3174,8 +3282,8 @@ function viewRank(){
   const meta = q => (m.quads && m.quads[q]) ? m.quads[q] : ['',''];
   const net  = g => g.reduce((s,r)=>s+(r.d_usd||0), 0);
   // 淨額常常不到 1M，全站的 big() 那一段會印成「31372」→ 這頁自己補 K 單位（不動 big()，別頁沿用原樣）
-  const sgnBig = v => { const a=Math.abs(v), s=v<0?'−':'+';
-    return s + (a>=1e6 ? f(a/1e6,1)+'M' : (a>=1e3 ? f(a/1e3,0)+'K' : f(a,0))); };
+  const amt = a => a>=1e9 ? f(a/1e9,2)+'B' : (a>=1e6 ? f(a/1e6,1)+'M' : (a>=1e3 ? f(a/1e3,0)+'K' : f(a,0)));
+  const sgnBig = v => (v<0?'−':'+') + amt(Math.abs(v));
   if(RKQ && !RK_SIDE[RKQ]) RKQ = null;
 
   const grid = RK_GRID.map(([q,side])=>{
@@ -3199,7 +3307,7 @@ function viewRank(){
       + `<span class="rkb ${cls(r.oi)} ${a>RK_CAP?'over':''}"><i style="width:${Math.min(a/RK_CAP,1)*100}%"></i></span>`
       + '<span class="r2">'
         + `<span>${pf(r.last)}</span>`
-        + `<span>OI <em>${u?big(u):'—'}</em></span>`
+        + `<span>OI <em>${u?amt(u):'—'}</em></span>`
         + `<span>佔市值 <em>${r.oimc?f(r.oimc*100,1)+'%':'—'}</em></span>`
         + `<span>24H <em class="${cls(r.chg24h)}">${pct(r.chg24h)}</em></span>`
       + '</span></li>';
@@ -3299,12 +3407,32 @@ function viewCoins(){
       ]) : `<div class="empty">沒有符合「${q}」的幣。</div>`) + '</div>';
 }
 
+// ★長說明收成三行（2026-10-15 改版：「醜死了」的主因之一是整片說明文字攤在頁面上）。點一下展開；
+//   展開狀態用前 40 字當 key 記住 → 20 秒自動重繪不會又收回去。裡面有按鈕／連結／輸入框的不收（怕點不到）。
+const NOTE_OPEN = new Set();
+function clampNotes(root){
+  root.querySelectorAll('div.note, div.sub').forEach(el => {
+    if(el.querySelector('a, button, input, select, [onclick]')) return;
+    const key = (el.textContent || '').slice(0, 40);
+    if(NOTE_OPEN.has(key)) return;
+    const lh = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    if(el.scrollHeight <= lh * 3.6) return;           // 三行左右以內的不收
+    el.classList.add('clamp');
+    const more = document.createElement('span');
+    more.className = 'more'; more.textContent = '展開說明';
+    const open = () => { NOTE_OPEN.add(key); el.classList.remove('clamp'); more.remove(); };
+    el.addEventListener('click', open, {once:true});
+    more.addEventListener('click', open);
+    el.after(more);
+  });
+}
+
 function viewDiag(){
   let h='';
   for(const [name,rows] of Object.entries(D.diag.groups)){
     h += '<div class="card"><h2>'+name.replace('_DIAG','')
        + `<span>Δ 距上次 ${D.diag.elapsed?D.diag.elapsed+'s':'首次'}</span></h2><div class="grid">` + rows.map(r=>
-      `<div class="kv"><span class="dim">${r.k}</span><b>${r.v}${
+      `<div class="kv"><span class="dim">${r.k}</span><b class="${r.v?'':'z'}">${r.v}${
         r.d?` <span class="${r.d>0?'warn':'dim'}">+${r.d}</span>`:''}</b></div>`).join('')
       + '</div></div>';
   }
@@ -3373,3 +3501,7 @@ pushInit();
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) tick(); });
 </script></body></html>
 """
+# ★版本戳記自動跟著頁面內容走（2026-10-15）：10-14 起連續 6 次改儀表板都沒改上面的 VER →
+#   手機主畫面的 App 一直不會自動重載（用戶得自己點 ⟳）。改成「手寫標籤＋頁面內容雜湊」：
+#   頁面一改就一定變、沒改就不變（只改 main.py 的部署不會讓大家白重載一次），不靠人記得。
+VER = VER + "-" + hashlib.sha1(_HTML.encode("utf-8")).hexdigest()[:6]
