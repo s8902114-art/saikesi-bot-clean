@@ -1066,16 +1066,17 @@ _HTML = """<!doctype html>
   .wb.on{color:var(--fg);border-color:var(--accent);background:#16233a}
   .txbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:6px 0}
   .txsp{flex:0 0 10px}
-  .cd .txwrap{height:320px}
+  .cd .txwrap{height:360px}
   .txq{width:70px;padding:4px 6px;border:1px solid var(--line);border-radius:7px;background:#0f141c;color:var(--fg);font-size:12px}
   .txb{display:inline-block;padding:0 6px;border-radius:5px;font-weight:700;color:#fff;font-size:11px;line-height:17px}
-  .txwrap{position:relative;width:100%;height:440px;margin:6px 0}
-  .txbox{position:absolute;left:0;top:0;right:0;bottom:0}
-  .txov{position:absolute;left:0;top:0;right:60px;bottom:0;pointer-events:none;z-index:2;overflow:hidden}
-  .txsr{position:absolute;left:0;top:0;right:60px;bottom:0;pointer-events:none;z-index:1;overflow:hidden}
-  .txlg{position:absolute;left:6px;top:4px;z-index:3;font-size:12px;pointer-events:none;background:rgba(11,14,20,.72);
-        padding:2px 6px;border-radius:4px;line-height:1.6;max-width:calc(100% - 76px)}
-  @media (max-width:600px){ .txwrap{height:380px} .txlg{font-size:11px} }
+  /* 開高低收那排放在圖的上面、不疊在圖上（用戶 10-14：「圖表可以不要跟開高低收那欄重疊嗎 會被卡住」）→ 圖從 --lgh 往下開始 */
+  .txwrap{position:relative;width:100%;height:480px;margin:6px 0;--lgh:42px}
+  .txbox{position:absolute;left:0;top:var(--lgh);right:0;bottom:0}
+  .txov{position:absolute;left:0;top:var(--lgh);right:60px;bottom:0;pointer-events:none;z-index:2;overflow:hidden}
+  .txsr{position:absolute;left:0;top:var(--lgh);right:60px;bottom:0;pointer-events:none;z-index:1;overflow:hidden}
+  .txlg{position:absolute;left:0;top:0;right:0;height:var(--lgh);overflow:hidden;z-index:3;font-size:12px;pointer-events:none;
+        padding:2px 6px;line-height:1.6}
+  @media (max-width:600px){ .txwrap{height:440px;--lgh:58px} .txlg{font-size:11px;line-height:1.5} }
   .sc{width:100%;max-width:560px;height:auto;display:block;margin:2px auto 6px;overflow:hidden}
   .sc .ql{font-size:9px;font-weight:600;opacity:.85}
   .sc .qr{text-anchor:end}
@@ -1154,7 +1155,7 @@ _HTML = """<!doctype html>
 
 <script>
 const API = location.pathname.replace(/\\/$/,'') + '/api';
-let D = null, TAB = 'mkt', SORT = {}, QF = '';
+let D = null, TAB = 'tx', SORT = {}, QF = '';      // 用戶 10-14：「讓我開進去的時候首頁在台指那頁」
 
 const f = (n,d=2)=> (n===null||n===undefined||isNaN(n)) ? '—' : Number(n).toFixed(d);
 // 幣價：大幣固定 4 位、小幣改用有效位數（否則 PEPE 之類會被截成 0.000010）
@@ -1189,7 +1190,7 @@ function table(id, cols, rows, render){
 }
 function sortBy(id,i){ const s=SORT[id]; SORT[id] = (s&&s.i===i)?{i,dir:-s.dir}:{i,dir:1}; draw(); }
 
-const TABS = [['tx','台指'],['fp','翻倉'],['yao','妖幣'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
+const TABS = [['tx','台指'],['pat','型態'],['fp','翻倉'],['yao','妖幣'],['mkt','視覺篩選器'],['whale','巨鯨雷達'],['rank','OI 排名'],['anom','警報'],['dhx','數據訊號'],['pos','持倉'],['coins','幣種'],
               ['diag','漏斗'],['sig','訊號'],['sys','開關']];
 // 官方四象限順序：左上 空頭平倉 / 右上 多頭建倉 / 左下 多頭平倉 / 右下 空頭建倉
 const QUADS = ['多頭建倉','空頭平倉','空頭建倉','多頭平倉'];
@@ -1333,6 +1334,7 @@ function draw(){
   if(TAB==='fp') body = viewFp();
   if(TAB==='yao') body = viewYao();
   if(TAB==='tx') body = viewTx();
+  if(TAB==='pat') body = viewPat();
   if(TAB==='anom') body = viewAnom();
   if(TAB==='pos') body = viewPos();
   if(TAB==='oi') body = viewOI();
@@ -1347,6 +1349,7 @@ function draw(){
   let nb = ''; try{ nb = notiBar(); }catch(e){ nb = ''; }     // 每一頁都有自己的通知開關；壞了不能拖垮整頁
   v.innerHTML = nb + fb + body;
   if(TAB==='tx' || CARD){ try{ txMount(); }catch(e){ TXERR = e.name+' '+e.message; } }   // 圖表常駐在 draw() 外，搬回新插槽
+  if(TAB==='pat'){ try{ patScan(); }catch(e){} }                                          // 型態分頁：開著才掃（10 分鐘內掃過就不重掃）
 }
 
 // ── ★手機推播（2026-09-30，用戶：「每頁都可以選擇開或不開，要像數據獵手手機也可以通知」）──
@@ -1354,7 +1357,8 @@ function draw(){
 const PUSHAPI = location.pathname.replace(/\\/$/,'') + '/push';
 const NOTI = {fp:'有可以下的單、出結果、過 +2.2／−2.2', tx:'台指／加權彩色K換色（15 分 K 收盤確認）、台指籌碼異常星', yao:'有長盤整的新放量訊號、限價成交、贏或輸', mkt:'某個幣剛出現 🔥', whale:'新的巨鯨訊號', rank:'新擠進 OI 增幅前 10',
   anom:'新警報、警報變成確認', dhx:'新的數據訊號', pos:'開倉、平倉', coins:'1H 結構轉向（上升↔下降）',
-  diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動'};
+  diag:'策略觸發', sig:'bot 發出新的策略訊號', sys:'策略開關被改動',
+  pat:'（這頁是手機自己跟 OKX 抓、自己算，bot 沒有這份資料，不會推播）'};
 let PUSH = {reg:null, sub:null, perm:'default', err:'', prefs:{}};
 try{ PUSH.prefs = JSON.parse(localStorage.getItem('pushprefs')||'{}') || {}; }catch(e){ PUSH.prefs = {}; }
 function pushOK(){ try{ return ('serviceWorker' in navigator) && ('PushManager' in window) && (typeof Notification !== 'undefined'); }catch(e){ return false; } }
@@ -1961,7 +1965,7 @@ const TXAPI = API.slice(0, -3) + 'txc';
 const TXLIB = 'https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js';
 let TXS = 'TX', TXTF = '15', TXCH = null, TXDATA = {}, TXLIBST = '', TXERR = '', TXBUSY = {}, TXLAST = {};
 try{ const v = JSON.parse(localStorage.getItem('txsel')||'{}');
-  if(v.s==='TX'||v.s==='TSE'||(typeof v.s==='string' && v.s.indexOf('C:')===0 && v.s.length < 40)) TXS = v.s; if(TXTFN[v.tf]) TXTF = v.tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; }catch(e){}
+  if(TXTFN[v.tf]) TXTF = v.tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; }catch(e){}   // 商品不還原：一打開就是台指（用戶 10-14），週期照上次
 function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; if(!TXSAVE){ try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} } draw(); }
 // 階梯參數：麥門一次只畫一個（設定裡選）→ 按鈕切換，預設參數一（用戶 10-11）。K 棒列裡 參數二＝b[7]、參數一＝b[8]
 let TXLAD = '1';
@@ -2178,15 +2182,63 @@ function txActiveZones(h, l, c, a, piv, n){  // 最新一根收盤時還有效�
   }
   return out;
 }
-function txStudyArr(h, l, c, v, n){         // 已收盤的前 n 根 → {zones, pats}（濾網同回測）
+function txStudyArr(h, l, c, v, n){         // 已收盤的前 n 根 → {zones, pats, life}（濾網同回測）
   const hh = h.slice(0, n), ll = l.slice(0, n), cc = c.slice(0, n), vv = v.slice(0, n);
   const a = txAtrW(hh, ll, cc, 14), piv = txZig(hh, ll, a, 2.0);
   const ze = txZoneEv(hh, ll, cc, vv, a, piv, n).filter(e => e.hatr >= 2.5 && e.volx >= 1);
   const te = txTriEv(hh, ll, cc, vv, a, piv, n).filter(e => (e.pat === '上升三角' || e.pat === '下降三角') && e.hatr >= 2.5 && e.volx >= 1);
-  return {zones:txActiveZones(hh, ll, cc, a, piv, n), pats:ze.concat(te).sort((x, y) => x.i - y.i)};
+  return {zones:txActiveZones(hh, ll, cc, a, piv, n), pats:ze.concat(te).sort((x, y) => x.i - y.i), life:txZoneLife(hh, ll, cc, a, piv, n), atr:a[n - 1]};
 }
 // </txsr>
-const TXSTC = {res:'#e0675a', sup:'#3fb27f', wr:'#b48ef0'};
+// ★畫圖用的「區的一生」（用戶 10-14：「支撐壓力照我之前要你判斷的圖那種 支撐用綠色 壓力用淡紫色 不用寫支撐壓力
+//   如果是有支撐壓力互換 或是回來測試的 那就延長」）。區的定義同上（txGroups）；形狀在第一次被收盤穿過時凍結。
+//   ★延長規則是我定的（他沒給細節）：從沒被穿過＝畫到最右邊；被收盤穿過＝角色互換（顏色跟著換）；
+//    互換後價格回來碰到區＝延長到那一根，之後到現在都沒再被反穿＝延長到最右邊；穿過後再也沒回來＝畫到穿過那根為止。
+//   每一段 [起, 迄, 角色(+1 壓力/-1 支撐), 是否到最右邊]。區成形前價格就已經收盤穿過的，不算區。
+function txZoneLife(h, l, c, a, piv, n){
+  const Z = {}, P = [], out = []; let j = 0;
+  for(let t = 40; t < n; t++){
+    while(j < piv.length && piv[j][3] <= t - 1){ P.push(piv[j]); j++; }
+    if(P.length >= 4) for(const sgn of [1, -1]) for(const g of txGroups(P, a, t, sgn)){
+      let lo = Infinity, hi = -Infinity, first = Infinity;
+      for(const p of g){ lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); first = Math.min(first, p[0]); }
+      const key = sgn + '|' + first, z = Z[key];
+      if(z && (z.bad || z.broke >= 0)) continue;
+      const edge = sgn > 0 ? hi : lo; let crossed = false;
+      for(let m = first + 1; m < t; m++) if((c[m] - edge) * sgn > 0){ crossed = true; break; }
+      if(crossed){ if(!z) Z[key] = {bad:true}; continue; }
+      if(!z) Z[key] = {sgn:sgn, lo:lo, hi:hi, first:first, n:g.length, pts:g.map(p => [p[0], p[1]]), from:t, broke:-1};
+      else { z.lo = lo; z.hi = hi; z.n = g.length; z.pts = g.map(p => [p[0], p[1]]); }
+    }
+    for(const k in Z){ const z = Z[k]; if(!z.bad && z.broke < 0 && (z.sgn > 0 ? c[t] > z.hi : c[t] < z.lo)) z.broke = t; }
+  }
+  for(const k in Z){
+    const z = Z[k]; if(z.bad) continue;
+    // ★大小門檻＝判圖時同一道（用戶 10-14：「在很小的盤整內認支撐壓力」）：區的邊到「第一個轉折之後的另一邊極端」≥2.5 ATR；
+    //   被穿過的區用穿過那根的 ATR、還沒穿過的用最新一根（＝型態偵測 hatr 的算法）
+    const te = z.broke >= 0 ? z.broke : n - 1; let ext = z.sgn > 0 ? Infinity : -Infinity;
+    for(let m = z.first; m < te; m++) ext = z.sgn > 0 ? Math.min(ext, l[m]) : Math.max(ext, h[m]);
+    if(!(Math.abs((z.sgn > 0 ? z.hi : z.lo) - ext) >= 2.5 * a[te])) continue;
+    const seg = []; let role = z.sgn, s0 = z.first, tested = false, flips = 0, act = Math.max(...z.pts.map(p => p[0]));   // act＝最後一次有動靜（轉折／碰到／穿過）
+    for(let m = z.from; m < n; m++){
+      if(role > 0 ? c[m] > z.hi : c[m] < z.lo){ seg.push([s0, m, role, false]); role = -role; s0 = m; tested = false; flips++; act = m; continue; }
+      if(m > s0 && (role > 0 ? h[m] >= z.lo : l[m] <= z.hi)){ act = m; if(flips) tested = true; }
+    }
+    // 延長上限（★我定的）：最後一次動靜之後最多再延 200 根（＝區本身「近 200 根」的定義）；超過就停在那裡，不再拉到最右邊
+    if(!flips || tested){ const e = Math.min(n - 1, act + 200); seg.push([s0, e, role, e === n - 1]); }
+    out.push({sgn:z.sgn, lo:z.lo, hi:z.hi, first:z.first, n:z.n, pts:z.pts, seg:seg, role:role, live:((!flips || tested) && act + 200 >= n - 1)});
+  }
+  // ★價位重疊、時間也重疊的區只留碰最多次的那個（★我定的；用戶 10-14：「在很小的盤整內認支撐壓力」＝大區裡又包小區）
+  out.sort((x, y) => y.n - x.n || (y.hi - y.lo) - (x.hi - x.lo));
+  const keep = [], span = z => [z.first, z.seg.length ? z.seg[z.seg.length - 1][1] : z.first];
+  for(const z of out){
+    const [a0, a1] = span(z);
+    if(keep.some(k => { const [b0, b1] = span(k); return z.lo <= k.hi && z.hi >= k.lo && a0 <= b1 && b0 <= a1; })) continue;
+    keep.push(z);
+  }
+  return keep.sort((x, y) => x.first - y.first);
+}
+const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0'};     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
 let TXWR = '1', TXSR = '1', TXPT = '1';
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
   if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d; }catch(e){}
@@ -2206,7 +2258,7 @@ function txStudy(R){
   const h = bars.map(b => b[2]), l = bars.map(b => b[3]), c = bars.map(b => b[4]), v = bars.map(b => Number(b[5]) || 0);
   const live = (R.raw && R.raw[N-1]) ? R.raw[N-1][8] !== '1' : true, n = live ? N - 1 : N;
   const st = {N:N, lc:lc, t0:bars[0][0], wr:txWr(h, l, c, 14), zones:[], pats:[]};
-  if(n > 60){ const r = txStudyArr(h, l, c, v, n); st.zones = r.zones; st.pats = r.pats; }
+  if(n > 60){ const r = txStudyArr(h, l, c, v, n); st.zones = r.zones; st.pats = r.pats; st.life = r.life; }
   R.st = st; return st;
 }
 function txStApply(){
@@ -2226,21 +2278,33 @@ function txSrDraw(){
   const W = C.sr.clientWidth || Math.max(0, (C.box.clientWidth || 0) - 60), prec = R.meta ? R.meta.prec : 2;
   if(!(W > 0)){ C.sr.innerHTML = ''; return; }          // 圖剛建立還沒有寬度 → 等尺寸回呼（redo）再畫
   const X = i => ts.logicalToCoordinate(i), Y = p => cs.priceToCoordinate(p), bad = q => q === null || q === undefined || isNaN(q);
-  let g = '';
-  // %R 跟 K 線共用右邊的價格軸（程式庫 4.x 不能分窗格）→ 在 −20／−80 虛線上直接寫字，免得把右軸的價格當成 %R
-  if(TXWR === '1' && C.wr && typeof C.wr.priceToCoordinate === 'function') for(const [p, t] of [[-20, '-20 超買'], [-80, '-80 超賣']]){
-    const y = C.wr.priceToCoordinate(p); if(!bad(y)) g += '<text x="44" y="'+(y - 2)+'" font-size="9" fill="'+txAlpha(TXSTC.wr, 0.85)+'">'+t+'</text>';   // x=44：左下角有程式庫的標誌
+  let g = '', gw = '';
+  // %R 跟 K 線共用右邊的價格軸（程式庫 4.x 不能分窗格）→ 在 −20／−80 虛線上直接寫數字，免得把右軸的價格當成 %R
+  if(TXWR === '1' && C.wr && typeof C.wr.priceToCoordinate === 'function') for(const [p, t] of [[-20, '-20'], [-80, '-80']]){     // 用戶：不用寫超買超賣
+    const y = C.wr.priceToCoordinate(p); if(!bad(y)) gw += '<text x="44" y="'+(y - 2)+'" font-size="9" fill="'+txAlpha(TXSTC.wr, 0.85)+'">'+t+'</text>';   // x=44：左下角有程式庫的標誌
   }
-  if(TXSR === '1') for(const z of st.zones){
-    const x0 = X(z.first), y1 = Y(z.hi), y2 = Y(z.lo); if(bad(x0) || bad(y1) || bad(y2)) continue;
-    const xa = Math.max(0, x0), col = z.sgn > 0 ? TXSTC.res : TXSTC.sup, top = Math.min(y1, y2), hg = Math.max(2, Math.abs(y2 - y1));
-    if(xa >= W) continue;
-    g += '<rect x="'+xa+'" y="'+top+'" width="'+(W - xa)+'" height="'+hg+'" fill="'+txAlpha(col, 0.13)+'" stroke="'+txAlpha(col, 0.5)+'" stroke-width="1"/>'
-       + '<text x="'+(W - 4)+'" y="'+(top - 3)+'" text-anchor="end" font-size="10" fill="'+txAlpha(col, 0.95)+'">'+(z.sgn > 0 ? '壓力 ' : '支撐 ')+txNum(z.lo, prec)+'~'+txNum(z.hi, prec)+'（碰 '+z.n+' 次）</text>';
+  // 區與型態只畫在 K 線那一塊（下面是量和 %R）：K 線區下緣＝圖高 ×（1 − K 線的下邊界比例）
+  const Hb = C.box.clientHeight, yMax = Hb > 0 ? Hb * (1 - (TXWR === '1' ? 0.36 : 0.22)) : 1e6;
+  // 支撐壓力（用戶 10-14 第二版：「我不要這樣 太亂太醜了」）：只畫「現在還有效」的區（沒被穿過，或互換後回測過、到現在還守住），
+  //   一個區一條帶（帶狀＋上下緣＋轉折點，照判圖時的畫法），從第一個轉折畫到最右邊，顏色＝現在的角色（壓力紅、支撐綠），不寫字；
+  //   ★只留離現價最近的壓力 2 個、支撐 2 個（我定的）。已經結束的舊區不畫。
+  if(TXSR === '1'){
+    const px = R.bars[R.bars.length - 1][4], L = (st.life || []).filter(z => z.live);
+    const res = L.filter(z => z.role > 0).sort((x, y) => Math.abs(x.lo - px) - Math.abs(y.lo - px)).slice(0, 2);
+    const sup = L.filter(z => z.role < 0).sort((x, y) => Math.abs(x.hi - px) - Math.abs(y.hi - px)).slice(0, 2);
+    for(const z of res.concat(sup)){
+      const y1 = Y(z.hi), y2 = Y(z.lo), xa = X(z.first); if(bad(y1) || bad(y2) || bad(xa) || xa > W) continue;
+      const col = z.role > 0 ? TXSTC.res : TXSTC.sup, top = Math.min(y1, y2), hg = Math.max(2, Math.abs(y2 - y1)), x0 = Math.max(0, xa);
+      g += '<rect x="'+x0+'" y="'+top+'" width="'+(W - x0)+'" height="'+hg+'" fill="'+txAlpha(col, 0.16)+'" stroke="none"/>'
+         + '<line x1="'+x0+'" y1="'+top+'" x2="'+W+'" y2="'+top+'" stroke="'+txAlpha(col, 0.7)+'" stroke-width="1"/>'
+         + '<line x1="'+x0+'" y1="'+(top + hg)+'" x2="'+W+'" y2="'+(top + hg)+'" stroke="'+txAlpha(col, 0.7)+'" stroke-width="1"/>';
+      for(const p of z.pts){ const xp = X(p[0]), yp = Y(p[1]); if(!bad(xp) && !bad(yp) && xp >= 0 && xp <= W) g += '<circle cx="'+xp+'" cy="'+yp+'" r="2.6" fill="'+col+'"/>'; }
+    }
   }
   if(TXPT === '1') for(const e of st.pats){
     const col = e.dir > 0 ? '#ef4444' : '#22c55e', x1 = X(e.i); if(bad(x1)) continue;
-    if(e.lo !== undefined){     // 被突破的區：從最後一次碰到畫到突破那根（從第一次碰到畫會拉滿整張圖，太亂）
+    if(e.lo !== undefined){     // 被突破的區（只在支撐壓力關著時畫虛線框；開著時區本身已經畫了）：從最後一次碰到畫到突破那根
+      if(TXSR === '1') continue;
       const x0 = X(e.lastp !== undefined ? e.lastp : e.first), y1 = Y(e.hi), y2 = Y(e.lo); if(bad(x0) || bad(y1) || bad(y2) || x1 < 0 || x0 > W) continue;
       g += '<rect x="'+x0+'" y="'+Math.min(y1, y2)+'" width="'+Math.max(1, x1 - x0)+'" height="'+Math.max(2, Math.abs(y2 - y1))+'" fill="none" stroke="'+col+'" stroke-width="1.3" stroke-dasharray="4,3"/>';
     } else {
@@ -2253,7 +2317,8 @@ function txSrDraw(){
          + '<line x1="'+xs+'" y1="'+ys0+'" x2="'+x1+'" y2="'+ys1+'" stroke="'+col+'" stroke-width="1.6"/>';
     }
   }
-  C.sr.innerHTML = g ? '<svg width="100%" height="100%">'+g+'</svg>' : '';
+  C.sr.innerHTML = (g || gw) ? '<svg width="100%" height="100%"><defs><clipPath id="txsrclip"><rect x="0" y="0" width="'+W+'" height="'+yMax+'"/></clipPath></defs>'
+    + '<g clip-path="url(#txsrclip)">'+g+'</g>'+gw+'</svg>' : '';
 }
 function txPtMarks(R){
   if(TXPT !== '1' || !R) return []; const st = txStudy(R); if(!st) return [];
@@ -2620,8 +2685,7 @@ function txLegend(t){
 }
 function txWrLeg(R, i){
   if(TXWR !== '1') return ''; const st = txStudy(R); if(!st || st.wr[i] === null || st.wr[i] === undefined) return '';
-  const w = st.wr[i], z = w >= -20 ? '超買' : (w <= -80 ? '超賣' : '');
-  return ' <span style="color:'+TXSTC.wr+'">%R '+w.toFixed(1)+(z ? ' '+z : '')+'</span>';
+  return ' <span style="color:'+TXSTC.wr+'">%R '+st.wr[i].toFixed(1)+'</span>';
 }
 async function txFetch(){
   if(txIsC(TXS)) return txFetchC();                // 幣：手機直接跟 OKX 拿
@@ -2764,8 +2828,10 @@ function viewTx(){
     + '雙線寬度 ±0.02%。1H／4H 的參數一要用 15 分 K 才切得出來，所以只有最近約 15 天有；4H 的參數二用 1H 算（約 60 天），收盤落在 4H K 中間，所以收盤後第一根 4H 才換階、也不畫 CME 開收虛線。'
     + '<br><b>威廉%R</b>（按鈕開關，紫線在量的下面）：(14 根最高 − 收) ÷ (14 根最高 − 14 根最低) × −100；−20 以上超買、−80 以下超賣（4J 的設定）。'
     + '4J 自己說不能單看：要先看高低點有沒有被突破／跌破，回踩那條線時剛好超賣才做多（空單反過來）。<b>回測</b>（BTC/ETH/SOL 2021~2026、停損 1%／目標 +2%、扣費）照他講的做每筆約 −0.1%，沒有優勢。'
-    + '<br><b>支撐壓力</b>（按鈕開關）：你第 9~10 輪看圖判過的那套——明顯轉折（反向走 2 倍 ATR 才算）、近 200 根內價差 ≤0.5 ATR 的轉折高點（紅框＝壓力）或低點（綠框＝支撐）≥2 個圍成一區；'
-    + '只畫到最新收盤都還沒被收盤穿過的區，框上寫區間價和碰了幾次。'
+    + '<br><b>支撐壓力</b>（按鈕開關）：你第 9~10 輪看圖判過的那套——明顯轉折（反向走 2 倍 ATR 才算）、近 200 根內價差 ≤0.5 ATR 的轉折高點（紅＝壓力）或低點（綠＝支撐）≥2 個圍成一區，點＝那幾個轉折。'
+    + '只畫<b>現在還有效</b>的區：沒被收盤穿過的，或被穿過後支撐壓力互換、價格有回來測試、到現在還守住的（延長到最右邊）；穿過後沒回來的就不畫。'
+    + '顏色＝現在的角色（壓力紅、支撐綠）。跟判圖時一樣只畫夠大的區（區的邊到另一邊極端 ≥2.5 ATR）。'
+    + '<b>我自己定的</b>：最後一次碰到／回測超過 200 根就不算有效；價位和時間都重疊的區只留碰最多次的；上下各只畫離現價最近的 2 個。'
     + '<br><b>型態</b>（按鈕開關）：你判過 8 成對的——壓力區突破（17/21）、支撐區跌破（21/21）、上升三角形（17/18）、下降三角形（16/18）；濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）。'
     + '箭頭＝突破那根（紅↑做多、綠↓做空），虛線框＝被突破的區，兩條線＝三角形的頸線和另一邊；只用已收盤的 K。'
     + '<b>注意</b>：這些只在加密貨幣 4H 判過、回測過，型態本身扣費後跟隨機進場差不多；其他週期、台指加權沒驗證。'
@@ -2775,6 +2841,99 @@ function viewTx(){
   return h;
 }
 
+// ★型態分頁（2026-10-14，用戶：「幫我做一個分頁是型態的 然後要做多做空分開 看是要突破前就有還是突破後顯示這樣」）
+//   兩種都給：「還沒突破」＝型態已成形、現價離突破線 ≤1.5 ATR（★我定的）；「剛突破」＝最近 6 根已收盤 K 內突破（4H＝24 小時）。
+//   型態與濾網跟圖上同一套（txStudyArr：壓力區突破／支撐區跌破／上升、下降三角形，高度 ≥2.5 ATR；突破那根還要量 ≥ 前 30 根均量——
+//   還沒突破的沒有量可以看，只標高度）。幣＝視覺篩選器裡 24H 成交額前 60；手機直接跟 OKX 抓（每幣 600 根，3 個一起），10 分鐘重掃。
+const PAT_N = 60, PAT_POST = 6, PAT_NEAR = 1.5, PAT_TTL = 10 * 60 * 1000;
+let PATTF = '240', PATD = {};
+try{ const v = localStorage.getItem('pattf'); if(v === '240' || v === '60') PATTF = v; }catch(e){}
+function patSel(tf){ PATTF = tf; try{ localStorage.setItem('pattf', tf); }catch(e){} draw(); }
+function patCoins(){ const rows = (D && D.mkt && D.mkt.rows) || [];
+  return rows.filter(r => r && r.inst).slice().sort((a, b) => (b.vol || 0) - (a.vol || 0)).slice(0, PAT_N).map(r => r.inst); }
+// 一個幣的 K（OKX 原始列）→ {post:剛突破, pre:還沒突破, last, atr}
+function txPatNow(raw){
+  const N = raw.length, n = raw[N-1][8] === '1' ? N : N - 1;
+  if(n < 120) return null;
+  const h = raw.map(r => r[2]), l = raw.map(r => r[3]), c = raw.map(r => r[4]), v = raw.map(r => r[5]);
+  const R = txStudyArr(h, l, c, v, n), A = R.atr, last = c[N-1];
+  const hh = h.slice(0, n), ll = l.slice(0, n), cc = c.slice(0, n), a = txAtrW(hh, ll, cc, 14), piv = txZig(hh, ll, a, 2.0);
+  const post = R.pats.filter(e => e.i >= n - PAT_POST).map(e => ({dir:e.dir, pat:e.pat, level:e.level, stop:e.stop, target:e.level + e.dir * e.height,
+    t:raw[e.i][0], ago:n - 1 - e.i, volx:e.volx, hatr:e.hatr}));
+  const pre = [];
+  for(const z of R.zones){                    // 還有效的區：壓力＝做多候選（等突破上緣）、支撐＝做空候選（等跌破下緣）
+    const dr = z.sgn, edge = dr > 0 ? z.hi : z.lo, dist = (edge - last) * dr;
+    if(!(dist >= 0 && dist <= PAT_NEAR * A)) continue;
+    let ext = dr > 0 ? Infinity : -Infinity; for(let m = z.first; m < n; m++) ext = dr > 0 ? Math.min(ext, ll[m]) : Math.max(ext, hh[m]);
+    const ht = Math.abs(edge - ext); if(ht < 2.5 * A) continue;
+    let opp = null; for(const p of piv) if(p[2] === -dr && p[3] <= n - 1) opp = p;
+    pre.push({dir:dr, pat:(dr > 0 ? '壓力區' : '支撐區'), level:edge, stop:opp ? opp[1] : null, target:edge + dr * ht, dist:dist, distA:dist / A, nz:z.n});
+  }
+  const P = piv.filter(p => p[3] <= n - 1);
+  if(P.length >= 6){                          // 還沒突破的上升／下降三角形：最近 6 個轉折成形、最後一個轉折之後沒收盤穿過頸線
+    const tr = txTriCollect(P.slice(-6));
+    if(tr && (tr[0] === '上升三角' || tr[0] === '下降三角')){
+      const S = tr[1], Hs = S.filter(p => p[2] > 0), Ls = S.filter(p => p[2] < 0), up = tr[0] === '上升三角', dr = up ? 1 : -1;
+      const lv = up ? Math.max(...Hs.map(p => p[1])) : Math.min(...Ls.map(p => p[1])), lastI = S[S.length-1][0];
+      const ht = Math.abs(S[0][2] > 0 ? S[0][1] - S[1][1] : S[1][1] - S[0][1]);
+      let crossed = false; for(let m = lastI + 1; m < n; m++) if((cc[m] - lv) * dr > 0){ crossed = true; break; }
+      const dist = (lv - last) * dr;
+      if(!crossed && ht >= 2.5 * A && dist >= 0 && dist <= PAT_NEAR * A)
+        pre.push({dir:dr, pat:tr[0] + '形', level:lv, stop:(up ? Ls[Ls.length-1][1] : Hs[Hs.length-1][1]), target:lv + dr * ht, dist:dist, distA:dist / A});
+    }
+  }
+  return {post:post, pre:pre, last:last, atr:A};
+}
+async function patScan(){
+  const tf = PATTF, S = PATD[tf] || (PATD[tf] = {res:{}, prec:{}, at:0, busy:false, done:0, total:0, err:0});
+  if(S.busy || Date.now() - S.at < PAT_TTL) return;
+  const list = patCoins(); if(!list.length) return;
+  S.busy = true; S.done = 0; S.total = list.length; S.err = 0; let k = 0;
+  const worker = async () => {
+    while(k < list.length){
+      const inst = list[k++];
+      try{ const g = await txOkx(inst, tf, 600); S.res[inst] = txPatNow(g.raw); S.prec[inst] = g.prec; }catch(e){ S.err++; }
+      S.done++; if(S.done % 10 === 0 && TAB === 'pat') draw();
+    }
+  };
+  try{ await Promise.all([worker(), worker(), worker()]); }finally{ S.busy = false; S.at = Date.now(); }
+  if(TAB === 'pat') draw();
+}
+function viewPat(){
+  const S = PATD[PATTF] || {res:{}, prec:{}}, tfn = PATTF === '240' ? '4H' : '1H';
+  let h = '<div class="card"><h2>型態<span>'+tfn+'・成交額前 '+PAT_N+' 幣・手機直接抓 OKX</span></h2>'
+    + '<div class="txbar">' + [['240', '4H'], ['60', '1H']].map(([k, n]) => `<span class="wb ${PATTF===k?'on':''}" onclick="patSel('${k}')">${n}</span>`).join(' ')
+    + '<span class="txsp"></span><span class="dim">'+(S.busy ? '掃描中 '+S.done+' / '+S.total : (S.at ? '上次掃描 '+ago(S.at/1000)+'前' : '準備掃描…'))
+    + (S.err ? '，'+S.err+' 幣抓不到' : '')+'</span></div>'
+    + '<div class="sub dim">型態＝你判過 8 成對的四種（壓力區突破、支撐區跌破、上升三角形、下降三角形），跟「台指」頁圖上同一套。'
+    + '「還沒突破」＝型態已成形、現價離突破線 ≤'+PAT_NEAR+' ATR；「剛突破」＝最近 '+PAT_POST+' 根已收盤 K 內突破（突破那根量 ≥ 前 30 根均量）。'
+    + '停損＝反方向最後一個轉折、目標＝等幅。'+(PATTF !== '240' ? '<b>1H 沒有判過、沒回測過。</b>' : '')
+    + '⚠ 回測：這些型態本身扣費後跟隨機進場差不多，是看盤工具不是訊號。</div></div>';
+  const rows = {1:{pre:[], post:[]}, '-1':{pre:[], post:[]}};
+  for(const inst in S.res){ const r = S.res[inst]; if(!r) continue;
+    for(const e of r.pre) rows[e.dir].pre.push(Object.assign({inst:inst, last:r.last}, e));
+    for(const e of r.post) rows[e.dir].post.push(Object.assign({inst:inst, last:r.last}, e)); }
+  const P = inst => (S.prec && S.prec[inst] !== undefined) ? S.prec[inst] : 4;
+  const coin = inst => `<a class="cl" onclick="patOpen('${inst}')">${inst.replace('-USDT-SWAP', '')}</a>`;
+  for(const [dr, title, cl] of [[1, '做多 📈', 'up'], [-1, '做空 📉', 'down']]){
+    const R = rows[dr]; R.pre.sort((a, b) => a.distA - b.distA); R.post.sort((a, b) => a.ago - b.ago);
+    h += `<div class="card"><h2><span class="${cl}">${title}</span><span>還沒突破 ${R.pre.length}・剛突破 ${R.post.length}</span></h2>`
+      + '<h3 class="sech">還沒突破 <span class="dim">（離突破線近 → 遠）</span></h3>'
+      + (R.pre.length ? table('patpre'+dr, ['幣', '型態', '突破線', '現價', '距離', '停損', '目標'], R.pre, e => [
+          {v:e.inst, h:coin(e.inst)}, {v:e.pat, h:e.pat + (e.nz ? `<span class="dim"> 碰${e.nz}次</span>` : '')},
+          {v:e.level, h:txNum(e.level, P(e.inst))}, {v:e.last, h:txNum(e.last, P(e.inst))},
+          {v:e.distA, h:f(e.dist / e.last * 100, 2) + '%<span class="dim"> ' + f(e.distA, 1) + 'ATR</span>'},
+          {v:e.stop, h:e.stop == null ? '—' : txNum(e.stop, P(e.inst))}, {v:e.target, h:txNum(e.target, P(e.inst))}]) : '<div class="empty">'+(S.at || S.busy ? '目前沒有' : '掃描中…')+'</div>')
+      + '<h3 class="sech">剛突破 <span class="dim">（最近 '+PAT_POST+' 根 '+tfn+' 內，新 → 舊）</span></h3>'
+      + (R.post.length ? table('patpost'+dr, ['幣', '型態', '突破時間', '突破線', '現價', '停損', '目標', '量'], R.post, e => [
+          {v:e.inst, h:coin(e.inst)}, {v:e.pat, h:e.pat}, {v:e.t, h:txTime(e.t, true) + `<span class="dim"> ${e.ago} 根前</span>`},
+          {v:e.level, h:txNum(e.level, P(e.inst))}, {v:e.last, h:txNum(e.last, P(e.inst))},
+          {v:e.stop, h:txNum(e.stop, P(e.inst))}, {v:e.target, h:txNum(e.target, P(e.inst))}, {v:e.volx, h:f(e.volx, 1) + '倍'}]) : '<div class="empty">'+(S.at || S.busy ? '目前沒有' : '掃描中…')+'</div>')
+      + '</div>';
+  }
+  return h;
+}
+function patOpen(inst){ CARD = null; TXSAVE = null; TAB = 'tx'; TXTF = PATTF; txSel('C:' + inst); }
 // ★妖幣觀察清單（2026-10-02，Barry 10-01 直播「打妖幣的眉角」）：只顯示 yaobi 已算好的值（D.yao），不打 API、不下單。
 //   用戶：「這什麼啊 密密麻麻的」→ 版面只留「現在能下的」小卡，其他（規則／全部訊號／觀察清單）收進折疊。
 function yaoDay(ms){ if(!ms) return '—'; const d=new Date(ms), p=n=>String(n).padStart(2,'0'); return p(d.getUTCMonth()+1)+'-'+p(d.getUTCDate()); }
