@@ -29,6 +29,41 @@ _state = {"api": "尚未執行", "n_sig": 0, "n_long": 0, "last_run": 0, "err": 
 _candles: dict = {}          # instId -> {bar_start_ms: (o, h, l, c)}
 _posted: dict = {}           # 訊號 id -> 已發過的狀態
 _first_run = True
+# ★2026-10-14：cookie 10-02 過期後 12 天沒人知道、畫面還歸零（原本讀不到 → 用空清單重算）。改成：
+#   ①讀不到就保留上一次算好的紀錄＋發 Discord 警告（24h 內不重發）②最後一次成功的結果存進 volume（redeploy 不丟）
+#   ③恢復讀取的那一輪只發一則總結，不把中間累積的每一筆都補發。
+_PDIR = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__)))
+_SAVE = os.path.join(_PDIR, "fanpan_state.json")
+_KEEP = ("rows", "eq", "score", "W", "B", "L", "decision", "n_long", "n_sig")
+_fail = {"since": 0.0, "last_alert": 0.0, "last_ok": 0.0}
+
+
+def _tw(sec):
+    return (dt.datetime.fromtimestamp(sec, dt.timezone.utc) + dt.timedelta(hours=8)).strftime("%m-%d %H:%M") if sec else "—"
+
+
+def _save():
+    try:
+        d = {k: _state[k] for k in _KEEP}; d["last_ok"] = _fail["last_ok"]
+        tmp = _SAVE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f: json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, _SAVE)
+    except Exception as e:
+        print(f"[翻倉前推] 存檔失敗 {type(e).__name__}", flush=True)
+
+
+def _load():
+    try:
+        with open(_SAVE, encoding="utf-8") as f: d = json.load(f)
+        _state.update({k: d[k] for k in _KEEP if k in d}); _fail["last_ok"] = float(d.get("last_ok") or 0)
+        for r in _state.get("rows") or []: _posted[r["id"]] = (r["act"], r.get("K"))
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"[翻倉前推] 讀存檔失敗 {type(e).__name__}", flush=True)
+
+
+_load()
 
 
 # ───────────────────────── 資料 ─────────────────────────
@@ -133,7 +168,22 @@ def run(raw=None, start_ms=None, notify=None):
     global _first_run
     st = start_ms or START_UTC_MS
     api, data = ("本機測試", raw) if raw is not None else fetch_signals()
-    _state.update(api=api, n_sig=len(data), last_run=int(time.time()))
+    now = time.time()
+    if raw is None and not api.startswith("HTTP 200"):
+        # ★讀不到：保留上一次的紀錄（不可用空清單重算＝歸零），只更新狀態＋提醒
+        _fail["since"] = _fail["since"] or now
+        _state.update(api=api, last_run=int(now),
+                      err=f"官方 API 讀不到（{api}），從 {_tw(_fail['since'])} 起；紀錄停在 {_tw(_fail['last_ok'])}。更新 Railway 變數 DHX_COOKIE 後會自動從起點補算")
+        if notify and (not _fail["last_alert"] or now - _fail["last_alert"] >= 86400):
+            notify("🔴 **翻倉前推：官方數據訊號讀不到**\n"
+                   f"{api}，從 {_tw(_fail['since'])}（台北）開始；紀錄停在 {_tw(_fail['last_ok'])}。\n"
+                   "要恢復：重新登入 datahunterx → 把新的 cookie 貼到 Railway 變數 `DHX_COOKIE`。恢復後會自動從 09-30 起全部補算。")
+            _fail["last_alert"] = now
+        _first_run = False
+        return _state.get("rows") or []
+    recovered = bool(_fail["since"])
+    _fail.update(since=0.0, last_alert=0.0, last_ok=now)
+    _state.update(api=api, n_sig=len(data), last_run=int(now))
     S = [p for p in (parse(x) for x in data) if p and p["t"] >= st]
     L = sorted([s for s in S if s["d"] > 0], key=lambda s: s["t"]); _state["n_long"] = len(L)
     rows, busy, eq, score, W, B, Ls = [], 0, 100.0, 0.0, 0, 0, 0
@@ -168,14 +218,19 @@ def run(raw=None, start_ms=None, notify=None):
                    f"前推紀錄 贏{W}/保本{B}/輸{Ls}，檢定分數 {score:+.2f} 已達 −2.2（事先寫死的停止門檻）。\n"
                    "照規則停止，不上真錢。")
     if notify:
+        quiet = _first_run or recovered                    # 啟動那輪、恢復讀取那輪：只發總結，不逐筆補發
         for r in rows:
             key = (r["act"], r.get("K"))
             if _posted.get(r["id"]) == key: continue
-            if not _first_run:
+            if not quiet:
                 notify(line(r))
             _posted[r["id"]] = key
         if _first_run:
             notify("📒 翻倉紙上前推 已啟動\n" + status_text())
+        elif recovered:
+            notify("🟢 翻倉前推：官方 API 恢復，已從起點全部補算\n" + status_text())
+    if raw is None:
+        _save()
     _first_run = False
     return rows
 

@@ -504,6 +504,16 @@ active_real_trades: Dict[str, Dict[str, Any]] = {}
 _PERSIST_DIR = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__)))
 _TRADES_FILE = os.path.join(_PERSIST_DIR, "active_trades.json")
 _RISK_STATE_FILE = os.path.join(_PERSIST_DIR, "strategy_risk_state.json")   # BOR/4JD 熔斷計數(redeploy 不歸零)
+
+
+def _append_jsonl(name: str, obj: dict) -> None:
+    """★2026-10-14 永久事件紀錄（數據訊號結算、巨鯨雷達判方向）：儀表板事件池只留 24h／6h，
+    用戶要「累積一陣子再優化」卻沒有東西可以累積 → 每筆事件結束時追加一行到 volume。只寫、不讀、永不拋例外。"""
+    try:
+        with open(os.path.join(_PERSIST_DIR, name), "a", encoding="utf-8") as _f:
+            _f.write(json.dumps(obj, ensure_ascii=False, default=float) + "\n")
+    except Exception as _e:
+        print(f"[Persist] {name} 寫入失敗(不影響交易): {type(_e).__name__}", flush=True)
 # ★「交易所掛好 SL/TP 就不碰」的出場型:BOR 固定1R、S4H 固定2.5R、接管時認不出原策略的倉(adopt_hold)。
 #   不移保本、不移SL、不加碼;只在倉位消失時移除追蹤(BOR 另做熔斷計數)。
 #   ★2026-09-15 S4H 移出(用戶:「保住本金為主」)→ 改走 box_trend/fourjd_2r 那段「只做一次保本」,浮盈 S4H_BE_R 移保本。
@@ -9367,7 +9377,10 @@ def _dhx_events_update(found: dict, bars_by_inst: dict, now_s: float) -> int:
         _DHX_EVENTS[k] = ev
         new += 1
     for ev in list(_DHX_EVENTS.values()):
+        _was = ev.get("status")
         _dhx_event_step(ev, bars_by_inst.get(ev["inst"]), _PX_HISTORY.get(ev["inst"]), now_s)
+        if _was == "持倉中" and ev.get("status") != "持倉中":
+            _append_jsonl("dhx_events.jsonl", ev)                 # 結算（止盈/止損/過期）那一刻永久記一筆
     cut = now_s - (DHX_EVENT_KEEP_H + 1) * 3600      # 多留 1 小時，已結單的還看得到結果
     for k in [k for k, e in _DHX_EVENTS.items() if e["ts"] < cut]:
         del _DHX_EVENTS[k]
@@ -10400,6 +10413,8 @@ def _whale_scan(now_s: float) -> None:
                 ev["score"] = score
                 ev["note"] = "・".join(why)
                 ev["judged_ts"] = now_s
+                _px_now = (_PX_HISTORY.get(inst) or [[0, None]])[-1][1]
+                _append_jsonl("whale_events.jsonl", dict(ev, px_judged=_px_now))   # 判方向那一刻永久記一筆（之後拿 K 線算後續走勢）
         cut = now_s - WHALE_VALID_H * 3600
         for k in [k for k, v in _WHALE.items() if v.get("last_ts", 0) < cut]:
             del _WHALE[k]
