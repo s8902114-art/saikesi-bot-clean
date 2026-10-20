@@ -521,11 +521,22 @@ def _append_jsonl(name: str, obj: dict) -> None:
 _HANDS_OFF_ES = ("bor_1r", "engulf_1r", "fourjd_1r", "adopt_hold")
 
 
+# ★2026-10-20 每日上限 / 同幣冷卻 也一起落地(BOR 法醫 _bor_forensic_1020.md:這兩個是純記憶體變數,
+#   redeploy 就歸零 → 09-16 三次 redeploy 當天 BOR 出 8 筆(上限 5);09-13 起 110 次 push,上限形同虛設)。
+#   S4H/4JD 同型變數一併落地(同一個 bug 家族,手冊:關/修一個行為要 grep 所有同型點)。
+_DAYCAP_STATE = (("bor_day", "_BOR_DAY"), ("s4h_day", "_S4H_DAY"))
+_COOLDOWN_STATE = (("bor_last_bar", "_BOR_LAST_BAR"), ("s4h_last_bar", "_S4H_LAST_BAR"), ("fourjd_last_bar", "_FOURJD_LAST_BAR"))
+
+
 def save_risk_state():
-    """熔斷計數落地(CLAUDE.md 第11條:觀察條款寫成代碼;redeploy 歸零 = 熔斷形同虛設)"""
+    """熔斷計數 + 每日上限 + 同幣冷卻 落地(CLAUDE.md 第11條:觀察條款寫成代碼;redeploy 歸零 = 形同虛設)"""
     try:
+        d = {"bor": globals().get("_BOR_RISK"), "fourjd": globals().get("_FOURJD_RISK")}
+        for key, g in _DAYCAP_STATE + _COOLDOWN_STATE:
+            v = globals().get(g)
+            if isinstance(v, dict): d[key] = dict(v)
         with open(_RISK_STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"bor": globals().get("_BOR_RISK"), "fourjd": globals().get("_FOURJD_RISK")}, f)
+            json.dump(d, f)
     except Exception as e:
         print(f"[Persist] 存檔熔斷計數失敗: {e}")
 
@@ -538,7 +549,18 @@ def load_risk_state():
         for key, g in (("bor", "_BOR_RISK"), ("fourjd", "_FOURJD_RISK")):
             if isinstance(d.get(key), dict) and isinstance(globals().get(g), dict):
                 globals()[g].update({k: d[key][k] for k in ("consec_sl", "halted") if k in d[key]})
-        print(f"[Persist] 熔斷計數已讀回 BOR={globals().get('_BOR_RISK')} 4JD={globals().get('_FOURJD_RISK')}", flush=True)
+        _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        for key, g in _DAYCAP_STATE:                      # 只有同一個 UTC 日才讀回計數,跨日自然歸零
+            v = d.get(key)
+            if isinstance(v, dict) and isinstance(globals().get(g), dict) and v.get("day") == _today:
+                globals()[g].update(day=_today, count=int(v.get("count", 0)))
+        for key, g in _COOLDOWN_STATE:
+            v = d.get(key)
+            if isinstance(v, dict) and isinstance(globals().get(g), dict):
+                globals()[g].update({str(k): int(t) for k, t in v.items()})
+        print(f"[Persist] 熔斷計數已讀回 BOR={globals().get('_BOR_RISK')} 4JD={globals().get('_FOURJD_RISK')} "
+              f"每日計數 BOR={globals().get('_BOR_DAY')} S4H={globals().get('_S4H_DAY')} "
+              f"冷卻 BOR={len(globals().get('_BOR_LAST_BAR') or {})} S4H={len(globals().get('_S4H_LAST_BAR') or {})} 4JD={len(globals().get('_FOURJD_LAST_BAR') or {})}", flush=True)
     except Exception as e:
         print(f"[Persist] 讀回熔斷計數失敗: {e}")
 
@@ -4867,12 +4889,14 @@ def _s4h_struct_sl(ev, i, e):
     return None
 
 
-def _s4h_deep_candles(inst_id: str, df_recent: pd.DataFrame) -> pd.DataFrame:
+def _s4h_deep_candles(inst_id: str, df_recent: pd.DataFrame, force: bool = False) -> pd.DataFrame:
     """把 4H K線加深到 ~1000 根(history-candles 分頁),首次抓完就快取、之後只增量合併。
-    ★不是優化,是規格能否被執行的前提 —— 見本區塊開頭的 300/500/1000 根重現率實測。"""
+    ★不是優化,是規格能否被執行的前提 —— 見本區塊開頭的 300/500/1000 根重現率實測。
+    force=True:不受本輪配額限制(BOR 貼支撐閘在訊號成立那一刻才呼叫,一天不到一次,
+    但它拿到淺資料時是「閘失效、放行壞單」而不是「條件不成立」,所以不能省這一支)。"""
     cur = _S4H_KL_CACHE.get(inst_id)
     if cur is None:
-        if _S4H_DEEP_BUDGET["used"] >= S4H_DEEP_PER_ROUND:
+        if _S4H_DEEP_BUDGET["used"] >= S4H_DEEP_PER_ROUND and not force:
             return df_recent                      # 本輪配額用完,先用淺的(條件會自然不成立)
         _S4H_DEEP_BUDGET["used"] += 1
         rows = []; after = None
@@ -4960,6 +4984,7 @@ def _check_s4h_short(symbol_item: str, okx_swap_symbol: str):
             _S4H_DIAG["停損無效"] += 1; return False, "", 0.0
         _S4H_LAST_BAR[okx_swap_symbol] = _bar_ts
         _S4H_DAY["count"] += 1
+        save_risk_state()                                  # ★2026-10-20 每日上限/冷卻落地(同 BOR 的 redeploy 歸零 bug)
         if S4H_SPIKE_GATE:                              # ★2026-09-15 急漲閘(說明見常數區)
             _end = df.index[i] + pd.Timedelta(hours=4)
             d1 = fetch_market_candles(okx_swap_symbol, "1H", 300)
@@ -5183,6 +5208,7 @@ def _check_fourjd_short(symbol_item: str, okx_swap_symbol: str):
         if _bar_ts - _FOURJD_LAST_BAR.get(okx_swap_symbol, 0) < FOURJD_COOLDOWN_BARS * 3600:
             _FOURJD_DIAG["冷卻"] += 1; return False, "", 0.0
         _FOURJD_LAST_BAR[okx_swap_symbol] = _bar_ts
+        save_risk_state()                                  # ★2026-10-20 同幣冷卻落地(同 BOR 的 redeploy 歸零 bug)
         _end = d1.index[-1] + pd.Timedelta(hours=1)     # ★2026-09-15 位置閘 + BTC 急漲閘(說明見 S4H 常數區)
         if FOURJD_POS_GATE:
             d4 = fetch_market_candles(okx_swap_symbol, "4H", 60)
@@ -5410,12 +5436,20 @@ def _check_bor_short(symbol_item: str, okx_swap_symbol: str):
         if _BOR_DAY["count"] >= BOR_DAILY_CAP:
             _BOR_DIAG["每日上限"] += 1; return False, "", 0.0
         _BOR_LAST_BAR[okx_swap_symbol] = _bar_ts          # ★先佔冷卻(被貼支撐閘擋掉也算,對齊回測)
+        save_risk_state()                                  # ★2026-10-20 冷卻落地(redeploy 不歸零)
         if BOR_SUP_GATE:
-            _deep = _s4h_deep_candles(okx_swap_symbol, df)
+            _deep = _s4h_deep_candles(okx_swap_symbol, df, force=True)
             try:
                 _j = int(_deep.index.get_loc(df.index[i]))
             except Exception:
                 _deep, _j = df, i                            # 對不上就用淺的 300 根
+            if _deep is df:
+                # ★2026-10-20 修 BOR 法醫找到的缺口:深抓沒拿到就退回 300 根,600 根看得到的支撐 300 根看不到
+                #   → 2026 回測該擋 104 筆只擋 69 筆(漏 37%),實單 TRUMP 09-16(−0.97R)/SAHARA 10-15(−0.55R)就是這樣漏進來。
+                #   改成「資料不足 = 未知 → 不進」(寧可漏單不放壞單;回測規格是 600 根,沒 600 根就不是同一個閘)。
+                _BOR_DIAG["支撐資料不足"] = _BOR_DIAG.get("支撐資料不足", 0) + 1
+                print(f"[BOR-Short] {symbol_item} 擋:貼支撐閘深抓失敗只有{len(df)}根(規格{BOR_SUP_LOOK}根)→不進", flush=True)
+                return False, "", 0.0
             _sr, _sn = _support_below_R(_deep["high"].values.astype(float), _deep["low"].values.astype(float),
                                         _j, float(e), float(sl), k=BOR_SUP_K, tol=BOR_SUP_TOL,
                                         L=BOR_SUP_LOOK, min_touch=BOR_SUP_TOUCH)
@@ -5430,6 +5464,7 @@ def _check_bor_short(symbol_item: str, okx_swap_symbol: str):
                 print(f"[BOR-Short] {symbol_item} 擋:吞噬K上影線佔{_uw:.2f}(≥{BOR_UPWICK_MAX})", flush=True)
                 return False, "", 0.0
         _BOR_DAY["count"] += 1
+        save_risk_state()                                  # ★2026-10-20 每日上限落地(redeploy 不歸零)
         _BOR_DIAG["成立"] += 1
         return True, f"突破回踩空(跌破前低{PH:.6g}→反彈回測+{deep:.2f}%→看跌吞噬)", float(sl)
     except Exception as ex:
