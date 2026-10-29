@@ -856,6 +856,49 @@ def register(app, G):
         r.headers["Access-Control-Allow-Origin"] = "*"
         return r
 
+    # ★幣的 OI 歷史（2026-10-30，給幣圖的籌碼異常星用）：OKX rubik open-interest-history 沒開跨網域 → 手機抓不到，由 bot 代抓
+    #   只收 XXX-USDT-SWAP、週期 15m/1H；OKX 一頁 100 點、最多 15 頁（實測 1440 點＝15m 約 15 天、1H 約 60 天）；每個幣每個週期快取 5 分鐘
+    _OIH = {}
+
+    @app.route("/d/<tok>/oih")
+    def _dash_oih(tok):
+        if not _token_ok(tok):
+            return "", 404
+        inst = str(request.args.get("inst", "")); per = str(request.args.get("p", "15m"))
+        base = inst[:-10] if inst.endswith("-USDT-SWAP") else ""
+        if per not in ("15m", "1H") or not base or not base.isalnum() or len(base) > 20:
+            r = jsonify({"ok": False, "err": "參數不對"})
+        else:
+            key = inst + "|" + per; c = _OIH.get(key)
+            if c and time.time() - c[0] < 300:
+                data = c[1]
+            else:
+                import requests as _rq
+                data, end = [], None
+                try:
+                    for _ in range(15):
+                        prm = {"instId": inst, "period": per, "limit": 100}
+                        if end: prm["end"] = end
+                        j = _rq.get("https://www.okx.com/api/v5/rubik/stat/contracts/open-interest-history", params=prm,
+                                    headers={"User-Agent": "Mozilla/5.0 (saikesi-bot dashboard)"}, timeout=10).json()
+                        d = j.get("data") or []
+                        if j.get("code") != "0" or not d:
+                            break
+                        data += [[int(x[0]), float(x[2])] for x in d]      # [時間毫秒, OI(幣)]
+                        end = d[-1][0]
+                        if len(d) < 100:
+                            break
+                        time.sleep(0.12)
+                except Exception:
+                    pass
+                data = sorted({t: v for t, v in data}.items())
+                if len(_OIH) > 60:
+                    _OIH.pop(next(iter(_OIH)))
+                _OIH[key] = (time.time(), data)
+            r = jsonify({"ok": True, "d": data})
+        r.headers["X-Robots-Tag"] = "noindex, nofollow"; r.headers["Cache-Control"] = "no-store"
+        return r
+
     @app.route("/d/<tok>/push", methods=["GET", "POST"])
     def _dash_push(tok):
         if not _token_ok(tok):
@@ -2783,17 +2826,41 @@ function mxDiv(h, l, c, ev, day, ban){
   return out;
 }
 // </mmx>
-// 幣的籌碼異常星（★我定的：台指是 5 分K 量 ≥3000 口的絕對門檻，幣沒有可比的口數 → 改成「這根 15 分K 量 > 前 960 根（10 天）的 99 百分位」，
-//   跟台指星星的出現頻率同級（台指有值的 15 分K 裡約 1% 有星）；全天都算，因為幣 24 小時交易）。K 數沒變就不重算
-function txStarC(R){
-  const raw = R.raw, n = raw.length; if(R.starN === n && R.star) return R.star;
-  const out = new Array(n).fill(0), W = 960, MIN = 300;
-  for(let i = MIN; i < n; i++){
-    const w = []; for(let j = Math.max(0, i - W); j < i; j++) w.push(raw[j][5]);
-    w.sort((a, b) => a - b); const q = w[Math.floor(0.99 * (w.length - 1))];
-    if(raw[i][5] > q && (raw[i][8] === '1' || i < n - 1)) out[i] = Math.round(raw[i][5]);
+// 幣的 OI 歷史（bot 代抓 /oih，OKX 這支沒開跨網域）：TXOI['BTC-USDT-SWAP|15m'] = {m: Map(毫秒→OI 幣數), at, busy}
+const TXOI = {};
+function txOiUrl(){ const p = String(location.pathname || ''); return (p.endsWith('/') ? p.slice(0, -1) : p) + '/oih'; }
+async function txOiGet(inst, per){
+  const k = inst + '|' + per, c = TXOI[k];
+  if(c && (c.busy || Date.now() - c.at < 300000)) return c;
+  TXOI[k] = {m:(c && c.m) || null, at:(c && c.at) || 0, busy:true};
+  try{
+    const r = await (await fetch(txOiUrl() + '?inst=' + inst + '&p=' + per, {cache:'no-store'})).json();
+    if(r && r.ok && Array.isArray(r.d)){ const m = new Map(); for(const x of r.d) m.set(x[0], x[1]); TXOI[k] = {m:m, at:Date.now(), busy:false}; }
+    else TXOI[k] = {m:(c && c.m) || null, at:Date.now(), busy:false};
+  }catch(e){ TXOI[k] = {m:(c && c.m) || null, at:Date.now(), busy:false}; }
+  return TXOI[k];
+}
+// 幣的籌碼異常星（★我定的；用戶 10-30：「盤整一直出星可能代表有人持續進場」「趨勢盤星星會變少」「OI 0.3% 太少，少說 2%~10%」）：
+//   12 幣 OKX 實測（_mm_data/star_calib*.py）：單看一根 K 的 OI 跳動或爆量，趨勢盤出星反而比盤整多（盤整÷趨勢 0.1~0.6，各種門檻都一樣）
+//   → 要「價格不動、OI 一直加」才會變成盤整出星。星＝近 24 根 OI 累積增加 ≥3%，且同期收盤淨變化 ≤1%。
+//   OI 取每根收盤那一刻（OKX 的 OI 時間戳＝那一刻的快照）：15 分圖用 15 分 OI（約 15 天）、1H 與 4H 用 1H OI（約 60 天），更早沒有星。
+//   實測出星率 15 分 2.3%／1H 3.8%／4H 3.5%，12 幣都有星、單幣最多佔 21%；星的值＝OI 累積增加 %。
+const TXSTAR_N = 24, TXSTAR_OI = 3, TXSTAR_PX = 1;
+function txStarX(key){
+  const R = TXDATA[key]; if(!R || !R.raw || !R.raw.length) return null;
+  const inst = key.slice(2).split('|')[0], tf = key.split('|')[1];
+  if(tf !== '15' && tf !== '60' && tf !== '240') return null;
+  const raw = R.raw, n = raw.length, out = new Array(n).fill(0);
+  const oi = TXOI[inst + '|' + (tf === '15' ? '15m' : '1H')], om = oi && oi.m; if(!om || !om.size) return out;
+  const L = (tf === '15' ? 15 : (tf === '60' ? 60 : 240)) * 60000;
+  for(let i = TXSTAR_N; i < n; i++){
+    if(i === n - 1 && raw[i][8] !== '1') continue;          // 最後一根還沒收完
+    const a = om.get(raw[i][7] + L), b = om.get(raw[i - TXSTAR_N][7] + L);
+    if(a === undefined || b === undefined || !(b > 0)) continue;
+    const dOi = (a / b - 1) * 100, dPx = Math.abs(raw[i][4] / raw[i - TXSTAR_N][4] - 1) * 100;
+    if(dOi >= TXSTAR_OI && dPx <= TXSTAR_PX) out[i] = Math.round(dOi * 10) / 10;
   }
-  R.starN = n; R.star = out; return out;
+  return out;
 }
 // 由原始 K 算成圖表列（顏色、階梯、CME 標記）。1H 的參數一要用 15 分那份的換階事件。
 function txCRows(key){
@@ -2803,7 +2870,7 @@ function txCRows(key){
   const cl = raw.map(r => r[4]);
   const col = tf === 'D' ? mxColorD(cl) : (tf === '240' ? mxColor60(cl) : (tf === 'W' ? cl.map(() => -1) : mxColor15(cl)));
   const warm = tf === 'D' ? 30 : TXWARM;
-  const star = tf === '15' ? txStarC(R) : null;
+  const star = (tf === '15' || tf === '60' || tf === '240') ? txStarX(key) : null;
   let e2 = null, e1 = null;
   if(intra){
     const r15 = TXDATA['C:'+inst+'|15'];
@@ -2845,6 +2912,11 @@ async function txFetchC(){
   }
   if((tf === '60' || tf === '240') && TXDATA[TXS+'|'+tf]){ txCRows(TXS+'|'+tf); }   // 15 分／1H 有新換階 → 跟著更新
   if(first) draw();                                                // 第一次拿到資料 → 摘要不用等下一輪 20 秒
+  // 籌碼異常星要的 OI：15 分圖用 15 分 OI、1H／4H 用 1H OI；抓到後重算這張圖
+  const per = tf === '15' ? '15m' : ((tf === '60' || tf === '240') ? '1H' : null);
+  if(per){ const c0 = TXOI[inst + '|' + per];
+    if(!c0 || (!c0.busy && Date.now() - c0.at >= 300000)) txOiGet(inst, per).then(() => {
+      const k = TXS + '|' + tf; if(TXDATA[k] && TXDATA[k].raw){ txCRows(k); if(TXCH && TXCH.key === k){ try{ txApply(); }catch(e){} } } }).catch(() => {}); }
 }
 function txCSum(){
   const R = TXDATA[TXS+'|15'];
@@ -3040,7 +3112,7 @@ function txLegend(t){
   const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(b[6])
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
-    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+b[9] : '') + txUdLeg(b[0])
+    + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+(m.crypto ? 'OI+'+b[9]+'%' : b[9]) : '') + txUdLeg(b[0])
     + txWrLeg(R, i) + txKdLeg(R, i) + ((TXBS === '1' && txHasBs(R) && b[11] !== null && b[11] !== undefined) ? ' <span style="color:'+TXSTC.bs+'">價差 '+(b[11] > 0 ? '+' : '')+b[11].toFixed(1)+'</span>' : '');
 }
 function txWrLeg(R, i){
@@ -3206,7 +3278,9 @@ function viewTx(){
     + '<br><b>背離</b>（按鈕開關，橘點）：價格創「前一交易日起」的新高（新低），KD 的 K 卻沒跟上、且 K＜70（新低時 K＞30）；同一個高低點只標一次。'
     + '官方台指 15 分三個月 17 顆全抓到、多標 1 顆。<b>我定的</b>：參考的高低點不能在當天（台指＝當天日盤；幣＝同一個 CME 交易日，幣全天都評）；台指只看日盤 15 分，幣看 15 分和 1H，加權不畫（官方只有台指）。'
     + '<br><b>期現價差</b>（只有台指，按鈕開關）：台指收盤 − 加權收盤，照官方算法取這根結束前最後一筆加權收盤（所以夜盤是台指在動、加權停在日盤收盤）。'
-    + '<br><b>幣的籌碼異常星</b>（<b>我定的</b>）：台指是 5 分 K 量 ≥3000 口，幣沒有可比的口數 → 改成這根 15 分 K 量大於前 10 天的 99 百分位（出現頻率跟台指差不多）。'
+    + '<br><b>幣的籌碼異常星</b>（<b>我定的</b>，你 10-30 說「盤整一直出星＝有人持續進場」「趨勢盤要變少」「OI 2%~10% 才算異常」）：'
+    + '近 24 根 OI 累積增加 ≥3%，而且同一段收盤淨變化 ≤1%（價格不動、OI 一直加）。12 個幣實測：只看一根 K 的 OI 跳動或爆量，趨勢盤出星反而比盤整多（各種門檻都是），所以加了「價格不動」。'
+    + '出星率約 15 分 2%、1H 與 4H 4%，盤整時常連續出幾顆。圖例的 ★OI+x% 是那 24 根的 OI 增加幅度。OI 只抓得到 15 分約 15 天、1H 約 60 天，更早沒有星。量不算進來。'
     + '<br><b>型態</b>（按鈕開關）：你判過 8 成對的——壓力區突破（17/21）、支撐區跌破（21/21）、上升三角形（17/18）、下降三角形（16/18）；濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）。'
     + '箭頭＝突破那根（紅↑做多、綠↓做空），虛線框＝被突破的區，兩條線＝三角形的頸線和另一邊；只用已收盤的 K。'
     + '<b>注意</b>：這些只在加密貨幣 4H 判過、回測過，型態本身扣費後跟隨機進場差不多；其他週期、台指加權沒驗證。'
