@@ -235,6 +235,9 @@ saikesi-bot-clean/
   （第五版紀錄）每個夠大的區每段都畫、沒穿過或互換回測守住的延到最右邊 → 用戶：同時太多區沒有鑑別度。
   （第四版紀錄）舊區／互換前那段只畫上下淡線不填色；畫圖分組改 `txGroupsTight`（整區價差 ≤0.5 ATR，原本相鄰差 ≤0.5 就串、BTC 4H 串出 2,200 點寬）；
   型態偵測 `txZoneEv` 仍用原分組（跟回測對拍的版本），型態頁「還沒突破」用 `txSrPick` 的 `open`（所有夠大、還沒被突破的區）。
+★2026-10-30 官方答案卷公式上線：mmtx.py `colors_daily`（日K 三條件計數，官方 100%）、`colors15_v2`（台指/加權 15 分狀態機，97.0%/95.9%）、`basis_for`（期現價差，圖表列第 11 欄）、`stars15` 09:01 起、`ladders` 08:47~13:25＋13:30 換階、`merge_close`（13:45 併進日盤最後一根）。
+  dashboard.py `// <mmx>` 段：mxColorD/mxColor15/mxColor60（幣 日K/15分·1H/4H）、mxGaps（缺口）、mxKD/mxKDD/mxDiv（KD、背離）；`txMx` 快取缺口與背離、`txLayout` 排 %R/KD/價差 下方指標、`txStarC` 幣星星、`txPsw` 疊圖對齊價格軸。對拍 `../_chk_mmx_port.py`、`../_mm_data/chk_mmtx_official.py`。
+  ★坑：全站 `table{max-width:1040px}` 會套到圖表元件內部 table → 已加 `.txwrap table{max-width:none}`；draw() 前後要保住捲動位置。
 ★2026-10-14 新分頁「型態」（`viewPat`/`patScan`/`txPatNow`）：視覺篩選器 24H 成交額前 60 幣，手機直接抓 OKX 4H（或 1H）600 根、3 個一起、10 分鐘重掃；
   做多／做空各一張，分「還沒突破（離線 ≤1.5 ATR）」「剛突破（最近 6 根）」。bot 沒這份資料 → 這頁不推播（NOTI 有寫）。首頁預設改成「台指」（`TAB='tx'`、商品不還原）。
 ★換月已驗：麥門 TXF.00＝**最早到期**合約，結算日日盤仍是舊月、夜盤起換新月（09-16 逐分鐘 285/285、834/834 同價，`_mm_data/roll_check.py`）；**不可用量最大**（結算日日盤新月量 34,274 > 舊月 26,545，會整盤換錯合約）。
