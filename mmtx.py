@@ -172,6 +172,8 @@ def _load_store():
                     _h60[inst].update(d.get(inst) or {})
         except Exception:
             bad.append(os.path.basename(f))
+    for k in [k for k in _h60["TX"] if k[8:12] == "0500"]:     # 3070b52 那版存過夜盤 05:00 的假 K（官方沒有這根）
+        _h60["TX"].pop(k, None)
     if bad:
         _state["err"] = "讀檔失敗 " + "、".join(bad)
 
@@ -282,10 +284,11 @@ def stars15(m):
 
 def merge_close(m):
     """台指 13:45 那筆收盤成交（常常只有 1 口）併進日盤最後一根（13:44），官方 15/60 分K 都沒有 13:45 那根。
-    （2026-10-29 跳空輔助逐根 100% 對上官方時確認的切法，_mm_data/formula/kspace_mine/kspace.py）"""
+    （2026-10-29 跳空輔助逐根 100% 對上官方時確認的切法，_mm_data/formula/kspace_mine/kspace.py）
+    ★夜盤 05:00 那一分鐘同理併進 04:59（官方 15/60 分K 從來沒有 05:00 那根；1 分K 三年有 25 次，09-23 那次讓 15 分 P2 多錯 7 根）。"""
     if m.empty:
         return m
-    t = m.index; is1345 = (t.hour == 13) & (t.minute == 45)
+    t = m.index; is1345 = ((t.hour == 13) & (t.minute == 45)) | ((t.hour == 5) & (t.minute == 0))
     if not is1345.any():
         return m
     m = m.copy(); m.index = t.where(~is1345, t - pd.Timedelta(minutes=1))
@@ -481,6 +484,34 @@ def _wma(s, n):
 
 
 DAILY_P = {"TX": (22, 9, 21), "TSE": (21, 8, 20)}
+DAILY_P2 = {"TX": (22, 21), "TSE": (21, 20)}
+
+
+def colors_daily_p2(dd, inst="TX"):
+    """日K 彩色K 參數二（★2026-10-30 第二輪破解，台指／加權全史逐根 0 錯；_mm_data/formula/daily_p2_tse_r2/verify.py）。
+    無狀態，三條件數幾條成立：A 收>SMA90、B 收>SMA22（加權 21）、C WMA21（加權 20）>WMA89 → 0 黑／1 金／2 藍／3 紅。"""
+    b, m = DAILY_P2.get(inst, DAILY_P2["TX"]); c = dd.c
+    A = (c > c.rolling(90).mean()).values; B = (c > c.rolling(b).mean()).values; C = (_wma(c, m) > _wma(c, 89)).values
+    return (A.astype(np.int8) + B + C).astype(np.int8)
+
+
+def colors15_p2(df, inst="TX"):
+    """15 分K 彩色K 參數二。台指（★2026-10-30 第三輪破解，10 月 held-out 99.93%、沿用上一根 91.8%；_mm_data/formula/tx15_p2_r3/）：
+    無狀態。F=WMA55、M=EMA144、L=SMA228；六條件 F↑M↑L↑（這根>上一根）、F>M、M>L、F>L。全成立紅、全不成立黑；
+    其他：L 在三條線最上面且往下彎、或最下面且往上彎 → 看 M↑（上彎藍、否則金），其餘看 F>M（成立藍、否則金）。
+    回傳 float（暖機 NaN）。加權還沒定稿 → None（網頁顯示參數一並註明）。"""
+    if inst != "TX":
+        return None
+    c = df.c
+    F = _wma(c, 55).values; M = c.ewm(span=144, adjust=False).mean().values; L = c.rolling(228).mean().values
+    sh = lambda a: np.r_[np.nan, a[:-1]]
+    Fu, Mu, Lu = F > sh(F), M > sh(M), L > sh(L)
+    FM, ML, FL = F > M, M > L, F > L
+    allb = Fu & Mu & Lu & FM & ML & FL; alls = ~Fu & ~Mu & ~Lu & ~FM & ~ML & ~FL
+    conv = ((~ML & ~FL) & ~Lu) | ((ML & FL) & Lu)
+    out = np.where(allb, 3, np.where(alls, 0, np.where(np.where(conv, Mu, FM), 2, 1))).astype(float)
+    out[np.isnan(L) | np.isnan(sh(L)) | np.isnan(F) | np.isnan(sh(F))] = np.nan
+    return out
 
 
 def colors_daily(dd, inst="TX"):
@@ -622,17 +653,22 @@ def _lad(P, index):
     return [None if x != x else round(float(x), 1) for x in v]
 
 
-def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None):
-    """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無)]。"""
+def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, col2=None):
+    """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色P1(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無), 0, 期現價差, 顏色P2]。
+    第 10 欄留給幣圖的 CME 標記（台指恆 0）；沒有價差給 None；沒有參數二顏色就不帶第 12 欄。"""
     n = len(df); i0 = max(0, n - n_show); nd = 0 if inst == "TX" else 2
     o, h, l, c, v = (df[k].values for k in ("o", "h", "l", "c", "v"))
     out = []
     for i in range(i0, n):
         t = df.index[i]
-        out.append([_ts(t), round(float(o[i]), nd), round(float(h[i]), nd), round(float(l[i]), nd), round(float(c[i]), nd),
-                    int(v[i]), int(col[i]) if i >= WARM else -1,
-                    lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0]
-                   + ([0, bs[i]] if bs else []))
+        r = [_ts(t), round(float(o[i]), nd), round(float(h[i]), nd), round(float(l[i]), nd), round(float(c[i]), nd),
+             int(v[i]), int(col[i]) if i >= WARM else -1,
+             lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0]
+        if bs or col2 is not None:
+            r += [0, bs[i] if bs else None]
+        if col2 is not None:
+            r.append(int(col2[i]) if i >= WARM and col2[i] == col2[i] else -1)
+        out.append(r)
     return out
 
 
@@ -676,8 +712,9 @@ def compute_inst(inst):
             _mt = minute_df(STORE["TSE"]); tse_c = _mt.c if len(_mt) else None
         except Exception:
             tse_c = None
+    col2 = colors15_p2(df, inst)                           # ★參數二（台指 99.93%；加權還沒定稿＝None）
     charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"],
-                         bs=basis_for(df, 15, tse_c) if inst == "TX" else None)
+                         bs=basis_for(df, 15, tse_c) if inst == "TX" else None, col2=col2)
     d60 = _with_hist60(inst, to60(mk, inst))           # ★1 分K 窗之前接存檔的 60 分K（SMA600 要夠長）
     c60 = colors60_v3(d60, inst)                       # ★2026-10-30 第三輪公式（台指 97.8%／加權 96.8%，舊 GBM 40.4%／85.2%）
     charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"],
@@ -690,21 +727,25 @@ def compute_inst(inst):
         if inst == "TX":
             try: bsD = basis_for(dd, None, daily_df("TSE").c)
             except Exception: bsD = None
-        charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"], bs=bsD)
+        charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"], bs=bsD, col2=colors_daily_p2(dd, inst))   # ★日K 參數二（官方 100%）
         wk = to_week(dd)
-        cW, _, _ = colors(wk, inst); charts["W"] = _rows(wk, cW, inst, n_show=SHOW["W"])
+        charts["W"] = _rows(wk, np.full(len(wk), -1), inst, n_show=SHOW["W"])   # ★官方沒有週K顏色（10-30 起不上色；舊版是 15 分 GBM 硬套）
     lt = m.index[-1]
     live = bool(lt < _bar_end(inst, df.index[-1]))           # 最後一根 15 分 K 還沒走完（盤中）
     ci = len(df) - 2 if live and len(df) > 1 else len(df) - 1
-    last_chg = None
-    for i in range(len(col) - 1, max(WARM, 1) - 1, -1):
-        if col[i] != col[i - 1]:
-            last_chg = [df.index[i].strftime("%m-%d %H:%M"), COLOR_NAME[int(col[i - 1])], COLOR_NAME[int(col[i])]]
-            break
+    def _last_chg(cc):
+        for i in range(len(cc) - 1, max(WARM, 1) - 1, -1):
+            if cc[i] != cc[i - 1] and cc[i] == cc[i] and cc[i - 1] == cc[i - 1]:
+                return [df.index[i].strftime("%m-%d %H:%M"), COLOR_NAME[int(cc[i - 1])], COLOR_NAME[int(cc[i])]]
+        return None
+    last_chg = _last_chg(col)
     s = {"ok": True, "err": "", "name": INST_NAME[inst], "model": used, "live_bar": live,
          "color": COLOR_NAME[int(col[-1])], "c": int(col[-1]), "color_formula": COLOR_NAME[int(col_f[-1])],
          "closed": [df.index[ci].strftime("%m-%d %H:%M"), int(col[ci])], "last_change": last_chg,
          "last": round(float(df.c.iloc[-1]), 2), "last_minute": lt.strftime("%m-%d %H:%M"), "n1m": len(m)}
+    if col2 is not None and col2[-1] == col2[-1] and col2[ci] == col2[ci]:
+        s["c2"] = int(col2[-1]); s["color2"] = COLOR_NAME[int(col2[-1])]
+        s["closed2"] = [df.index[ci].strftime("%m-%d %H:%M"), int(col2[ci])]; s["last_change2"] = _last_chg(col2)
     if inst == "TX":
         s["ladder2"] = charts["15"][-1][7]; s["ladder1"] = charts["15"][-1][8]; s["half"] = LADDER_HALF
         s["stars"] = [[t.strftime("%m-%d %H:%M"), int(v)] for t, v in sorted(st.items())[-12:]]
