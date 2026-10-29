@@ -27,6 +27,7 @@ except Exception:                        # 沒裝就整個模組不動作（stat
 URL = "wss://is.mai-now.com/Quote/"
 ORIGIN = "https://trader.mai-now.com"
 T_COLORS = 117
+T_ACCOUNT = 512
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PERSIST = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") else _HERE)
 DIR = os.path.join(_PERSIST, "mainow")
@@ -69,6 +70,27 @@ class _Conn:
         self.ws = websocket.create_connection(URL, subprotocols=["WSNetMQ"], timeout=timeout, origin=ORIGIN,
                                               header=["User-Agent: Mozilla/5.0 (saikesi-bot mainow recorder)"])
         self.parts = []
+
+    def auth(self, timeout=15):
+        """連上後先送 Account（型別 512，{Token, RequestKey}）把這條連線綁到帳號——網頁是收到伺服器 Initialize 後呼叫 su() 做這件事；
+        沒做的話請求會回 State=2（10-30 上線第一次實測就是這樣）。回傳伺服器回應標頭的 State（拿不到回 None）。"""
+        _rk[0] += 1; rk = _rk[0]
+        body = json.dumps({"Token": _token(), "RequestKey": rk}).encode()
+        self.send([struct.pack("<I", T_ACCOUNT), zlib.compress(body)])
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            msg = self.recv()
+            if not msg or _type(msg) != T_ACCOUNT:
+                continue
+            for p in msg:
+                if len(p) > 2 and p[0] == 0x78:
+                    try:
+                        h = json.loads(zlib.decompress(p).decode("utf-8"))
+                        if h.get("RequestKey") == rk:
+                            return h.get("State")
+                    except Exception:
+                        pass
+        return None
 
     def close(self):
         try: self.ws.close()
@@ -248,6 +270,9 @@ def loop(notify=None):
             if todo_light or todo_arc:
                 c = _Conn()
                 try:
+                    st = c.auth()
+                    if st != 1:
+                        raise RuntimeError(f"帳號綁定失敗 State={st}（憑證過期或方案到期？）")
                     if todo_light:
                         record_light(c); last_light_slot = slot_light
                     if todo_arc:
@@ -275,6 +300,7 @@ if __name__ == "__main__":
     print("有憑證" if _token() else "沒有 MAINOW_TOKEN", "｜套件", "有" if websocket else "沒有")
     c = _Conn()
     try:
+        print("帳號綁定 State", c.auth())
         rec = record_light(c); print("燈號", rec)
         now = dt.datetime.now(TPE).replace(tzinfo=None)
         st, rows = fetch_colors(c, "TXF.00", 4, 15, now - dt.timedelta(days=3), now + dt.timedelta(days=1))
