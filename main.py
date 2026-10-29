@@ -66,6 +66,11 @@ try:
 except Exception as _mme:
     mmtx = None
     print(f"[麥門台指] 模組載入失敗：{_mme}", flush=True)
+try:
+    import mainow                   # ★2026-10-29 麥門官方值記錄器（燈號每 5 分鐘＋每天存官方顏色/背離；讀 MAINOW_TOKEN，沒設就不動；只記錄、不下單）
+except Exception as _mne:
+    mainow = None
+    print(f"[麥門記錄] 模組載入失敗：{_mne}", flush=True)
 import daily_report   # 每日00:00(UTC)復盤(record_entry進場記;daily_tick主迴圈發)
 import dashboard      # 私人儀表板(唯讀,掛在既有 Flask 上;沒設 DASH_TOKEN 就整個不存在)
 import ccxt
@@ -11743,6 +11748,9 @@ if __name__ == "__main__":
 # 2d. 麥門台指（盤中每 60 秒抓期交所 1 分 K（資料沒變不重算）、盤後每 10 分鐘；只算顯示用指標、不下單）
     if mmtx:
         Thread(target=mmtx.loop, name="mmtx", daemon=True).start()
+# 2e. 麥門官方值記錄器（用戶 10-29：燈號沒有歷史、要在他沒開電腦時也記；憑證只從環境變數讀，不印不存）
+    if mainow:
+        Thread(target=mainow.loop, args=(dc_log,), name="mainow", daemon=True).start()
 
 # 3. 直通主執行緒進入無漂移排程輪詢主迴圈
     main_polling_loop()

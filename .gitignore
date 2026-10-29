@@ -63,3 +63,4 @@ secrets.json
 
 # 執行期狀態（倉位追蹤，僅存在於部署環境）
 active_trades.json
+mainow/
