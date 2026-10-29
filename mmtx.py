@@ -32,6 +32,8 @@ DAILY_FILE = os.path.join(_PERSIST, "mmtx_daily.json.gz")          # 兩個商�
 SEED_FILE = os.path.join(_HERE, "mmtx_seed.json.gz")
 SEED_TSE_FILE = os.path.join(_HERE, "mmtx_tse_seed.json.gz")
 SEED_DAILY_FILE = os.path.join(_HERE, "mmtx_daily_seed.json.gz")
+H60_FILE = os.path.join(_PERSIST, "mmtx_60.json.gz")               # 已收完的 60 分 K（比 1 分 K 留得久，給 60 分公式的長均線）
+SEED60_FILE = os.path.join(_HERE, "mmtx_seed60.json.gz")
 MODEL_FILE = os.path.join(_HERE, "mmtx_model.json.gz")
 MODEL_TSE_FILE = os.path.join(_HERE, "mmtx_model_tse.json.gz")
 # 麥門「上線／下線」（到價推撥＝帳號自己設的警示價，不是公式）：從麥門文章圖讀出來的歷史值（_mm_data/updown_export.py 產生）
@@ -56,6 +58,8 @@ _state = {"ok": False, "err": "", "last_fetch": 0, "last_calc": 0, "sym": {}, "p
 _bars = {}                     # 台指："YYYYmmddHHMM"(台北時間、分鐘開始) -> [o,h,l,c,v]
 _bars_tse = {}                 # 加權：同上（量恆為 0）
 _daily = {"TX": {}, "TSE": {}}  # "YYYYmmdd"(交易日) -> [o,h,l,c,v]
+_h60 = {"TX": {}, "TSE": {}}    # 已收完的 60 分 K："YYYYmmddHHMM"(台北時間、K 開始) -> [o,h,l,c,v]
+KEEP60_DAYS = 400
 _models = {}
 STORE = {"TX": _bars, "TSE": _bars_tse}
 FILES = {"TX": BARS_FILE, "TSE": TSE_FILE}
@@ -160,6 +164,14 @@ def _load_store():
                     _daily[inst].update(d.get(inst) or {})
         except Exception:
             bad.append(os.path.basename(f))
+    for f in (SEED60_FILE, H60_FILE):
+        try:
+            if os.path.exists(f):
+                d = _load_json(f)
+                for inst in ("TX", "TSE"):
+                    _h60[inst].update(d.get(inst) or {})
+        except Exception:
+            bad.append(os.path.basename(f))
     if bad:
         _state["err"] = "讀檔失敗 " + "、".join(bad)
 
@@ -175,6 +187,10 @@ def _trim():
     for d in _daily.values():
         for k in [k for k in d if k > futd]:
             d.pop(k, None)
+    cut60 = (now - dt.timedelta(days=KEEP60_DAYS)).strftime("%Y%m%d%H%M")
+    for d in _h60.values():
+        for k in [k for k in d if k < cut60 or k > fut]:
+            d.pop(k, None)
 
 
 def _save_store():
@@ -183,6 +199,7 @@ def _save_store():
         for inst in ("TX", "TSE"):
             _dump(STORE[inst], FILES[inst])
         _dump(_daily, DAILY_FILE)
+        _dump(_h60, H60_FILE)
         _state["save_err"] = ""
     except Exception as e:
         _state["save_err"] = type(e).__name__
@@ -521,6 +538,52 @@ def colors15_v2(df, inst="TX"):
     return out
 
 
+def colors60_v3(df, inst="TX"):
+    """60 分K 彩色K 參數一（★2026-10-30 第三輪反推，取代 GBM：官方答案卷上 GBM 台指只有 31.6%／40.4%、加權 74.0%／85.2%）。
+    三線狀態機、每根最多走兩步（加權訓練段 10 次跳格全是兩步）；SMA 不足 n 根用目前為止平均。起始＝金。
+      紅：c<FR→藍　黑：c>FK→金　藍：c>FR 且 AR→紅，否則 c<SW→金　金：c<FK 且 AK→黑，否則 c>SW→藍
+    台指：FR=FK=EMA144、SW=SMA370、AR SMA240>SMA600、AK SMA240<SMA600
+         訓練 97.6%（沿用上一根 93.1%）、09-10 後 97.8%（95.7%）。★AK 是線索：訓練段只有 3 根進黑候選、held-out 只有 1 次進黑。
+    加權：FR=EMA34、FK=EMA30、SW=SMA233、AR SMA21>SMA280、AK EMA34<SMA144；訓練 96.7%、09-10 後 96.8%（沿用 89.7%）。
+    _mm_data/formula/tx60_p1_r3/verify.py、_mm_data/cmp60_live.py"""
+    c = df.c; cv = c.values.astype(float); n = len(cv); out = np.empty(n, np.int8); s = 1
+    sm = lambda k: c.rolling(k, min_periods=1).mean().values; e = lambda k: c.ewm(span=k, adjust=False).mean().values
+    if inst == "TX":
+        FR = FK = e(144); SW = sm(370); s240, s600 = sm(240), sm(600); AR = s240 > s600; AK = s240 < s600
+    else:
+        FR, FK, SW = e(34), e(30), sm(233); AR = sm(21) > sm(280); AK = FR < sm(144)
+    for i in range(n):
+        for _ in range(2):
+            if s == 3: s2 = 2 if cv[i] < FR[i] else 3
+            elif s == 0: s2 = 1 if cv[i] > FK[i] else 0
+            elif s == 2: s2 = 3 if (cv[i] > FR[i] and AR[i]) else (1 if cv[i] < SW[i] else 2)
+            else: s2 = 0 if (cv[i] < FK[i] and AK[i]) else (2 if cv[i] > SW[i] else 1)
+            if s2 == s: break
+            s = s2
+        out[i] = s
+    return out
+
+
+def _with_hist60(inst, d60):
+    """★60 分公式要 SMA600（台指約 32 個交易日的 60 分K），伺服器 1 分K 只留 75 天 → 窗前段都是暖機，狀態機還會一路錯到窗尾
+    （_mm_data/cmp60_window.py：75 天窗上色區跟全史不同 平均 5.6%、最大 16.3%，對官方 95.2% vs 全史 97.6%）。
+    → 另存已收完的 60 分K（種子 mmtx_seed60.json.gz＋每次算完補進來），1 分K 窗之前的部分用存檔接上。
+    1 分K 窗的第一根可能只有半根、最後一根還沒收完 → 都不寫進存檔；第一根改用存檔裡完整的那根。"""
+    H = _h60[inst]
+    if len(d60) > 2:
+        for t, r in zip(d60.index[1:-1], d60.iloc[1:-1].itertuples(index=False)):
+            H[t.strftime("%Y%m%d%H%M")] = [float(r.o), float(r.h), float(r.l), float(r.c), float(r.v)]
+    if not H or len(d60) < 2:
+        return d60
+    t1 = d60.index[1].strftime("%Y%m%d%H%M")
+    ks = sorted(k for k in H if k < t1)
+    if not ks:
+        return d60
+    old = pd.DataFrame(np.array([H[k] for k in ks], dtype=float), index=pd.to_datetime(ks, format="%Y%m%d%H%M"),
+                       columns=["o", "h", "l", "c", "v"])
+    return pd.concat([old, d60.iloc[1:]])
+
+
 def colors(df, inst="TX"):
     """回傳 (模型版顏色, 公式版顏色, 是否用到模型)。加權模型多一欄來源旗標 src=1（台指＋加權合併訓練）。"""
     X, cols, p0, ce55, cs35, Ro, Ko = features(df)
@@ -615,8 +678,8 @@ def compute_inst(inst):
             tse_c = None
     charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"],
                          bs=basis_for(df, 15, tse_c) if inst == "TX" else None)
-    d60 = to60(mk, inst)
-    c60, _, _ = colors(d60, inst)
+    d60 = _with_hist60(inst, to60(mk, inst))           # ★1 分K 窗之前接存檔的 60 分K（SMA600 要夠長）
+    c60 = colors60_v3(d60, inst)                       # ★2026-10-30 第三輪公式（台指 97.8%／加權 96.8%，舊 GBM 40.4%／85.2%）
     charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"],
                          bs=basis_for(d60, 60, tse_c) if inst == "TX" else None)
     update_daily(inst, m)

@@ -2755,17 +2755,22 @@ function mxColor15(c){
   }
   return out;
 }
-// 60 分 參數一（加權 60 分那套三線狀態機；台指 60 分還沒解，這是目前最好的 60 分公式）。幣用在 4H
-//   紅出 c≤EMA34、黑出 c≥EMA21、SMA240 分藍金、進紅 SMA21>SMA200、進黑 EMA34<SMA144；SMA 不足 n 根用目前為止平均
+// 60 分 參數一（★2026-10-30 第三輪，台指參數＝mmtx.colors60_v3 的台指那組；幣用在 4H）。官方台指 60 分 09-10 後 97.8%（沿用上一根 95.7%），舊版這裡只有 53%。
+//   三線狀態機、每根最多走兩步：紅 c<EMA144→藍；黑 c>EMA144→金；藍 c>EMA144 且 SMA240>SMA600→紅，否則 c<SMA370→金；
+//   金 c<EMA144 且 SMA240<SMA600→黑，否則 c>SMA370→藍。SMA 不足 n 根用目前為止平均。★進黑那條是線索（台指只有 1 次進黑可驗）
 function mxColor60(c){
-  const FR = mxEma(c, 34), FK = mxEma(c, 21), SW = mxSma(c, 240, true), s21 = mxSma(c, 21, true), s200 = mxSma(c, 200, true), s144 = mxSma(c, 144, true);
+  const F = mxEma(c, 144), SW = mxSma(c, 370, true), a = mxSma(c, 240, true), b = mxSma(c, 600, true);
   const out = new Array(c.length); let s = 1;
   for(let i = 0; i < c.length; i++){
-    const aR = c[i] > FR[i], bK = c[i] < FK[i], aW = c[i] > SW[i];
-    if(s === 3){ if(!aR) s = aW ? 2 : 1; }
-    else if(s === 0){ if(!bK) s = aW ? 2 : 1; }
-    else if(s === 2){ if(aR && s21[i] > s200[i]) s = 3; else if(!aW) s = 1; }
-    else { if(bK && FR[i] < s144[i]) s = 0; else if(aW) s = 2; }
+    for(let k = 0; k < 2; k++){
+      let s2;
+      if(s === 3) s2 = c[i] < F[i] ? 2 : 3;
+      else if(s === 0) s2 = c[i] > F[i] ? 1 : 0;
+      else if(s === 2) s2 = (c[i] > F[i] && a[i] > b[i]) ? 3 : (c[i] < SW[i] ? 1 : 2);
+      else s2 = (c[i] < F[i] && a[i] < b[i]) ? 0 : (c[i] > SW[i] ? 2 : 1);
+      if(s2 === s) break;
+      s = s2;
+    }
     out[i] = s;
   }
   return out;
@@ -2842,10 +2847,12 @@ async function txOiGet(inst, per){
 }
 // 幣的籌碼異常星（★我定的；用戶 10-30：「盤整一直出星可能代表有人持續進場」「趨勢盤星星會變少」「OI 0.3% 太少，少說 2%~10%」）：
 //   12 幣 OKX 實測（_mm_data/star_calib*.py）：單看一根 K 的 OI 跳動或爆量，趨勢盤出星反而比盤整多（盤整÷趨勢 0.1~0.6，各種門檻都一樣）
-//   → 要「價格不動、OI 一直加」才會變成盤整出星。星＝近 24 根 OI 累積增加 ≥3%，且同期收盤淨變化 ≤1%。
+//   → 要「價格不動、OI 一直加」才會變成盤整出星。
+//   ★10-30 用戶：「你畫的是三小」——第一版是「近 24 根 OI +3% 且價格沒動」的狀態，盤整整段每根都成立 → 連成一條帶子，沒有標示作用。
+//   改成事件：近 24 根收盤淨變化 ≤1%，且 OI ≥ (1+2%) × max(24 根前的 OI, 上一顆星那根的 OI) → 每多加 2% 才再一顆。
 //   OI 取每根收盤那一刻（OKX 的 OI 時間戳＝那一刻的快照）：15 分圖用 15 分 OI（約 15 天）、1H 與 4H 用 1H OI（約 60 天），更早沒有星。
-//   實測出星率 15 分 2.3%／1H 3.8%／4H 3.5%，12 幣都有星、單幣最多佔 21%；星的值＝OI 累積增加 %。
-const TXSTAR_N = 24, TXSTAR_OI = 3, TXSTAR_PX = 1;
+//   12 幣實測（_mm_data/star_calib6.py）每 300 根：15 分 2.6 顆、1H 4.6、4H 5.5，最多連 2 顆；趨勢盤 0~0.4%。星的值＝比參考點多加的 OI %。
+const TXSTAR_N = 24, TXSTAR_OI = 2, TXSTAR_PX = 1;
 function txStarX(key){
   const R = TXDATA[key]; if(!R || !R.raw || !R.raw.length) return null;
   const inst = key.slice(2).split('|')[0], tf = key.split('|')[1];
@@ -2853,12 +2860,14 @@ function txStarX(key){
   const raw = R.raw, n = raw.length, out = new Array(n).fill(0);
   const oi = TXOI[inst + '|' + (tf === '15' ? '15m' : '1H')], om = oi && oi.m; if(!om || !om.size) return out;
   const L = (tf === '15' ? 15 : (tf === '60' ? 60 : 240)) * 60000;
+  let last = -1e9, lastOi = 0;
   for(let i = TXSTAR_N; i < n; i++){
     if(i === n - 1 && raw[i][8] !== '1') continue;          // 最後一根還沒收完
     const a = om.get(raw[i][7] + L), b = om.get(raw[i - TXSTAR_N][7] + L);
     if(a === undefined || b === undefined || !(b > 0)) continue;
-    const dOi = (a / b - 1) * 100, dPx = Math.abs(raw[i][4] / raw[i - TXSTAR_N][4] - 1) * 100;
-    if(dOi >= TXSTAR_OI && dPx <= TXSTAR_PX) out[i] = Math.round(dOi * 10) / 10;
+    if(Math.abs(raw[i][4] / raw[i - TXSTAR_N][4] - 1) * 100 > TXSTAR_PX) continue;
+    const ref = i - last > TXSTAR_N ? b : Math.max(b, lastOi);
+    if(a >= ref * (1 + TXSTAR_OI / 100)){ out[i] = Math.round((a / ref - 1) * 1000) / 10; last = i; lastOi = a; }
   }
   return out;
 }
@@ -3233,7 +3242,7 @@ function viewTx(){
        + '　<span class="dim">最後一分鐘 '+(p.last_minute || '—')+'</span>'
        + (p.color_formula !== p.color ? '<br><span class="dim">公式版這根是 '+p.color_formula+'（模型與公式不同時以模型為準）</span>' : '') + '</div>';
   }
-  if(isC) h += '<div class="sub dim">⚠ 幣的彩色K是台指公式直接套（幣本身沒有官方答案可以驗）：日K＝官方日K公式（台指 28 年逐根 100%）、15 分與 1H＝台指 15 分公式（官方 96.9%）、4H＝60 分公式（加權 60 分 92.9%）、週K 官方沒有顏色；階梯＝CME 交易時段算這個合約自己的 VWAP（虛線：CME開／CME收＝換階）。</div>';
+  if(isC) h += '<div class="sub dim">⚠ 幣的彩色K是台指公式直接套（幣本身沒有官方答案可以驗）：日K＝官方日K公式（台指 28 年逐根 100%）、15 分與 1H＝台指 15 分公式（官方 96.9%）、4H＝台指 60 分公式（官方 97.8%）、週K 官方沒有顏色；階梯＝CME 交易時段算這個合約自己的 VWAP（虛線：CME開／CME收＝換階）。</div>';
   else if(TXTF !== '15') h += '<div class="sub dim">⚠ '+TXTFN[TXTF]+' 的顏色是 15 分模型直接套用，沒有標註可以驗證；只有 15 分驗過。</div>';
   h += '<div id="txslot"></div>';
   h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
@@ -3279,8 +3288,8 @@ function viewTx(){
     + '官方台指 15 分三個月 17 顆全抓到、多標 1 顆。<b>我定的</b>：參考的高低點不能在當天（台指＝當天日盤；幣＝同一個 CME 交易日，幣全天都評）；台指只看日盤 15 分，幣看 15 分和 1H，加權不畫（官方只有台指）。'
     + '<br><b>期現價差</b>（只有台指，按鈕開關）：台指收盤 − 加權收盤，照官方算法取這根結束前最後一筆加權收盤（所以夜盤是台指在動、加權停在日盤收盤）。'
     + '<br><b>幣的籌碼異常星</b>（<b>我定的</b>，你 10-30 說「盤整一直出星＝有人持續進場」「趨勢盤要變少」「OI 2%~10% 才算異常」）：'
-    + '近 24 根 OI 累積增加 ≥3%，而且同一段收盤淨變化 ≤1%（價格不動、OI 一直加）。12 個幣實測：只看一根 K 的 OI 跳動或爆量，趨勢盤出星反而比盤整多（各種門檻都是），所以加了「價格不動」。'
-    + '出星率約 15 分 2%、1H 與 4H 4%，盤整時常連續出幾顆。圖例的 ★OI+x% 是那 24 根的 OI 增加幅度。OI 只抓得到 15 分約 15 天、1H 約 60 天，更早沒有星。量不算進來。'
+    + '價格沒動（近 24 根收盤漲跌 ≤1%）的時候，OI 每多加 2% 出一顆（比上一顆星或 24 根前多 2%）。盤整時有人一直進場就會隔一段出一顆，趨勢盤幾乎不出。'
+    + '每 300 根約：15 分 3 顆、1H 與 4H 5 顆。只看 OI 跳動或爆量的話趨勢盤反而星比較多，所以要加「價格沒動」。圖例 ★OI+x% ＝這次多加了多少。OI 只抓得到 15 分約 15 天、1H 約 60 天，更早沒有星。量不算進來。'
     + '<br><b>型態</b>（按鈕開關）：你判過 8 成對的——壓力區突破（17/21）、支撐區跌破（21/21）、上升三角形（17/18）、下降三角形（16/18）；濾網同回測（型態高度 ≥2.5 ATR、突破那根量 ≥ 前 30 根均量）。'
     + '箭頭＝突破那根（紅↑做多、綠↓做空），虛線框＝被突破的區，兩條線＝三角形的頸線和另一邊；只用已收盤的 K。'
     + '<b>注意</b>：這些只在加密貨幣 4H 判過、回測過，型態本身扣費後跟隨機進場差不多；其他週期、台指加權沒驗證。'
