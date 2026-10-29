@@ -229,30 +229,50 @@ def to15(m):
 
 
 def ladders(m):
-    """回傳 (P2, P1) Series，對齊到每根 1 分 K：前一交易日 VWAP，當日 15:00 起生效。"""
+    """回傳 (P2, P1) Series（索引＝生效時刻）：當天日盤近月的口數加權均價。
+    ★2026-10-29 用訂閱拿到的官方答案卷破到逐筆 4 位小數（_mm_data/formula/ladder/verify.py）：
+      P2＝08:47:00≤t<13:25:00、P1＝09:00:00≤t<10:45:00；舊版 [08:45,13:30) 跟官方中位差 5.3 點。
+      1 分K 沒有逐筆價 → 用 (高+低)/2×量 近似（59 天 held-out：P2 中位差 0.40 點、100% ≤2 點；P1 0.72 點）。
+      生效：當天 13:30 起（15 分K 的 13:30 那根就是新值；60 分K 的 12:45 根起點早於 13:30 → 從 15:00 根換；
+      結算日舊月沒有 13:30 根 → 從 15:00 根換），跟官方 58/58 天、60 分 62/62 天一致。"""
     mins = m.index.hour * 60 + m.index.minute
     out = []
-    for nm, (a, b) in (("P2", (525, 810)), ("P1", (540, 645))):
+    for nm, (a, b) in (("P2", (527, 805)), ("P1", (540, 645))):
         d = m[(mins >= a) & (mins < b)]
         if d.empty:
             out.append(None); continue
-        g = d.index.normalize()
-        vw = (d.c * d.v).groupby(g).sum() / d.v.groupby(g).sum()
-        s = pd.Series(vw.values, index=vw.index + pd.Timedelta(hours=15))
+        g = d.index.normalize(); px = (d.h + d.l) / 2
+        vw = (px * d.v).groupby(g).sum() / d.v.groupby(g).sum()
+        s = pd.Series(vw.values, index=vw.index + pd.Timedelta(hours=13, minutes=30))
         out.append(s)
     return out
 
 
 def stars15(m):
-    """5 分 K 量 ≥3000 且開始於 09:00~13:25 → 該 5 分 K 所在的 15 分 K 標星。回傳 {15分K開始: 最大5分K量}。"""
-    k5 = m.v.resample("5min", label="left", closed="left").sum()
-    mins = k5.index.hour * 60 + k5.index.minute
-    hit = k5[(k5 >= STAR_VOL) & (mins >= 540) & (mins < 810)]
-    out = {}
-    for t, v in hit.items():
-        key = t.floor("15min")
-        out[key] = max(out.get(key, 0), float(v))
-    return out
+    """籌碼異常星。回傳 {15分K開始: BigVol}（只回 BigVol≥3000 的，前端寫死 ≥3000 才畫星）。
+    ★2026-10-29 官方答案卷破到 100% 相等（_mm_data/formula/stars_bigvol/verify.py，held-out 486 根全等、星 11/11）：
+      BigVol＝這根 15 分K 裡三根 5 分子K 量的最大值，只算 1 分K 起點 09:01~13:29（09:00 那一分鐘整個不算）；
+      只有起點 09:00~13:15 的 15 分K 有值。舊版從 09:00 起算 → 多報的星全在 09:00 那根。"""
+    mins = m.index.hour * 60 + m.index.minute
+    d = m.v[(mins >= 541) & (mins < 810)]
+    if d.empty:
+        return {}
+    k5 = d.resample("5min", label="left", closed="left").sum()
+    k5 = k5[k5 > 0]
+    big = k5.groupby(k5.index.floor("15min")).max()
+    return {t: float(v) for t, v in big.items() if v >= STAR_VOL}
+
+
+def merge_close(m):
+    """台指 13:45 那筆收盤成交（常常只有 1 口）併進日盤最後一根（13:44），官方 15/60 分K 都沒有 13:45 那根。
+    （2026-10-29 跳空輔助逐根 100% 對上官方時確認的切法，_mm_data/formula/kspace_mine/kspace.py）"""
+    if m.empty:
+        return m
+    t = m.index; is1345 = (t.hour == 13) & (t.minute == 45)
+    if not is1345.any():
+        return m
+    m = m.copy(); m.index = t.where(~is1345, t - pd.Timedelta(minutes=1))
+    return _agg(m, m.index) if m.index.duplicated().any() else m
 
 
 def _lines(c):
@@ -497,13 +517,14 @@ def compute_inst(inst):
     if len(m) < 3000:
         return {"ok": False, "err": f"{INST_NAME[inst]} 1 分 K 不足（{len(m)} 根），等資料累積"}, {}
     charts = {}
-    df = to15(m) if inst == "TX" else to15_tse(m)
+    mk = merge_close(m) if inst == "TX" else m           # ★台指 13:45 收盤那筆併進日盤最後一根（同官方切法）
+    df = to15(mk) if inst == "TX" else to15_tse(m)
     col, col_f, used = colors(df, inst)
     P2 = P1 = None; st = {}
     if inst == "TX":
         P2, P1 = ladders(m); st = stars15(m)
     charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"])
-    d60 = to60(m, inst)
+    d60 = to60(mk, inst)
     c60, _, _ = colors(d60, inst)
     charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"])
     update_daily(inst, m)
