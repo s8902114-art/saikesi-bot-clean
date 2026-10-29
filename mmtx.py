@@ -454,6 +454,73 @@ def gbm_proba(mdl, X):
 
 
 
+def _wma(s, n):
+    """線性加權均線（最近一根權重 n），前 n−1 根 NaN。"""
+    v = s.values.astype(float); w = np.arange(1, n + 1, dtype=float)
+    out = np.full(len(v), np.nan)
+    if len(v) >= n:
+        out[n - 1:] = np.convolve(v, w[::-1], mode="valid") / w.sum()
+    return pd.Series(out, index=s.index)
+
+
+DAILY_P = {"TX": (22, 9, 21), "TSE": (21, 8, 20)}
+
+
+def colors_daily(dd, inst="TX"):
+    """日K 彩色K 參數一。★2026-10-29 用訂閱的官方答案卷破解：台指 28 年 6,993 根、加權 26 年 6,624 根逐根 0 錯
+    （_mm_data/formula/color_daily/verify.py）。無狀態，三條件數幾條成立：0 黑／1 金／2 藍／3 紅。
+    台指 A 收>SMA22、B 收>9 天前收（剛好相等沿用前一天的 B）、C SMA9>WMA21；加權各少 1（21／8／SMA8>WMA20）。"""
+    L1, m, b1 = DAILY_P.get(inst, DAILY_P["TX"]); c = dd.c
+    A = (c > c.rolling(L1).mean()).values
+    B = (c > c.shift(m)).values.copy()
+    for i in np.where((c == c.shift(m)).values)[0]:
+        B[i] = B[i - 1]
+    C = (c.rolling(m).mean() > _wma(c, b1)).values
+    return (A.astype(np.int8) + B + C).astype(np.int8)
+
+
+def colors15_v2(df, inst="TX"):
+    """15 分K 彩色K 參數一（★2026-10-30 官方答案卷反推的公式，取代 GBM 模型）。
+    台指：狀態機 紅出 c<EMA55、黑出 c>SMA35、金藍＝c>SMA121 藍、進紅 藍且 c>EMA55 且 SMA60>SMA200 且 EMA55>WMA120、
+         進黑 金且 c<SMA35 且 SMA60<SMA200 且 WMA34<WMA120（10 月 held-out 96.9%，舊 GBM 93.3%；_mm_data/formula/tx15_p1_r2/）。
+    加權：三線狀態機 紅出線＝黑出線＝EMA55、SMA235 分藍金（SMA 不足 n 根用目前為止平均）、進紅 EMA34>SMA200、進黑 EMA35<SMA200
+         （held-out 98.0%、2024 影片 99.6%；_mm_data/formula/daily_p2_tse_r2/）。起始狀態＝金。"""
+    c = df.c; cv = c.values.astype(float); n = len(cv); out = np.empty(n, np.int8); s = 1
+    e = lambda k: c.ewm(span=k, adjust=False).mean().values
+    if inst == "TX":
+        sm = lambda k: c.rolling(k).mean().values
+        e55 = e(55); s35 = sm(35); s121 = sm(121); s60 = sm(60); s200 = sm(200); w120 = _wma(c, 120).values; w34 = _wma(c, 34).values
+        red_in = (cv > e55) & (s60 > s200) & (e55 > w120); blk_in = (cv < s35) & (s60 < s200) & (w34 < w120)
+        red_out = cv < e55; blk_out = cv > s35; wb = cv > s121
+        for i in range(n):
+            if s == 3:
+                if red_out[i]: s = 2 if wb[i] else 1
+            elif s == 0:
+                if blk_out[i]: s = 2 if wb[i] else 1
+            else:
+                s = 2 if wb[i] else 1
+                if s == 2 and red_in[i]: s = 3
+                elif s == 1 and blk_in[i]: s = 0
+            out[i] = s
+        return out
+    sx = lambda k: c.rolling(k, min_periods=1).mean().values
+    FR = e(55); SW = sx(235); ar = e(34) > sx(200); ak = e(35) < sx(200)
+    for i in range(n):
+        ar_ = cv[i] > FR[i]; bk = cv[i] < FR[i]; aw = cv[i] > SW[i]
+        if s == 3:
+            if not ar_: s = 2 if aw else 1
+        elif s == 0:
+            if not bk: s = 2 if aw else 1
+        elif s == 2:
+            if ar_ and ar[i]: s = 3
+            elif not aw: s = 1
+        else:
+            if bk and ak[i]: s = 0
+            elif aw: s = 2
+        out[i] = s
+    return out
+
+
 def colors(df, inst="TX"):
     """回傳 (模型版顏色, 公式版顏色, 是否用到模型)。加權模型多一欄來源旗標 src=1（台指＋加權合併訓練）。"""
     X, cols, p0, ce55, cs35, Ro, Ko = features(df)
@@ -492,7 +559,7 @@ def _lad(P, index):
     return [None if x != x else round(float(x), 1) for x in v]
 
 
-def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500):
+def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None):
     """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無)]。"""
     n = len(df); i0 = max(0, n - n_show); nd = 0 if inst == "TX" else 2
     o, h, l, c, v = (df[k].values for k in ("o", "h", "l", "c", "v"))
@@ -501,8 +568,24 @@ def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500):
         t = df.index[i]
         out.append([_ts(t), round(float(o[i]), nd), round(float(h[i]), nd), round(float(l[i]), nd), round(float(c[i]), nd),
                     int(v[i]), int(col[i]) if i >= WARM else -1,
-                    lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0])
+                    lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0]
+                   + ([0, bs[i]] if bs else []))
     return out
+
+
+def basis_for(df, minutes, tse_c):
+    """期現價差＝台指收盤 − 加權收盤（★2026-10-30 照官方前端 FindSpreadLastPrice：每根台指 K 取「起點早於這根結束時間」的最後一筆加權收盤；
+    所以夜盤是台指在動、加權停在日盤收盤價）。minutes＝K 棒長度（15/60）；日K 傳 None（同一天的加權日K收盤）。"""
+    if tse_c is None or not len(tse_c) or not len(df):
+        return [None] * len(df)
+    if minutes is None:
+        t = tse_c.reindex(df.index).ffill().values
+    else:
+        ends = df.index + pd.Timedelta(minutes=minutes)
+        pos = tse_c.index.searchsorted(ends, side="left") - 1
+        t = np.where(pos >= 0, tse_c.values[np.clip(pos, 0, None)], np.nan)
+    b = df.c.values - t
+    return [None if x != x else round(float(x), 1) for x in b]
 
 
 def _bar_end(inst, t):
@@ -519,18 +602,32 @@ def compute_inst(inst):
     charts = {}
     mk = merge_close(m) if inst == "TX" else m           # ★台指 13:45 收盤那筆併進日盤最後一根（同官方切法）
     df = to15(mk) if inst == "TX" else to15_tse(m)
-    col, col_f, used = colors(df, inst)
+    _, col_f, _ = colors(df, inst)
+    col = colors15_v2(df, inst); used = "v2"               # ★2026-10-30 官方答案卷反推的公式（台指 96.9%／加權 98.0%）
     P2 = P1 = None; st = {}
     if inst == "TX":
         P2, P1 = ladders(m); st = stars15(m)
-    charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"])
+    tse_c = None
+    if inst == "TX":
+        try:
+            _mt = minute_df(STORE["TSE"]); tse_c = _mt.c if len(_mt) else None
+        except Exception:
+            tse_c = None
+    charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"],
+                         bs=basis_for(df, 15, tse_c) if inst == "TX" else None)
     d60 = to60(mk, inst)
     c60, _, _ = colors(d60, inst)
-    charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"])
+    charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"],
+                         bs=basis_for(d60, 60, tse_c) if inst == "TX" else None)
     update_daily(inst, m)
     dd = daily_df(inst)
     if len(dd) >= 3:
-        cD, _, _ = colors(dd, inst); charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"])
+        cD = colors_daily(dd, inst)                                                           # ★日K＝破解公式（官方 100%）
+        bsD = None
+        if inst == "TX":
+            try: bsD = basis_for(dd, None, daily_df("TSE").c)
+            except Exception: bsD = None
+        charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"], bs=bsD)
         wk = to_week(dd)
         cW, _, _ = colors(wk, inst); charts["W"] = _rows(wk, cW, inst, n_show=SHOW["W"])
     lt = m.index[-1]
