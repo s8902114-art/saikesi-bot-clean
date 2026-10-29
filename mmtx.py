@@ -483,6 +483,63 @@ def _wma(s, n):
     return pd.Series(out, index=s.index)
 
 
+def _wma_exp(s, n):
+    """WMA_n，不足 n 根時用目前為止 m 根、權重 1..m（官方分線從窗口第一根起算的寫法）。"""
+    x = np.asarray(s, float); cs1 = np.r_[0, np.cumsum(x)]; ii = np.arange(1, len(x) + 1); cs2 = np.r_[0, np.cumsum(x * ii)]
+    j = np.arange(len(x)); lo = np.maximum(0, j - n + 1); m = j - lo + 1
+    return ((cs2[j + 1] - cs2[lo]) - lo * (cs1[j + 1] - cs1[lo])) / (m * (m + 1) / 2)
+
+
+def _prev(a):
+    return np.r_[np.nan, np.asarray(a, float)[:-1]]
+
+
+def _count2(A, B):
+    """兩線三條件計數（A 上彎、B 上彎、A>B）→ 0黑1金2藍3紅；第一根 NaN。日K、加權 15 分都是這型。"""
+    A = np.asarray(A, float); B = np.asarray(B, float); Ap, Bp = _prev(A), _prev(B)
+    out = (A > Ap).astype(float) + (B > Bp) + (A > B)
+    out[np.isnan(Ap) | np.isnan(Bp) | np.isnan(A) | np.isnan(B)] = np.nan
+    return out
+
+
+def _six(F, M, L):
+    """三線六條件（F↑M↑L↑、F>M、M>L、F>L）：全成立紅、全不成立黑；其他 L 往中間靠（最上且下彎／最下且上彎）看 M↑，否則看 F>M。
+    台指 15 分 P2、台指 60 分 P1 都是這型。回傳 float（暖機 NaN）。"""
+    F, M, L = (np.asarray(x, float) for x in (F, M, L))
+    Fu, Mu, Lu = F > _prev(F), M > _prev(M), L > _prev(L)
+    FM, ML, FL = F > M, M > L, F > L
+    allb = Fu & Mu & Lu & FM & ML & FL; alls = ~Fu & ~Mu & ~Lu & ~FM & ~ML & ~FL
+    conv = ((~ML & ~FL) & ~Lu) | ((ML & FL) & Lu)
+    out = np.where(allb, 3, np.where(alls, 0, np.where(np.where(conv, Mu, FM), 2, 1))).astype(float)
+    out[np.isnan(F) | np.isnan(_prev(F)) | np.isnan(M) | np.isnan(L) | np.isnan(_prev(L))] = np.nan
+    return out
+
+
+def colors15_v3(df, inst="TX"):
+    """15 分K 彩色K 參數一（★2026-10-30 第四輪，無狀態；取代 colors15_v2 狀態機）。
+    台指（_mm_data/formula/tx15_p1_r4/）：E=EMA55、W=WMA34、M=WMA120、L=WMA241（全史起算）。
+      紅：L↑ 且 E↑ 且 E>M>L；黑：L↓ 且 W↓ 且 W<M<L；其他看 L 彎向：
+      L↑ → L 在 E、M 下面時 E↑ 或 M↑ 藍，否則 E>M 藍；L↓ → L 在 W、M 上面時 W↑ 且 M↑ 藍，否則 W>M 藍；不是藍就是金。
+      10 月 held-out 1336 根 100%（舊狀態機 96.86%、沿用上一根 90.64%）；訓練 3302 根 100%。
+    加權（_mm_data/formula/tse15_r4/）：兩線三條件計數 EMA55／WMA241（WMA 不足 n 根 expanding）；09-01 後 684 根 100%（舊 98.83%）。
+    回傳 float（暖機 NaN）。"""
+    c = df.c
+    if inst == "TX":
+        E = c.ewm(span=55, adjust=False).mean().values
+        W, M, L = (_wma(c, n).values for n in (34, 120, 241))
+        Eu, Wu, Mu, Lu = E > _prev(E), W > _prev(W), M > _prev(M), L > _prev(L)
+        EM, WM, ML, EL, WL = E > M, W > M, M > L, E > L, W > L
+        red = Lu & Eu & EM & ML; blk = ~Lu & ~Wu & ~WM & ~ML
+        weak_blue = np.where(Lu, np.where(EL & ML, Eu | Mu, EM), np.where(~WL & ~ML, Wu & Mu, WM))
+        out = np.where(red, 3, np.where(blk, 0, np.where(weak_blue, 2, 1))).astype(float)
+        bad = np.zeros(len(out), bool)
+        for x in (E, W, M, L):
+            bad |= np.isnan(x) | np.isnan(_prev(x))
+        out[bad] = np.nan
+        return out
+    return _count2(c.ewm(span=55, adjust=False).mean().values, _wma_exp(c, 241))
+
+
 DAILY_P = {"TX": (22, 9, 21), "TSE": (21, 8, 20)}
 DAILY_P2 = {"TX": (22, 21), "TSE": (21, 20)}
 
@@ -499,10 +556,11 @@ def colors15_p2(df, inst="TX"):
     """15 分K 彩色K 參數二。台指（★2026-10-30 第三輪破解，10 月 held-out 99.93%、沿用上一根 91.8%；_mm_data/formula/tx15_p2_r3/）：
     無狀態。F=WMA55、M=EMA144、L=SMA228；六條件 F↑M↑L↑（這根>上一根）、F>M、M>L、F>L。全成立紅、全不成立黑；
     其他：L 在三條線最上面且往下彎、或最下面且往上彎 → 看 M↑（上彎藍、否則金），其餘看 F>M（成立藍、否則金）。
-    回傳 float（暖機 NaN）。加權還沒定稿 → None（網頁顯示參數一並註明）。"""
-    if inst != "TX":
-        return None
+    加權（★10-30 第四輪，_mm_data/formula/tse15_r4/）：兩線三條件計數 EMA34／WMA233（WMA 不足 n 根 expanding）；09-01 後 684 根 100%。
+    回傳 float（暖機 NaN）。"""
     c = df.c
+    if inst != "TX":
+        return _count2(c.ewm(span=34, adjust=False).mean().values, _wma_exp(c, 233))
     F = _wma(c, 55).values; M = c.ewm(span=144, adjust=False).mean().values; L = c.rolling(228).mean().values
     sh = lambda a: np.r_[np.nan, a[:-1]]
     Fu, Mu, Lu = F > sh(F), M > sh(M), L > sh(L)
@@ -576,13 +634,14 @@ def colors60_v3(df, inst="TX"):
     台指：FR=FK=EMA144、SW=SMA370、AR SMA240>SMA600、AK SMA240<SMA600
          訓練 97.6%（沿用上一根 93.1%）、09-10 後 97.8%（95.7%）。★AK 是線索：訓練段只有 3 根進黑候選、held-out 只有 1 次進黑。
     加權：FR=EMA34、FK=EMA30、SW=SMA233、AR SMA21>SMA280、AK EMA34<SMA144；訓練 96.7%、09-10 後 96.8%（沿用 89.7%）。
-    _mm_data/formula/tx60_p1_r3/verify.py、_mm_data/cmp60_live.py"""
+    _mm_data/formula/tx60_p1_r3/verify.py、_mm_data/cmp60_live.py
+    ★台指 10-30 第四輪改成無狀態三線六條件（_mm_data/formula/p1_60_r4/）：F=EMA144、M=EMA377、L=WMA987（WMA 不足 n 根 expanding），
+      線上切法 訓練 580/580、09-10 後 581/581（上面那台狀態機 97.76%）；要 4 個月以上的 60 分K 歷史（存檔留 400 天）。回傳 float（暖機 NaN）。"""
     c = df.c; cv = c.values.astype(float); n = len(cv); out = np.empty(n, np.int8); s = 1
     sm = lambda k: c.rolling(k, min_periods=1).mean().values; e = lambda k: c.ewm(span=k, adjust=False).mean().values
     if inst == "TX":
-        FR = FK = e(144); SW = sm(370); s240, s600 = sm(240), sm(600); AR = s240 > s600; AK = s240 < s600
-    else:
-        FR, FK, SW = e(34), e(30), sm(233); AR = sm(21) > sm(280); AK = FR < sm(144)
+        return _six(e(144), e(377), _wma_exp(c, 987))
+    FR, FK, SW = e(34), e(30), sm(233); AR = sm(21) > sm(280); AK = FR < sm(144)
     for i in range(n):
         for _ in range(2):
             if s == 3: s2 = 2 if cv[i] < FR[i] else 3
@@ -662,7 +721,7 @@ def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, co
     for i in range(i0, n):
         t = df.index[i]
         r = [_ts(t), round(float(o[i]), nd), round(float(h[i]), nd), round(float(l[i]), nd), round(float(c[i]), nd),
-             int(v[i]), int(col[i]) if i >= WARM else -1,
+             int(v[i]), int(col[i]) if i >= WARM and col[i] == col[i] else -1,
              lad2[i] if lad2 else None, lad1[i] if lad1 else None, int(st.get(t, 0)) if st else 0]
         if bs or col2 is not None:
             r += [0, bs[i] if bs else None]
@@ -701,8 +760,7 @@ def compute_inst(inst):
     charts = {}
     mk = merge_close(m) if inst == "TX" else m           # ★台指 13:45 收盤那筆併進日盤最後一根（同官方切法）
     df = to15(mk) if inst == "TX" else to15_tse(m)
-    _, col_f, _ = colors(df, inst)
-    col = colors15_v2(df, inst); used = "v2"               # ★2026-10-30 官方答案卷反推的公式（台指 96.9%／加權 98.0%）
+    col = colors15_v3(df, inst); used = "v3"               # ★2026-10-30 第四輪無狀態公式（台指／加權 held-out 100%）
     P2 = P1 = None; st = {}
     if inst == "TX":
         P2, P1 = ladders(m); st = stars15(m)
@@ -740,7 +798,7 @@ def compute_inst(inst):
         return None
     last_chg = _last_chg(col)
     s = {"ok": True, "err": "", "name": INST_NAME[inst], "model": used, "live_bar": live,
-         "color": COLOR_NAME[int(col[-1])], "c": int(col[-1]), "color_formula": COLOR_NAME[int(col_f[-1])],
+         "color": COLOR_NAME[int(col[-1])], "c": int(col[-1]),
          "closed": [df.index[ci].strftime("%m-%d %H:%M"), int(col[ci])], "last_change": last_chg,
          "last": round(float(df.c.iloc[-1]), 2), "last_minute": lt.strftime("%m-%d %H:%M"), "n1m": len(m)}
     if col2 is not None and col2[-1] == col2[-1] and col2[ci] == col2[ci]:

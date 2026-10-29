@@ -2638,7 +2638,7 @@ function txLadSeg(bars, half, idx){
 //   VWAP＝Σ成交額(USDT)÷Σ成交量（OKX 每根 K 都有這兩欄 → 是真的成交均價，不是拿收盤價近似）。
 //   雙線寬度＝值 ±0.02%（台指 ±9 點 ÷ 約 4.8 萬）。
 //   幣的 K 棒列 = [時間秒(台北當UTC), 開, 高, 低, 收, 量(幣), 顏色, 階梯P2, 階梯P1, 0, CME標記('o'開/'c'收/0)]
-const TXOKX = 'https://www.okx.com/api/v5/market/candles';
+const TXOKX = 'https://www.okx.com/api/v5/market/candles', TXOKXH = 'https://www.okx.com/api/v5/market/history-candles';
 const TXBAR = {'15':'15m', '60':'1H', '240':'4H', 'D':'1D', 'W':'1W'};
 const TXHALF = 0.0002, TXWARM = 280;
 const TXCTF = (() => { try{ return new Intl.DateTimeFormat('en-US', {timeZone:'America/Chicago', hourCycle:'h23',
@@ -2710,8 +2710,8 @@ function txDec(s){ s = String(s); const i = s.indexOf('.'); return i < 0 ? 0 : s
 // OKX 一次最多 300 根，往回翻頁最多拿到最近 1440 根（實測 15m/1H/1D 都 1440、1W 359）
 async function txOkx(inst, tf, need){
   let out = [], after = '';
-  for(let k = 0; k < 5 && out.length < need; k++){
-    const u = TXOKX+'?instId='+inst+'&bar='+TXBAR[tf]+'&limit='+Math.min(300, need)+(after ? '&after='+after : '');
+  for(let k = 0; k < Math.ceil(need / 300) + 2 && out.length < need; k++){
+    const u = ((need > 1440 && out.length >= 1200) ? TXOKXH : TXOKX)+'?instId='+inst+'&bar='+TXBAR[tf]+'&limit='+Math.min(300, need)+(after ? '&after='+after : '');
     const r = await (await fetch(u, {cache:'no-store'})).json();
     if(!r || r.code !== '0') throw new Error('OKX '+((r && (r.msg || r.code)) || '沒回應'));
     const d = r.data || []; if(!d.length) break;
@@ -2743,40 +2743,37 @@ function mxColorD(c){
   }
   return out;
 }
-// 台指 15 分 參數一（官方 10 月 held-out 96.9%）。幣用在 15 分與 1H
+// 台指 15 分 參數一（★2026-10-30 第四輪，無狀態四線＝mmtx.colors15_v3 台指；官方 10 月 held-out 1336 根 100%，舊狀態機 96.9%）。幣用在 15 分與 1H
+//   E=EMA55、W=WMA34、M=WMA120、L=WMA241。紅：L↑ 且 E↑ 且 E>M>L；黑：L↓ 且 W↓ 且 W<M<L；其他看 L 彎向：
+//   L↑ → L 在 E、M 下面時 E↑ 或 M↑ 藍，否則 E>M 藍；L↓ → L 在 W、M 上面時 W↑ 且 M↑ 藍，否則 W>M 藍；不是藍就是金
 function mxColor15(c){
-  const e55 = mxEma(c, 55), s35 = mxSma(c, 35), s121 = mxSma(c, 121), s60 = mxSma(c, 60), s200 = mxSma(c, 200), w120 = mxWma(c, 120), w34 = mxWma(c, 34);
-  const out = new Array(c.length); let s = 1;
-  for(let i = 0; i < c.length; i++){
-    const wb = c[i] > s121[i];
-    if(s === 3){ if(c[i] < e55[i]) s = wb ? 2 : 1; }
-    else if(s === 0){ if(c[i] > s35[i]) s = wb ? 2 : 1; }
-    else {
-      s = wb ? 2 : 1;
-      if(s === 2 && c[i] > e55[i] && s60[i] > s200[i] && e55[i] > w120[i]) s = 3;
-      else if(s === 1 && c[i] < s35[i] && s60[i] < s200[i] && w34[i] < w120[i]) s = 0;
-    }
-    out[i] = s;
+  const E = mxEma(c, 55), W = mxWma(c, 34), M = mxWma(c, 120), L = mxWma(c, 241), out = new Array(c.length).fill(-1);
+  for(let i = 1; i < c.length; i++){
+    if(!(L[i] === L[i]) || !(L[i-1] === L[i-1]) || !(W[i-1] === W[i-1])) continue;
+    const Eu = E[i] > E[i-1], Wu = W[i] > W[i-1], Mu = M[i] > M[i-1], Lu = L[i] > L[i-1];
+    const EM = E[i] > M[i], WM = W[i] > M[i], ML = M[i] > L[i], EL = E[i] > L[i], WL = W[i] > L[i];
+    if(Lu && Eu && EM && ML) out[i] = 3;
+    else if(!Lu && !Wu && !WM && !ML) out[i] = 0;
+    else out[i] = (Lu ? ((EL && ML) ? (Eu || Mu) : EM) : ((!WL && !ML) ? (Wu && Mu) : WM)) ? 2 : 1;
   }
   return out;
 }
-// 60 分 參數一（★2026-10-30 第三輪，台指參數＝mmtx.colors60_v3 的台指那組；幣用在 4H）。官方台指 60 分 09-10 後 97.8%（沿用上一根 95.7%），舊版這裡只有 53%。
-//   三線狀態機、每根最多走兩步：紅 c<EMA144→藍；黑 c>EMA144→金；藍 c>EMA144 且 SMA240>SMA600→紅，否則 c<SMA370→金；
-//   金 c<EMA144 且 SMA240<SMA600→黑，否則 c>SMA370→藍。SMA 不足 n 根用目前為止平均。★進黑那條是線索（台指只有 1 次進黑可驗）
-function mxColor60(c){
-  const F = mxEma(c, 144), SW = mxSma(c, 370, true), a = mxSma(c, 240, true), b = mxSma(c, 600, true);
-  const out = new Array(c.length); let s = 1;
+// 60 分 參數一（★2026-10-30 第四輪，台指＝mmtx.colors60_v3 台指那組；幣用在 4H）：三線六條件 F=EMA144、M=EMA377、L=WMA987（WMA 不足 n 根 expanding），
+//   官方台指 60 分 訓練 580/580、09-10 後 581/581（第三輪狀態機 97.8%）。規則同 15 分參數二：六條全成立紅、全不成立黑；
+//   其他 L 在最上面且往下彎、或在最下面且往上彎 → M↑ 藍否則金，其餘 F>M 藍否則金。要 987 根以上才準（幣 4H 多抓、暖機 987 根）
+function mxWmaX(c, n){ const o = new Array(c.length); let s1 = 0, s2 = 0;      // WMA，不足 n 根時用目前為止 m 根、權重 1..m
   for(let i = 0; i < c.length; i++){
-    for(let k = 0; k < 2; k++){
-      let s2;
-      if(s === 3) s2 = c[i] < F[i] ? 2 : 3;
-      else if(s === 0) s2 = c[i] > F[i] ? 1 : 0;
-      else if(s === 2) s2 = (c[i] > F[i] && a[i] > b[i]) ? 3 : (c[i] < SW[i] ? 1 : 2);
-      else s2 = (c[i] < F[i] && a[i] < b[i]) ? 0 : (c[i] > SW[i] ? 2 : 1);
-      if(s2 === s) break;
-      s = s2;
-    }
-    out[i] = s;
+    if(i < n){ s1 += c[i]; s2 += (i + 1) * c[i]; const m = i + 1; o[i] = s2 / (m * (m + 1) / 2); }
+    else { s2 = s2 - s1 + n * c[i]; s1 = s1 + c[i] - c[i-n]; o[i] = s2 / (n * (n + 1) / 2); }
+  }
+  return o; }
+function mxColor60(c){
+  const F = mxEma(c, 144), M = mxEma(c, 377), L = mxWmaX(c, 987), out = new Array(c.length).fill(-1);
+  for(let i = 1; i < c.length; i++){
+    const Fu = F[i] > F[i-1], Mu = M[i] > M[i-1], Lu = L[i] > L[i-1], FM = F[i] > M[i], ML = M[i] > L[i], FL = F[i] > L[i];
+    if(Fu && Mu && Lu && FM && ML && FL) out[i] = 3;
+    else if(!Fu && !Mu && !Lu && !FM && !ML && !FL) out[i] = 0;
+    else out[i] = (((!ML && !FL && !Lu) || (ML && FL && Lu)) ? Mu : FM) ? 2 : 1;
   }
   return out;
 }
@@ -2901,7 +2898,7 @@ function txCRows(key){
   // ★2026-10-30 用戶：「日K對日K 15m對1H 1H的對4H」→ 日K＝官方日K公式、15 分與 1H＝台指 15 分公式、4H＝60 分公式；週K 官方沒有顏色
   const cl = raw.map(r => r[4]);
   const col = tf === 'D' ? mxColorD(cl) : (tf === '240' ? mxColor60(cl) : (tf === 'W' ? cl.map(() => -1) : mxColor15(cl)));
-  const warm = tf === 'D' ? 30 : TXWARM;
+  const warm = tf === 'D' ? 30 : (tf === '240' ? 987 : TXWARM);     // 4H 用台指 60 分公式，WMA987 要滿窗
   const star = (tf === '15' || tf === '60' || tf === '240') ? txStarX(key) : null;
   const col2 = tf === 'D' ? mxColorDP2(cl) : ((tf === '15' || tf === '60') ? mxColorP2(cl) : null);
   let e2 = null, e1 = null;
@@ -2931,7 +2928,7 @@ async function txFetchC(){
     try{
       const ktf = k.split('|')[1], cur = TXDATA[k];
       if(!cur || !cur.raw || !cur.raw.length){
-        const got = await txOkx(inst, ktf, ktf === 'W' ? 400 : 1440);
+        const got = await txOkx(inst, ktf, ktf === 'W' ? 400 : (ktf === '240' ? 2400 : 1440));
         if(!got.raw.length) throw new Error('OKX 沒有 '+inst);
         TXDATA[k] = {raw:got.raw, prec:got.prec, bars:[], meta:null}; txCRows(k); first = true;
         if(TXCH && TXCH.key === k) txApply();
@@ -3261,7 +3258,7 @@ function viewTx(){
     const p2 = TXLAD === '2' && p.c2 !== undefined, pc = p2 ? p.c2 : p.c, pcl = p2 ? p.closed2 : p.closed, plc = p2 ? p.last_change2 : p.last_change;
     h += '<div class="fpsum">' + (p.live_bar ? '15 分盤中這根 '+txBadge(pc)+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(pcl[1])
                                              : '15 分 現在 '+txBadge(pc))
-       + ' <span class="dim">'+(p2 ? '參數二' : (TXLAD === '2' ? '參數一（加權 15 分參數二還沒解）' : '參數一'))+'</span>'
+       + ' <span class="dim">'+(p2 ? '參數二' : '參數一')+'</span>'
        + (plc ? '　最近換色 <b>'+plc[0]+'</b> '+plc[1]+' → '+plc[2] : '')
        + '<br>最新 <b>'+txNum(p.last, TXS==='TX' ? 0 : 2)+'</b>'
        + (TXS==='TX' ? (TXLAD === '2' ? '　階梯(參數二) <b>'+txNum(p.ladder2, 1)+'</b> ±'+(p.half || 9)+' <span class="dim">參數一 '+txNum(p.ladder1, 1)+'</span>'
@@ -3269,8 +3266,8 @@ function viewTx(){
        + '　<span class="dim">最後一分鐘 '+(p.last_minute || '—')+'</span>'
        + '</div>';
   }
-  if(isC) h += '<div class="sub dim">⚠ 幣的彩色K是台指公式直接套（幣本身沒有官方答案可以驗）：日K＝官方日K公式（台指 28 年逐根 100%）、15 分與 1H＝台指 15 分公式（官方 96.9%）、4H＝台指 60 分公式（官方 97.8%）、週K 官方沒有顏色；階梯＝CME 交易時段算這個合約自己的 VWAP（虛線：CME開／CME收＝換階）。</div>';
-  else if(TXTF === '60') h += '<div class="sub dim">1H（官方 60 分）顏色＝第三輪公式：對官方 台指 97.8%、加權 96.8%（09-10 後）；台指「轉黑」那條只有 1 次可以驗，算線索。</div>';
+  if(isC) h += '<div class="sub dim">⚠ 幣的彩色K是台指公式直接套（幣本身沒有官方答案可以驗）：日K＝官方日K公式（台指 28 年逐根 100%）、15 分與 1H＝台指 15 分公式（官方 100%）、4H＝台指 60 分公式（官方 100%）、週K 官方沒有顏色；階梯＝CME 交易時段算這個合約自己的 VWAP（虛線：CME開／CME收＝換階）。</div>';
+  else if(TXTF === '60') h += '<div class="sub dim">1H（官方 60 分）顏色：對官方 台指 100%（09-10 後 581 根）、加權 96.8%（155 根，加權 60 分還沒完全解）。</div>';
   else if(TXTF === 'W') h += '<div class="sub dim">週K 官方沒有顏色，不上色。</div>';
   { const Rk = TXDATA[TXS + '|' + TXTF];
     if(TXLAD === '2' && Rk && Rk.bars && Rk.bars.length && !txHasP2(Rk) && TXTF !== 'W')
@@ -3292,8 +3289,8 @@ function viewTx(){
   h += '<details><summary class="sech">規則與準確度</summary><div class="note">'
     + '<b>彩色K（追價氛圍）</b>：黑&lt;金&lt;藍&lt;紅。全部是 10-29 訂閱後拿官方逐根答案反推出來的公式，數字＝跟官方逐根一樣的比例：'
     + '<br>・<b>日K</b>：參數一、參數二都破解，台指 28 年、加權 26 年逐根 <b>100%</b>。'
-    + '<br>・<b>15 分</b>：台指 參數一 97.0%、參數二 <b>99.96%</b>；加權 參數一 95.9%，參數二還在解（選參數二時加權 15 分顯示參數一）。'
-    + '<br>・<b>1H（官方 60 分）</b>：台指 97.8%、加權 96.8%（09-10 後）；官方 60 分只有參數一。台指「轉黑」那條只有 1 次可以驗，算線索。'
+    + '<br>・<b>15 分</b>：台指 參數一 <b>100%</b>（10 月 1336 根）、參數二 99.96%；加權 參數一、參數二都 <b>100%</b>（9~10 月 684 根）。'
+    + '<br>・<b>1H（官方 60 分）</b>：台指 <b>100%</b>（09-10 後 581 根）、加權 96.8%（還沒完全解）；官方 60 分只有參數一。'
     + '<br>・<b>週K</b>：官方沒有顏色，不上色。　・參數一給空手的人、參數二給有單的人（麥門影片原話）；按「參數一／參數二」階梯和顏色一起切。'
     + '<br><b>階梯</b>（只有台指）：當天日盤台指的口數加權均價，參數二＝08:47~13:25、參數一＝09:00~10:45，當天 13:30 起換階（60 分 K 從 15:00 那根）；用 1 分 K（高+低）/2 近似，跟官方差中位 0.4 點（10-29 訂閱後拿官方值驗證）；畫值 ±9 點的雙線；跟麥門一樣一次只畫一個，按鈕切換（預設參數一）。'
     + '<br><b>上下線</b>（按鈕開關）：麥門的「到價推撥」上線／下線是帳號自己設的警示價（不是公式）；這裡是從麥門文章圖讀出來的歷史值，'
