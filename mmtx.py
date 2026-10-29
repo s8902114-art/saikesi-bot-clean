@@ -641,6 +641,8 @@ def colors60_v3(df, inst="TX"):
     sm = lambda k: c.rolling(k, min_periods=1).mean().values; e = lambda k: c.ewm(span=k, adjust=False).mean().values
     if inst == "TX":
         return _six(e(144), e(377), _wma_exp(c, 987))
+    # ★加權 10-30 第五輪：兩線三條件計數 EMA34／WMA233（同加權 15 分 P2），08-01 後 295/295（下面兩步狀態機 98.0%）；_mm_data/formula/tse60_r5/
+    return _count2(e(34), _wma_exp(c, 233))
     FR, FK, SW = e(34), e(30), sm(233); AR = sm(21) > sm(280); AK = FR < sm(144)
     for i in range(n):
         for _ in range(2):
