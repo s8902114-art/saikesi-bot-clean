@@ -788,7 +788,32 @@ def _yao(G):
 def _tx(G):
     try:
         m = G.get("mmtx")
-        return m.dash_payload() if m else {"ok": False, "err": "模組未載入"}
+        p = dict(m.dash_payload()) if m else {"ok": False, "err": "模組未載入"}
+    except Exception as e:
+        p = {"ok": False, "err": type(e).__name__}
+    p["rec"] = _rec(G)
+    return p
+
+
+def _rec(G):
+    """★麥門官方值紀錄器（mainow）狀態（2026-10-30 用戶：「燈號那個有抓多少了」）：加權 1H 燈號官方只有最新那根有值、沒有歷史，
+    bot 在加權盤中每 5 分鐘記一筆。這裡只讀它的記憶體狀態＋燈號檔，不連線、不碰憑證（只回「有沒有設」）。"""
+    try:
+        m = G.get("mainow")
+        if not m:
+            return {"ok": False, "err": "紀錄器沒載入"}
+        st = m.status(); L = m.lights(100000)
+        today = time.strftime("%Y-%m-%d", time.gmtime(time.time() + 8 * 3600))
+        days = {}
+        for x in L:
+            d = str(x.get("fetched") or "")[:10]
+            days[d] = days.get(d, 0) + 1
+        chg = [[b.get("fetched"), a.get("light"), b.get("light"), b.get("bar")] for a, b in zip(L, L[1:]) if a.get("light") != b.get("light")]
+        err = st.get("last_err")
+        return {"ok": True, "enabled": bool(st.get("enabled")), "has_token": bool(st.get("has_token")), "has_lib": bool(st.get("has_lib")),
+                "n": len(L), "n_today": days.get(today, 0), "first": L[0].get("fetched") if L else None, "last": L[-1] if L else None,
+                "days": sorted(days.items())[-7:], "changes": chg[-8:],
+                "err": (str(err)[:160] if err else None), "err_at": st.get("err_at"), "ok_at": st.get("last_ok")}
     except Exception as e:
         return {"ok": False, "err": type(e).__name__}
 
@@ -3236,6 +3261,23 @@ function txCoins(){        // 幣的快捷鈕：BTC/ETH/SOL＋持倉的幣＋正
   if(txIsC(TXS) && out.indexOf(txCoin(TXS)) < 0) out.push(txCoin(TXS));
   return out;
 }
+// ★麥門官方值紀錄器（2026-10-30）：加權 1H 燈號官方只有最新那根有值 → bot 加權盤中每 5 分鐘記一筆；這裡顯示記了多少、最新是什麼、有沒有出錯
+const TXLIGHT = {green:'綠', red:'紅', yellow:'黃', gray:'灰', grey:'灰'};
+function txEscH(x){ return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function txRecHTML(r){
+  let h = '<div class="sech">官方燈號紀錄（加權 1H）</div>';
+  if(!r) return h + '<div class="empty">還沒有資料</div>';
+  if(!r.ok) return h + '<div class="empty">'+txEscH(r.err || '沒有資料')+'</div>';
+  if(!r.has_token) return h + '<div class="warn">⚠ Railway 沒設 MAINOW_TOKEN，紀錄器沒在跑</div>';
+  const lt = v => v == null ? '—' : txEscH(TXLIGHT[v] || v), tm = x => txEscH(String(x || '').slice(5, 16));
+  const ago = t => t ? Math.max(0, Math.round((Date.now() / 1000 - t) / 60)) + ' 分鐘前' : '—', L = r.last;
+  h += '<div class="sub">今天 <b>'+r.n_today+'</b> 筆　總共 <b>'+r.n+'</b> 筆'+(r.first ? '（'+txEscH(String(r.first).slice(0, 10))+' 起）' : '')
+     + (L ? '　最新 <b>'+lt(L.light)+'</b> <span class="dim">（'+tm(L.bar)+' 那根，'+tm(L.fetched)+' 抓）</span>' : '　<span class="dim">還沒記到任何一筆</span>') + '</div>';
+  if(r.changes && r.changes.length) h += '<div class="sub dim">最近換燈：'+r.changes.slice().reverse().map(c => tm(c[0])+' '+lt(c[1])+'→'+lt(c[2])).join('、')+'</div>';
+  if(r.days && r.days.length) h += '<div class="sub dim">每天筆數：'+r.days.map(d => txEscH(String(d[0]).slice(5))+' '+d[1]).join('、')+'（加權盤中 09:00~13:40 每 5 分鐘一筆，一天約 57 筆）</div>';
+  if(r.err) h += '<div class="warn">⚠ 最近一次錯誤（'+ago(r.err_at)+'）：'+txEscH(r.err)+'</div>';
+  return h;
+}
 function viewTx(){
   const P = D.tx || {}, isC = txIsC(TXS);
   const p = isC ? {} : (P[TXS] || {});
@@ -3286,6 +3328,7 @@ function viewTx(){
          : '<div class="empty">這個商品沒有紀錄</div>')
        + '<div class="sub dim">「—」＝那張圖上沒讀到（可能在畫面外），不是被取消。</div>';
   }
+  if(!isC) h += txRecHTML(P.rec);
   if(TXS === 'TX' && p.ok){
     const st = (p.stars || []).slice().reverse();
     h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(s => '<div class="sub">★ '+s[0]+'　5 分 K 量 <b>'+s[1]+'</b> 口</div>').join('') : '<div class="empty">最近沒有</div>');
