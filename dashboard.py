@@ -1321,6 +1321,7 @@ _HTML = """<!doctype html>
   .ctl .ci{flex:1;display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
   .ctl .gap{flex:0 0 1px;align-self:stretch;margin:3px 3px;background:var(--line)}
   .ctl .txqw{display:inline-flex;gap:6px}
+  .pg{display:inline-flex;gap:6px;align-items:center;white-space:nowrap}   /* 參數那排：「追價氛圍＋兩顆鈕」「階梯＋兩顆鈕」各自不拆行 */
   .ctl .txq{width:76px;padding:6px 8px;font-size:13px}
   /* 表格：表頭小、橫線淡、數字等寬 */
   th{font-size:11.5px;color:var(--dim);font-weight:500;padding:6px 10px 8px;border-bottom:1px solid var(--line)}
@@ -2000,8 +2001,7 @@ function cardHTML(){
     + `<div class="sub" style="margin:6px 0 10px">${meta[1]||''}</div>`
     + (TXS === 'C:' + r.inst ? '<div class="txbar">'
         + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join(' ')
-        + (txIntra() ? '<span class="txsp"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
-            `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">${n}</span>`).join(' ') : '')
+        + (TXTF !== 'W' ? '<span class="txsp"></span>' + txParIn('<span class="txsp"></span>') : '')
         + '<span class="txsp"></span>' + txTglBar()
         + '</div>' + txCSum() + '<div id="txslotc"></div>'
         + '<div class="sub dim">雙指／滾輪縮放、左右拖曳、按住看那根的價；彩色K＝台指公式直接套（沒驗證）、階梯＝CME 時段 VWAP、灰色＝暖機。</div>' : '')
@@ -2201,14 +2201,29 @@ try{ const v = JSON.parse(localStorage.getItem('txsel')||'{}');
   if(TXTFN[v.tf]) TXTF = v.tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; }catch(e){}   // 商品不還原：一打開就是台指（用戶 10-14），週期照上次
 function txSel(s, tf){ if(s) TXS = s; if(tf) TXTF = tf; if(TXTF === '240' && !txIsC(TXS)) TXTF = '60'; if(!TXSAVE){ try{ localStorage.setItem('txsel', JSON.stringify({s:TXS, tf:TXTF})); }catch(e){} } draw(); }
 // 階梯參數：麥門一次只畫一個（設定裡選）→ 按鈕切換，預設參數一（用戶 10-11）。K 棒列裡 參數二＝b[7]、參數一＝b[8]
-let TXLAD = '1';
-try{ const v = localStorage.getItem('txlad'); if(v === '1' || v === '2') TXLAD = v; }catch(e){}
+// ★10-30 用戶：「追價氛圍和階梯不是各有一和二嗎」→ 拆成兩組各自切（原本一顆按鈕兩個一起切，加權、日K 還切不到顏色的參數二）。
+//   追價氛圍（彩色K）參數＝TXCOLP；沒存過就沿用原本的階梯選擇（更新後畫面不會突然變）
+let TXLAD = '1', TXCOLP = '';
+try{ const v = localStorage.getItem('txlad'); if(v === '1' || v === '2') TXLAD = v;
+  const w = localStorage.getItem('txcolp'); if(w === '1' || w === '2') TXCOLP = w; }catch(e){}
+if(!TXCOLP){ TXCOLP = TXLAD; try{ localStorage.setItem('txcolp', TXCOLP); }catch(e){} }   // 沿用的值要存起來，不然之後只切階梯、重開顏色會跟著變
 function txLadIdx(){ return TXLAD === '2' ? 7 : 8; }
 function txLadSel(k){ TXLAD = k; try{ localStorage.setItem('txlad', k); }catch(e){}
+  if(TXCH && TXDATA[TXCH.key]){ try{ txLadApply(); txLegend(null); }catch(e){} }
+  draw(); }
+function txColSel(k){ TXCOLP = k; try{ localStorage.setItem('txcolp', k); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ const R = TXDATA[TXCH.key];
     if(R.bars && R.bars.length){ TXCH.cs.setData(R.bars.map(txCandle)); if(R.meta && R.meta.vol) TXCH.vs.setData(R.bars.map(txVol)); txHiLo(); }
-    txLadApply(); txLegend(null); }catch(e){} }
+    txStApply(); txLegend(null); }catch(e){} }     // txStApply 會重餵均線＋重畫疊圖（參數二那組線可能改變縱軸）
   draw(); }
+// 參數列：追價氛圍（彩色K）、階梯各自選（週K 沒有顏色；階梯只有台指和幣的 15 分／1H／4H）
+function txParIn(sep){
+  const pick = (cur, fn) => [['1','參數一'],['2','參數二']].map(([k, n]) => `<span class="wb ${cur===k?'on':''}" onclick="${fn}('${k}')">${n}</span>`).join(' ');
+  const col = TXTF !== 'W', lad = (TXS === 'TX' || txIsC(TXS)) && txIntra();
+  return (col ? '<span class="pg"><span class="dim">追價氛圍</span>' + pick(TXCOLP, 'txColSel') + '</span>' : '') + (col && lad ? sep : '')
+    + (lad ? '<span class="pg"><span class="dim">階梯</span>' + pick(TXLAD, 'txLadSel') + '</span>' : '');
+}
+function txParBar(){ const s = txParIn('<span class="txsp"></span>'); return s ? '<div class="ctl"><label>參數</label><div class="ci">' + s + '</div></div>' : ''; }
 // ★上下線（麥門「到價推撥」的上線／下線＝帳號自己設的警示價，不是公式；2026-10-11）：值從麥門文章圖讀出（mmtx_updown.json，±3 點）。
 //   用戶：「做個開關，我看一下有什麼跡象」「要分段，不然同時太多會不知道什麼時間點的」
 //   → 每條線只畫「這次讀到 → 下次讀到不同值」那一段，段首標時間與值；段的起點＝那張圖的上傳時間（圖檔 UUIDv7）。
@@ -2474,18 +2489,18 @@ function txSrPick(h, l, c, a, act, ze, n){
   return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0', kdk:'#5ec4f2', kdd:'#f0a43a', bs:'#8fd6c3', gap:'rgba(242,229,191,0.30)', div:'#f59e0b'};   // KD 顏色照麥門軟體（K 淺藍、D 橘）     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
-let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
+let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
-  if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d; 
-  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
+  if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d;
+  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
 function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
-  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else TXPT = fl(TXPT);
-  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); }catch(e){}
+  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else TXPT = fl(TXPT);
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ return [['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]].concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
+function txTglBar(){ return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -2509,7 +2524,25 @@ function txStApply(){
   if(C.bs){ const onB = L.on.indexOf('bs') >= 0;
     C.bs.setData(onB ? R.bars.map(b => (b[11] === null || b[11] === undefined) ? {time:b[0]} : {time:b[0], value:b[11]}) : []);
     C.ch.priceScale('bs').applyOptions({scaleMargins:L.bs}); }
+  txMaApply();
   txSrDraw();
+}
+// ★判顏色用的均線（用戶 10-30：「各時區判斷彩色k的均線 一樣要有開關」）：K 棒第 13 欄＝參數一那組、第 14 欄＝參數二那組（[快…慢]），
+//   名稱在 meta.ma['1'／'2']（台指／加權＝伺服器 mmtx.MA_SPEC，_chk_ma_lines.py 拿這些線重算顏色＝跟公式逐根相同；幣＝txCMa）。
+//   跟著「追價氛圍」的參數切；那根是暖機（灰色）就不畫（長均線還沒穩）。顏色快 → 慢：白、橘、青、紫。
+const TXMAC = ['#f1f5f9', '#fb923c', '#22d3ee', '#e879f9'];
+function txMaIdx(R){ return (TXCOLP === '2' && txHasP2(R)) ? 14 : 13; }
+function txMaNames(R){ const m = R && R.meta && R.meta.ma; return (m && m[txMaIdx(R) === 14 ? '2' : '1']) || []; }
+function txMaApply(){
+  const C = TXCH; if(!C || !C.ma) return; const R = TXDATA[C.key];
+  const nm = (TXMA === '1' && R && R.bars && R.bars.length) ? txMaNames(R) : [], k = nm.length ? txMaIdx(R) : 0;
+  C.ma.forEach((s, j) => s.setData(j < nm.length ? R.bars.map(b => { const v = b[k] ? b[k][j] : null;
+    return (typeof v === 'number' && v === v && txCol(b) !== -1) ? {time:b[0], value:v} : {time:b[0]}; }) : []));
+}
+function txMaLeg(R, i){
+  const nm = TXMA === '1' ? txMaNames(R) : [], v = (nm.length && R.bars[i]) ? R.bars[i][txMaIdx(R)] : null; if(!v) return '';
+  const pr = R.meta.prec ? R.meta.prec : 1;
+  return nm.map((n, j) => (typeof v[j] === 'number' && v[j] === v[j]) ? ' <span style="color:'+TXMAC[j]+'">'+n+' '+txNum(v[j], pr)+'</span>' : '').join('');
 }
 // 下方指標的版面：%R、KD 各占下面一塊；兩個都開時 K 線縮到上半
 function txHasBs(R){ const b = R && R.bars && R.bars.length ? R.bars[R.bars.length - 1] : null; return !!(b && b.length > 11 && b[11] !== null && b[11] !== undefined); }
@@ -2637,7 +2670,7 @@ function txTfs(){ return Object.keys(TXTFN).filter(k => k !== '240' || txIsC(TXS
 function txChg(v, prec){ return '<span style="color:'+(v>0?'#ef4444':(v<0?'#22c55e':'var(--dim)'))+'">'+(v>0?'+':'')+txNum(v, prec)+'</span>'; }
 
 // ★10-30 參數二顏色：每根第 12 欄＝參數二顏色（有破解的週期才有）；按「參數二」時用它，沒有就照舊用參數一（第 6 欄）
-function txCol(b){ return (TXLAD === '2' && b.length > 12 && b[12] !== null && b[12] !== undefined) ? b[12] : b[6]; }
+function txCol(b){ return (TXCOLP === '2' && b.length > 12 && b[12] !== null && b[12] !== undefined) ? b[12] : b[6]; }
 function txHasP2(R){ const b = R && R.bars && R.bars.length ? R.bars[R.bars.length - 1] : null; return !!(b && b.length > 12 && b[12] !== null && b[12] !== undefined); }
 function txCandle(b){ const c = TXC[txCol(b)] || '#888888', up = b[4] >= b[1];
   return {time:b[0], open:b[1], high:b[2], low:b[3], close:b[4], color: up ? c : txAlpha(c, 0.4), borderColor:c, wickColor:c}; }
@@ -2924,7 +2957,16 @@ function txStarX(key){
   }
   return out;
 }
-// 由原始 K 算成圖表列（顏色、階梯、CME 標記）。1H 的參數一要用 15 分那份的換階事件。
+// 幣的判色均線（＝txCRows 用的 mxColor* 那幾條、同一個寫法；順序快 → 慢，跟伺服器 mmtx.MA_SPEC 台指那組一樣）→ {n:[名稱], v:[值陣列]}
+function txCMa(c, tf, p){
+  const S = n => () => mxSma(c, n), E = n => () => mxEma(c, n), W = n => () => mxWma(c, n);
+  const L = tf === 'D' ? (p === 1 ? [['SMA9', S(9)], ['WMA21', W(21)], ['SMA22', S(22)]] : [['WMA21', W(21)], ['SMA22', S(22)], ['WMA89', W(89)], ['SMA90', S(90)]])
+    : tf === '240' ? (p === 1 ? [['EMA144', E(144)], ['EMA377', E(377)], ['WMA987', () => mxWmaX(c, 987)]] : [])
+    : (tf === '15' || tf === '60') ? (p === 1 ? [['WMA34', W(34)], ['EMA55', E(55)], ['WMA120', W(120)], ['WMA241', W(241)]] : [['WMA55', W(55)], ['EMA144', E(144)], ['SMA228', S(228)]])
+    : [];
+  return L.length ? {n:L.map(x => x[0]), v:L.map(x => x[1]())} : null;
+}
+// 由原始 K 算成圖表列（顏色、階梯、CME 標記、判色均線）。1H 的參數一要用 15 分那份的換階事件。
 function txCRows(key){
   const R = TXDATA[key]; if(!R || !R.raw || !R.raw.length) return;
   const raw = R.raw, inst = key.slice(2).split('|')[0], tf = key.split('|')[1], intra = tf === '15' || tf === '60' || tf === '240';
@@ -2942,12 +2984,16 @@ function txCRows(key){
     else if(tf === '60') e2 = txEvMerge(txCmeEvents(raw, false), e1);
     else { const r60 = TXDATA['C:'+inst+'|60']; e2 = txEvMerge((r60 && r60.raw) ? txCmeEvents(r60.raw, false) : [], e1); }   // 4H：收盤落在 4H K 中間 → 收盤後第一根 4H 才換
   }
+  const warm2 = tf === 'D' ? 90 : warm;     // ★日K 參數二要 SMA90／WMA89：前 89 根沒有值，比參數一的 30 根長（新幣才上市不到 90 天會整段錯色）
+  const ma1 = txCMa(cl, tf, 1), ma2 = col2 ? txCMa(cl, tf, 2) : null;
   R.bars = raw.map((r, i) => { const a = [r[0], r[1], r[2], r[3], r[4], r[5], i >= warm ? col[i] : -1,
     e2 ? txEvAt(e2, r[0], 'p2') : null, e1 ? txEvAt(e1, r[0], 'p1') : null, star ? star[i] : 0, (tf === '15' || tf === '60') ? txCmeMark(r[7]) : 0];
-    if(col2) a.push(null, i >= warm ? col2[i] : -1);           // 第 11 欄＝價差（幣沒有）、第 12 欄＝參數二顏色
+    if(col2) a.push(null, i >= warm2 ? col2[i] : -1);          // 第 11 欄＝價差（幣沒有）、第 12 欄＝參數二顏色
+    if(ma1){ while(a.length < 13) a.push(null); a.push(ma1.v.map(x => x[i]), ma2 ? ma2.v.map(x => x[i]) : null); }   // 第 13／14 欄＝判色均線
     return a; });
-  const lc = raw[raw.length-1][4];
-  R.meta = {ok:true, ladder:intra, vol:true, prec:R.prec, half:Number((lc * TXHALF).toFixed(R.prec)), crypto:true};
+  const lc = raw[raw.length-1][4], man = {};
+  if(ma1) man['1'] = ma1.n; if(ma2) man['2'] = ma2.n;
+  R.meta = {ok:true, ladder:intra, vol:true, prec:R.prec, half:Number((lc * TXHALF).toFixed(R.prec)), crypto:true, ma:man};
 }
 async function txFetchC(){
   const inst = TXS.slice(2), tf = TXTF;      // 摘要＋參數一都靠 15 分；4H 的參數二靠 1H
@@ -3052,8 +3098,10 @@ function txCreate(){
   const bs = ch.addLineSeries({priceScaleId:'bs', color:TXSTC.bs, lineWidth:1, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false});
   ch.priceScale('bs').applyOptions({scaleMargins:{top:0.8, bottom:0.02}});
   if(bs.createPriceLine) bs.createPriceLine({price:0, color:'rgba(143,214,195,0.5)', lineWidth:1, lineStyle:2, axisLabelVisible:false, title:'0'});
+  // 判顏色用的均線：最多 4 條細線（一般均線的畫法：會參與縱軸縮放，離很遠的慢線也看得到；不要的話按「均線」關掉）
+  const ma = TXMAC.map(c => ch.addLineSeries({color:c, lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}));
   const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr};
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txPsw(); txFit(); txHiLo(); txSess(); txUdMarks(); txSrDraw(); }catch(e){} }); } };
@@ -3068,7 +3116,7 @@ function txPsw(){
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; C.sr.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
@@ -3179,7 +3227,7 @@ function txLegend(t){
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(txCol(b))
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
     + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+(m.crypto ? 'OI+'+b[9]+'%' : b[9]) : '') + txUdLeg(b[0])
-    + txWrLeg(R, i) + txKdLeg(R, i) + ((TXBS === '1' && txHasBs(R) && b[11] !== null && b[11] !== undefined) ? ' <span style="color:'+TXSTC.bs+'">價差 '+(b[11] > 0 ? '+' : '')+b[11].toFixed(1)+'</span>' : '');
+    + txMaLeg(R, i) + txWrLeg(R, i) + txKdLeg(R, i) + ((TXBS === '1' && txHasBs(R) && b[11] !== null && b[11] !== undefined) ? ' <span style="color:'+TXSTC.bs+'">價差 '+(b[11] > 0 ? '+' : '')+b[11].toFixed(1)+'</span>' : '');
 }
 function txWrLeg(R, i){
   if(TXWR !== '1') return ''; const st = txStudy(R); if(!st || st.wr[i] === null || st.wr[i] === undefined) return '';
@@ -3320,15 +3368,13 @@ function viewTx(){
     + '<span class="txqw"><input id="txq" class="txq" placeholder="其他幣" autocomplete="off" onkeydown="txKey(event)"><span class="wb" onclick="txGo()">看</span></span>'
     + '</div></div><div class="ctl"><label>週期</label><div class="ci">'
     + txTfs().map(k => `<span class="wb ${TXTF===k?'on':''}" onclick="txSel(null,'${k}')">${TXTFN[k]}</span>`).join('')
-    + ((TXS === 'TX' || isC) && txIntra() ? '<span class="gap"></span>' + [['1','參數一'],['2','參數二']].map(([k, n]) =>
-        `<span class="wb ${TXLAD===k?'on':''}" onclick="txLadSel('${k}')">${n}</span>`).join('') : '')
-    + '</div></div><div class="ctl"><label>疊圖</label><div class="ci">'
+    + '</div></div>' + txParBar() + '<div class="ctl"><label>疊圖</label><div class="ci">'
     + (!isC ? `<span class="wb tg2 ${TXUD==='1'?'on':''}" onclick="txUdSel()">上下線</span>` : '')
     + txTglBar() + '</div></div>';
   if(isC) h += txCSum();
   else if(!p.ok) h += '<div class="empty">'+(p.err || P.err || '沒有資料')+'</div>';
   else {
-    const p2 = TXLAD === '2' && p.c2 !== undefined, pc = p2 ? p.c2 : p.c, pcl = p2 ? p.closed2 : p.closed, plc = p2 ? p.last_change2 : p.last_change;
+    const p2 = TXCOLP === '2' && p.c2 !== undefined, pc = p2 ? p.c2 : p.c, pcl = p2 ? p.closed2 : p.closed, plc = p2 ? p.last_change2 : p.last_change;
     h += '<div class="fpsum">' + (p.live_bar ? '15 分盤中這根 '+txBadge(pc)+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(pcl[1])
                                              : '15 分 現在 '+txBadge(pc))
        + ' <span class="dim">'+(p2 ? '參數二' : '參數一')+'</span>'
@@ -3343,7 +3389,7 @@ function viewTx(){
   else if(TXTF === '60') h += '<div class="sub dim">1H（官方 60 分）顏色：對官方 台指 100%（09-10 後 581 根）、加權 100%（08-01 後 295 根）。</div>';
   else if(TXTF === 'W') h += '<div class="sub dim">週K 官方沒有顏色，不上色。</div>';
   { const Rk = TXDATA[TXS + '|' + TXTF];
-    if(TXLAD === '2' && Rk && Rk.bars && Rk.bars.length && !txHasP2(Rk) && TXTF !== 'W')
+    if(TXCOLP === '2' && Rk && Rk.bars && Rk.bars.length && !txHasP2(Rk) && TXTF !== 'W')
       h += '<div class="sub dim">⚠ 這個週期沒有參數二的顏色（'+((TXTF === '60' || TXTF === '240') ? '官方 60 分只有參數一' : '還沒解出來')+'），K 棒顏色是參數一。</div>'; }
   h += '<div id="txslot"></div>';
   h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
@@ -3365,7 +3411,12 @@ function viewTx(){
     + '<br>・<b>日K</b>：參數一、參數二都破解，台指 28 年、加權 26 年逐根 <b>100%</b>。'
     + '<br>・<b>15 分</b>：台指 參數一 <b>100%</b>（10 月 1336 根）、參數二 99.96%；加權 參數一、參數二都 <b>100%</b>（9~10 月 684 根）。'
     + '<br>・<b>1H（官方 60 分）</b>：台指 <b>100%</b>（09-10 後 581 根）、加權 <b>100%</b>（08-01 後 295 根）；官方 60 分只有參數一。'
-    + '<br>・<b>週K</b>：官方沒有顏色，不上色。　・參數一給空手的人、參數二給有單的人（麥門影片原話）；按「參數一／參數二」階梯和顏色一起切。'
+    + '<br>・<b>週K</b>：官方沒有顏色，不上色。　・參數一給空手的人、參數二給有單的人（麥門影片原話）；「參數」那排 追價氛圍、階梯各自切。'
+    + '<br>・<b>均線</b>（按鈕開關）：這個週期、這個參數判顏色用的那幾條線（由快到慢：白、橘、青、紫；名稱和數值在圖上方那行）：'
+    + '台指 15 分 參數一 WMA34／EMA55／WMA120／WMA241、參數二 WMA55／EMA144／SMA228；1H EMA144／EMA377／WMA987；'
+    + '日K 參數一 SMA9／WMA21／SMA22（另一條是「收盤比 9 天前高」，不是線）、參數二 WMA21／SMA22／WMA89／SMA90。'
+    + '加權 15 分 參數一 EMA55／WMA241、參數二 EMA34／WMA233；1H EMA34／WMA233；日K 各少 1（SMA8／WMA20／SMA21、WMA20／SMA21／WMA89／SMA90）。'
+    + '幣照台指那組（15 分與 1H＝台指 15 分、4H＝台指 1H、日K＝台指日K）。拿這些線重算顏色跟公式逐根一樣（_chk_ma_lines.py）；灰色暖機的地方不畫。'
     + '<br><b>階梯</b>（只有台指）：當天日盤台指的口數加權均價，參數二＝08:47~13:25、參數一＝09:00~10:45，當天 13:30 起換階（60 分 K 從 15:00 那根）；用 1 分 K（高+低）/2 近似，跟官方差中位 0.4 點（10-29 訂閱後拿官方值驗證）；畫值 ±9 點的雙線；跟麥門一樣一次只畫一個，按鈕切換（預設參數一）。'
     + '<br><b>上下線</b>（按鈕開關）：麥門的「到價推撥」上線／下線是帳號自己設的警示價（不是公式）；這裡是從麥門文章圖讀出來的歷史值，'
     + '每條只畫「這次讀到 → 下次改值」那一段，段首標時間；時間＝那張圖的上傳時間，讀數 ±3 點；不參與縱軸縮放（太遠的線會在畫面外）。'

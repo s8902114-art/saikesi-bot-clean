@@ -656,6 +656,53 @@ def colors60_v3(df, inst="TX"):
     return out
 
 
+# ★判顏色用的均線（2026-10-30 用戶：「各時區判斷彩色k的均線 一樣要有開關」）：每個（商品, 週期, 參數）判顏色用的那幾條，
+#   寫法跟上面各公式一樣（E＝EMA、S＝SMA、W＝WMA 前 n−1 根 NaN、WX＝WMA 不足 n 根 expanding）；順序＝快 → 慢（前端照順序上色）。
+#   日K 參數一另有一條「收盤 > 9 天前收盤」不是線，不畫。週K 沒有顏色＝沒有線。
+#   ★公式改了這張表要跟著改：`python ../_chk_ma_lines.py` 拿這些線重算顏色，跟各公式逐根比，不一樣就 FAIL。
+MA_SPEC = {
+    ("TX", "15", 1): [("W", 34), ("E", 55), ("W", 120), ("W", 241)],       # colors15_v3 台指
+    ("TSE", "15", 1): [("E", 55), ("WX", 241)],                            # colors15_v3 加權
+    ("TX", "15", 2): [("W", 55), ("E", 144), ("S", 228)],                   # colors15_p2 台指
+    ("TSE", "15", 2): [("E", 34), ("WX", 233)],                            # colors15_p2 加權
+    ("TX", "60", 1): [("E", 144), ("E", 377), ("WX", 987)],                 # colors60_v3 台指
+    ("TSE", "60", 1): [("E", 34), ("WX", 233)],                            # colors60_v3 加權
+    ("TX", "D", 1): [("S", DAILY_P["TX"][1]), ("W", DAILY_P["TX"][2]), ("S", DAILY_P["TX"][0])],      # colors_daily
+    ("TSE", "D", 1): [("S", DAILY_P["TSE"][1]), ("W", DAILY_P["TSE"][2]), ("S", DAILY_P["TSE"][0])],
+    ("TX", "D", 2): [("W", DAILY_P2["TX"][1]), ("S", DAILY_P2["TX"][0]), ("W", 89), ("S", 90)],      # colors_daily_p2
+    ("TSE", "D", 2): [("W", DAILY_P2["TSE"][1]), ("S", DAILY_P2["TSE"][0]), ("W", 89), ("S", 90)],
+}
+_MA_KIND = {"E": "EMA", "S": "SMA", "W": "WMA", "WX": "WMA"}
+
+
+def ma_names(inst, tf):
+    """{"1": [名稱…], "2": [名稱…]}（沒有那組就不帶）。"""
+    out = {}
+    for p in (1, 2):
+        sp = MA_SPEC.get((inst, tf, p))
+        if sp:
+            out[str(p)] = [f"{_MA_KIND[k]}{n}" for k, n in sp]
+    return out
+
+
+def ma_lines(df, inst, tf, p):
+    """回傳 [值陣列…]（順序同 MA_SPEC）；沒有那組回 None。"""
+    sp = MA_SPEC.get((inst, tf, p))
+    if not sp:
+        return None
+    c = df.c; out = []
+    for k, n in sp:
+        if k == "E":
+            out.append(c.ewm(span=n, adjust=False).mean().values)
+        elif k == "S":
+            out.append(c.rolling(n).mean().values)
+        elif k == "W":
+            out.append(_wma(c, n).values)
+        else:
+            out.append(np.asarray(_wma_exp(c, n), float))
+    return out
+
+
 def _with_hist60(inst, d60):
     """★60 分公式要 SMA600（台指約 32 個交易日的 60 分K），伺服器 1 分K 只留 75 天 → 窗前段都是暖機，狀態機還會一路錯到窗尾
     （_mm_data/cmp60_window.py：75 天窗上色區跟全史不同 平均 5.6%、最大 16.3%，對官方 95.2% vs 全史 97.6%）。
@@ -714,11 +761,14 @@ def _lad(P, index):
     return [None if x != x else round(float(x), 1) for x in v]
 
 
-def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, col2=None):
-    """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色P1(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無), 0, 期現價差, 顏色P2]。
-    第 10 欄留給幣圖的 CME 標記（台指恆 0）；沒有價差給 None；沒有參數二顏色就不帶第 12 欄。"""
+def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, col2=None, ma=None):
+    """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色P1(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無), 0, 期現價差, 顏色P2, 均線P1, 均線P2]。
+    第 10 欄留給幣圖的 CME 標記（台指恆 0）；沒有價差給 None；沒有參數二顏色就不帶第 12 欄。
+    ma＝(參數一那組線, 參數二那組線)（ma_lines 的輸出，沒有給 None）：有給就補滿到第 12 欄，第 13／14 欄＝[這根每條線的值]（沒有那組＝None）。"""
     n = len(df); i0 = max(0, n - n_show); nd = 0 if inst == "TX" else 2
     o, h, l, c, v = (df[k].values for k in ("o", "h", "l", "c", "v"))
+    nm = 1 if inst == "TX" else 2
+    mr = [None if L is None else [[None if x != x else round(float(x), nm) for x in a[i0:]] for a in L] for L in (ma or ())]
     out = []
     for i in range(i0, n):
         t = df.index[i]
@@ -729,6 +779,13 @@ def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, co
             r += [0, bs[i] if bs else None]
         if col2 is not None:
             r.append(int(col2[i]) if i >= WARM and col2[i] == col2[i] else -1)
+        if mr:
+            if len(r) == 10:
+                r += [0, None]
+            if len(r) == 12:
+                r.append(None)
+            for L in mr:
+                r.append(None if L is None else [a[i - i0] for a in L])
         out.append(r)
     return out
 
@@ -774,11 +831,12 @@ def compute_inst(inst):
             tse_c = None
     col2 = colors15_p2(df, inst)                           # ★參數二（台指 99.93%；加權還沒定稿＝None）
     charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"],
-                         bs=basis_for(df, 15, tse_c) if inst == "TX" else None, col2=col2)
+                         bs=basis_for(df, 15, tse_c) if inst == "TX" else None, col2=col2,
+                         ma=(ma_lines(df, inst, "15", 1), ma_lines(df, inst, "15", 2)))
     d60 = _with_hist60(inst, to60(mk, inst))           # ★1 分K 窗之前接存檔的 60 分K（SMA600 要夠長）
     c60 = colors60_v3(d60, inst)                       # ★2026-10-30 第三輪公式（台指 97.8%／加權 96.8%，舊 GBM 40.4%／85.2%）
     charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"],
-                         bs=basis_for(d60, 60, tse_c) if inst == "TX" else None)
+                         bs=basis_for(d60, 60, tse_c) if inst == "TX" else None, ma=(ma_lines(d60, inst, "60", 1), None))
     update_daily(inst, m)
     dd = daily_df(inst)
     if len(dd) >= 3:
@@ -787,7 +845,8 @@ def compute_inst(inst):
         if inst == "TX":
             try: bsD = basis_for(dd, None, daily_df("TSE").c)
             except Exception: bsD = None
-        charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"], bs=bsD, col2=colors_daily_p2(dd, inst))   # ★日K 參數二（官方 100%）
+        charts["D"] = _rows(dd, cD, inst, n_show=SHOW["D"], bs=bsD, col2=colors_daily_p2(dd, inst),   # ★日K 參數二（官方 100%）
+                            ma=(ma_lines(dd, inst, "D", 1), ma_lines(dd, inst, "D", 2)))
         wk = to_week(dd)
         charts["W"] = _rows(wk, np.full(len(wk), -1), inst, n_show=SHOW["W"])   # ★官方沒有週K顏色（10-30 起不上色；舊版是 15 分 GBM 硬套）
     lt = m.index[-1]
@@ -846,7 +905,8 @@ def dash_chart(inst, tf, since=None):
         if not rows:
             return {"ok": False, "err": _state.get("err") or "尚未算完第一次"}
         meta = {"ok": True, "s": inst, "tf": tf, "ladder": inst == "TX" and tf in ("15", "60"),
-                "vol": inst == "TX", "prec": 0 if inst == "TX" else 2, "half": LADDER_HALF, "n": len(rows)}
+                "vol": inst == "TX", "prec": 0 if inst == "TX" else 2, "half": LADDER_HALF, "n": len(rows),
+                "ma": ma_names(inst, tf)}
         if since is not None:
             ts = [r[0] for r in rows]
             i = bisect.bisect_left(ts, since)
