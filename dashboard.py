@@ -809,10 +809,14 @@ def _rec(G):
             d = str(x.get("fetched") or "")[:10]
             days[d] = days.get(d, 0) + 1
         chg = [[b.get("fetched"), a.get("light"), b.get("light"), b.get("bar")] for a, b in zip(L, L[1:]) if a.get("light") != b.get("light")]
+        pb = {}
+        for x in L:
+            if x.get("bar"):
+                pb[str(x["bar"])[:16]] = x.get("light")
         err = st.get("last_err")
         return {"ok": True, "enabled": bool(st.get("enabled")), "has_token": bool(st.get("has_token")), "has_lib": bool(st.get("has_lib")),
                 "n": len(L), "n_today": days.get(today, 0), "first": L[0].get("fetched") if L else None, "last": L[-1] if L else None,
-                "days": sorted(days.items())[-7:], "changes": chg[-8:],
+                "days": sorted(days.items())[-7:], "changes": chg[-8:], "per_bar": sorted(pb.items())[-400:],
                 "err": (str(err)[:160] if err else None), "err_at": st.get("err_at"), "ok_at": st.get("last_ok")}
     except Exception as e:
         return {"ok": False, "err": type(e).__name__}
@@ -3126,6 +3130,7 @@ function txHiLo(){
   const mk = [{time:bars[ih][0], position:'aboveBar', color:'#e6edf7', shape:'arrowDown', text:'高 '+txNum(bars[ih][2], m.prec)},
               {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}].concat(txPtMarks(R));
   if(TXDV === '1'){ const mx = txMx(R, C.key); if(mx) for(const [i, sd] of mx.div) if(bars[i]) mk.push({time:bars[i][0], position:(sd > 0 ? 'aboveBar' : 'belowBar'), color:TXSTC.div, shape:'circle', text:'背離'}); }
+  for(const x of txLightMarks(R, C.key, (D.tx || {}).rec)) mk.push(x);     // ★官方燈號（加權 1H）
   mk.sort((a, b) => a.time - b.time);
   C.cs.setMarkers(mk);
   const st = [];
@@ -3263,6 +3268,27 @@ function txCoins(){        // 幣的快捷鈕：BTC/ETH/SOL＋持倉的幣＋正
 }
 // ★麥門官方值紀錄器（2026-10-30）：加權 1H 燈號官方只有最新那根有值 → bot 加權盤中每 5 分鐘記一筆；這裡顯示記了多少、最新是什麼、有沒有出錯
 const TXLIGHT = {green:'綠', red:'紅', yellow:'黃', gray:'灰', grey:'灰'};
+const TXLIGHTC = {green:'#22c55e', red:'#ef4444', yellow:'#eab308', gray:'#8b97ab', grey:'#8b97ab'};
+// 摘要上面那一行：現在的官方燈號（加權 1H 最新那根），台指頁也顯示
+function txLightRow(r){
+  if(!r || !r.ok || !r.last) return '';
+  const L = r.last, c = TXLIGHTC[L.light] || '#8b97ab', nm = txEscH(TXLIGHT[L.light] || L.light || '—');
+  return '<div class="sub">官方燈號 <span style="color:'+c+';font-size:18px;line-height:1;vertical-align:-2px">●</span> <b style="color:'+c+'">'+nm+'</b>'
+    + ' <span class="dim">加權 1H '+txEscH(String(L.bar || '').slice(5, 16))+' 那根・'+txEscH(String(L.fetched || '').slice(5, 16))+' 更新</span></div>';
+}
+// 加權 1H 圖：每根 K 底下一個圓點＝那根最後記到的燈號（per_bar 的時間是台北時間字串；圖表時間＝台北時間當 UTC 的秒數）
+function txLightMarks(R, key, rec){
+  if(key !== 'TSE|60' || !R || !R.bars || !rec || !rec.per_bar || !rec.per_bar.length) return [];
+  const have = {}; for(const b of R.bars) have[b[0]] = 1;
+  const out = [];
+  for(const [t, v] of rec.per_bar){
+    const a = String(t).split(' '), d = (a[0] || '').split('-'), hm = (a[1] || '').split(':');
+    if(d.length < 3 || hm.length < 2) continue;
+    const sec = Date.UTC(+d[0], +d[1] - 1, +d[2], +hm[0], +hm[1]) / 1000; if(!(sec === sec)) continue;
+    if(have[sec]) out.push({time:sec, position:'belowBar', color:TXLIGHTC[v] || '#8b97ab', shape:'circle', text:''});
+  }
+  return out;
+}
 function txEscH(x){ return String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function txRecHTML(r){
   let h = '<div class="sech">官方燈號紀錄（加權 1H）</div>';
@@ -3282,6 +3308,7 @@ function viewTx(){
   const P = D.tx || {}, isC = txIsC(TXS);
   const p = isC ? {} : (P[TXS] || {});
   let h = '<div class="card"><h2>麥門指標<span>'+(isC ? 'OKX 永續・手機直接抓 K 線' : '期交所 1 分 K・'+(P.age != null ? P.age+' 秒前算' : ''))+'</span></h2>';
+  if(!isC) h += txLightRow(P.rec);
   if(!isC && (P.stale || P.fetch_err)) h += '<div class="warn">⚠ '+(P.stale ? '盤中超過 5 分鐘沒抓到新資料，下面是舊的。' : '')+(P.fetch_err || '')+'</div>';
   // ★控制列分三排、每排一個小標籤（2026-10-15 改版：原本 18 顆一模一樣的按鈕擠成一團，看不出哪些是選商品、哪些是開關）
   //   商品／週期／階梯參數＝「選一個」→ 反白；上下線／威廉／支撐壓力／型態＝「開或關」→ 小圓點（.tg2）
