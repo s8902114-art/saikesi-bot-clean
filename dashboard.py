@@ -2474,18 +2474,18 @@ function txSrPick(h, l, c, a, act, ze, n){
   return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0', kdk:'#5ec4f2', kdd:'#f0a43a', bs:'#8fd6c3', gap:'rgba(242,229,191,0.30)', div:'#f59e0b'};   // KD 顏色照麥門軟體（K 淺藍、D 橘）     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
-let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1';
+let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
   if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d; 
-  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
+  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
 function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
-  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else TXPT = fl(TXPT);
-  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); }catch(e){}
+  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else TXPT = fl(TXPT);
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ return [['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]].concat(txIsC(TXS) || TXS === 'TSE' ? [] : [['bs', '期現價差', TXBS]])
+function txTglBar(){ return [['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]].concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -3130,7 +3130,7 @@ function txHiLo(){
   const mk = [{time:bars[ih][0], position:'aboveBar', color:'#e6edf7', shape:'arrowDown', text:'高 '+txNum(bars[ih][2], m.prec)},
               {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}].concat(txPtMarks(R));
   if(TXDV === '1'){ const mx = txMx(R, C.key); if(mx) for(const [i, sd] of mx.div) if(bars[i]) mk.push({time:bars[i][0], position:(sd > 0 ? 'aboveBar' : 'belowBar'), color:TXSTC.div, shape:'circle', text:'背離'}); }
-  for(const x of txLightMarks(R, C.key, (D.tx || {}).rec)) mk.push(x);     // ★官方燈號（加權 1H）
+  if(TXLT === '1') for(const x of txLightMarks(R, C.key, (D.tx || {}).rec)) mk.push(x);     // ★官方燈號（加權 1H；開關預設關）
   mk.sort((a, b) => a.time - b.time);
   C.cs.setMarkers(mk);
   const st = [];
