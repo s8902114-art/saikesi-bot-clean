@@ -43,7 +43,18 @@ try:
         _UPDOWN = {k: v for k, v in json.load(_fh).items() if k in ("TX", "TSE")}
 except Exception:
     _UPDOWN = {}
-KEEP_DAYS = {"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
+# ★麥門 TradingView 指標「SM Steps TX」的官方測穿記號（2026-11-25 用戶：「先把已經有的畫到我盤面」）：
+#   從用戶帳號的圖上讀出來的歷史記號（_mm_data/sms/，回放撈到 2018-12），不是公式算的、也不是即時；之後的新記號要重新讀圖或接快訊。
+#   每筆＝[K 棒起點（台北時間當 UTC 的秒，同 _ts）, 方向（1＝藍，畫在 K 下方／-1＝金，畫在 K 上方）, 是否轉灰（失敗）]
+SMS_FILE = os.path.join(_HERE, "mmtx_sms.json")
+try:
+    with open(SMS_FILE, encoding="utf-8") as _fh:
+        _SMS_RAW = json.load(_fh)
+    _SMS = sorted([int(x[0]), int(x[1]), int(x[2])] for x in _SMS_RAW.get("marks", []))
+    _SMS_INFO = {"read_at": _SMS_RAW.get("read_at"), "last": _SMS_RAW.get("last"), "n": len(_SMS)}
+except Exception:
+    _SMS = []; _SMS_INFO = {}
+KEEP_DAYS ={"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
 WARM = 280                     # 台指 15 分實測：75 天窗跟全史比，前 ~280 根之後 100% 一致 → 之前不上色
 SHOW = {"15": 1500, "60": 1000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根
 INST_NAME = {"TX": "台指", "TSE": "加權"}
@@ -907,6 +918,10 @@ def dash_chart(inst, tf, since=None):
         meta = {"ok": True, "s": inst, "tf": tf, "ladder": inst == "TX" and tf in ("15", "60"),
                 "vol": inst == "TX", "prec": 0 if inst == "TX" else 2, "half": LADDER_HALF, "n": len(rows),
                 "ma": ma_names(inst, tf)}
+        if inst == "TX" and tf == "15" and _SMS:          # 官方測穿記號：只帶圖表範圍內的（幾個到幾十個）
+            t0 = rows[0][0]
+            meta["sms"] = [m for m in _SMS[bisect.bisect_left(_SMS, [t0]):]]
+            meta["sms_info"] = _SMS_INFO
         if since is not None:
             ts = [r[0] for r in rows]
             i = bisect.bisect_left(ts, since)

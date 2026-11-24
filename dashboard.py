@@ -2493,18 +2493,18 @@ function txSrPick(h, l, c, a, act, ze, n){
   return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0', kdk:'#5ec4f2', kdd:'#f0a43a', bs:'#8fd6c3', gap:'rgba(242,229,191,0.30)', div:'#f59e0b'};   // KD 顏色照麥門軟體（K 淺藍、D 橘）     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
-let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
+let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1', TXSM = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
   if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d;
-  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
+  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v], ['txsm', v => TXSM = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
 function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
-  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else TXPT = fl(TXPT);
-  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); }catch(e){}
+  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else TXPT = fl(TXPT);
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
+function txTglBar(){ return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat((TXS === 'TX' && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -2530,6 +2530,23 @@ function txStApply(){
     C.ch.priceScale('bs').applyOptions({scaleMargins:L.bs}); }
   txMaApply();
   txSrDraw();
+}
+// ★麥門 TradingView 指標「SM Steps TX」的官方測穿記號（用戶 11-25：「先把已經有的畫到我盤面」）：伺服器在台指 15 分圖的 meta.sms 帶
+//   [[K 棒時間, 方向 1/-1, 是否轉灰]…]（從他的圖上讀出來的歷史記號，不是算的、也不是即時）。藍＝上行畫在 K 下方、金＝下行畫在 K 上方、灰＝失敗。
+const TXSMC = {up:'#2962FF', dn:'#DDB33D', fail:'#9E9E9E'};
+function txSmsMarks(R, key){
+  if(key !== 'TX|15' || !R || !R.bars || !R.meta || !R.meta.sms || !R.meta.sms.length) return [];
+  const have = {}; for(const b of R.bars) have[b[0]] = 1;
+  const out = [];
+  for(const m of R.meta.sms) if(have[m[0]]) out.push({time:m[0], position:(m[1] > 0 ? 'belowBar' : 'aboveBar'), color:(m[2] ? TXSMC.fail : (m[1] > 0 ? TXSMC.up : TXSMC.dn)), shape:'square', text:''});
+  return out;
+}
+function txSmsNote(){
+  const R = TXDATA['TX|15'], inf = R && R.meta && R.meta.sms_info;
+  if(TXS !== 'TX' || TXTF !== '15' || TXSM !== '1' || !inf) return '';
+  const n = (R.meta.sms || []).length;
+  return '<div class="sub dim">測穿記號＝麥門 TradingView 指標的官方方塊（<span style="color:'+TXSMC.up+'">■</span> 上行 <span style="color:'+TXSMC.dn+'">■</span> 下行 <span style="color:'+TXSMC.fail+'">■</span> 失敗），'
+    + '從他的圖上讀到 '+txEscH(inf.last || '')+' 為止（'+txEscH(inf.read_at || '')+' 讀的），這張圖範圍內有 '+n+' 個；不是即時，之後的新記號要重新讀才會出現。</div>';
 }
 // ★判顏色用的均線（用戶 10-30：「各時區判斷彩色k的均線 一樣要有開關」）：K 棒第 13 欄＝參數一那組、第 14 欄＝參數二那組（[快…慢]），
 //   名稱在 meta.ma['1'／'2']（台指／加權＝伺服器 mmtx.MA_SPEC，_chk_ma_lines.py 拿這些線重算顏色＝跟公式逐根相同；幣＝txCMa）。
@@ -3184,6 +3201,7 @@ function txHiLo(){
               {time:bars[il][0], position:'belowBar', color:'#e6edf7', shape:'arrowUp', text:'低 '+txNum(bars[il][3], m.prec)}].concat(txPtMarks(R));
   if(TXDV === '1'){ const mx = txMx(R, C.key); if(mx) for(const [i, sd] of mx.div) if(bars[i]) mk.push({time:bars[i][0], position:(sd > 0 ? 'aboveBar' : 'belowBar'), color:TXSTC.div, shape:'circle', text:'背離'}); }
   if(TXLT === '1') for(const x of txLightMarks(R, C.key, (D.tx || {}).rec)) mk.push(x);     // ★官方燈號（加權 1H；開關預設關）
+  if(TXSM === '1') for(const x of txSmsMarks(R, C.key)) mk.push(x);                           // ★麥門 TV 指標的官方測穿記號（台指 15 分）
   mk.sort((a, b) => a.time - b.time);
   C.cs.setMarkers(mk);
   const st = [];
@@ -3395,6 +3413,7 @@ function viewTx(){
   else if(TXTF === 'W') h += '<div class="sub dim">週K 官方沒有顏色，不上色。</div>';
   h += txNoP2();
   h += '<div id="txslot"></div>';
+  h += txSmsNote();
   h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
   if(!isC && TXUD === '1'){
     const ob = txUdObs().slice().reverse();
@@ -3420,6 +3439,7 @@ function viewTx(){
     + '日K 參數一 SMA9／WMA21／SMA22（另一條是「收盤比 9 天前高」，不是線）、參數二 WMA21／SMA22／WMA89／SMA90。'
     + '加權 15 分 參數一 EMA55／WMA241、參數二 EMA34／WMA233；1H EMA34／WMA233；日K 各少 1（SMA8／WMA20／SMA21、WMA20／SMA21／WMA89／SMA90）。'
     + '幣照台指那組（15 分與 1H＝台指 15 分、4H＝台指 1H、日K＝台指日K）。拿這些線重算顏色跟公式逐根一樣（_chk_ma_lines.py）；灰色暖機的地方不畫。'
+    + '<br>・<b>測穿</b>（按鈕開關，只有台指 15 分）：麥門 2026-11 在 TradingView 上架的指標「Smart Money Steps TX」的官方記號，直接從他的圖上讀出來標在這裡（2018-12 起 542 個）；藍方塊＝上行（在 K 下方）、金方塊＝下行（在 K 上方）、灰＝之後幾根力道沒延續（失敗）。這不是我算的、也不是即時的，他平均三天才出一個；規則本身還沒破出來。'
     + '<br><b>階梯</b>（只有台指）：當天日盤台指的口數加權均價，參數二＝08:47~13:25、參數一＝09:00~10:45，當天 13:30 起換階（60 分 K 從 15:00 那根）；用 1 分 K（高+低）/2 近似，跟官方差中位 0.4 點（10-29 訂閱後拿官方值驗證）；畫值 ±9 點的雙線；跟麥門一樣一次只畫一個，按鈕切換（預設參數一）。'
     + '<br><b>上下線</b>（按鈕開關）：麥門的「到價推撥」上線／下線是帳號自己設的警示價（不是公式）；這裡是從麥門文章圖讀出來的歷史值，'
     + '每條只畫「這次讀到 → 下次改值」那一段，段首標時間；時間＝那張圖的上傳時間，讀數 ±3 點；不參與縱軸縮放（太遠的線會在畫面外）。'
