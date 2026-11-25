@@ -2573,7 +2573,9 @@ function txSmsNote(){
   let zh = '';
   if(zs && zs.length) zh = '<div class="sub dim">測穿版階梯帶（兩條虛線＝上緣、下緣）是照他的公式算的：中心＝日盤 08:47~13:25 的成交均價，寬度＝前 11 個交易日震幅平均的 6.14%。'
     + '<span style="color:'+TXSMZC.up+'">綠</span>＝整組在現價下方（支撐）、<span style="color:'+TXSMZC.dn+'">紫</span>＝在現價上方（壓力），只有最近三組會變色。'
-    + '震幅突然擴張、而且是往同一邊走出去的時候（約 6% 的日子），寬度再放大 1.36 倍，這條也照他的算。盤面的日K 跟他的有一點出入，貼著門檻的日子可能跟他不同；結算日當天那一組會差一個換月價差。</div>';
+    + '震幅突然擴張、而且是往同一邊走出去的時候（約 6% 的日子），寬度再放大 1.36 倍，這條也照他的算。'
+    + (R.meta.smz_tv && R.meta.smz_tv.last ? '到 '+txEscH(String(R.meta.smz_tv.last).slice(4, 6)+'-'+String(R.meta.smz_tv.last).slice(6, 8))+' 為止的線直接用他 TradingView 圖上的數值（'+txEscH(R.meta.smz_tv.read_at || '')+' 讀的）；之後的照同一條公式、用期交所的日K 算。' : '')
+    + 'TradingView 的日K 跟期交所的有出入（收盤是結算價、有些天高點多算），所以新算的線可能跟他差一點，要重新讀他的圖才會完全對上；貼著門檻的日子、結算日那一組差得比較多。</div>';
   if(R.meta.smg && R.meta.smg.length) zh += '<div class="sub dim">淺黃框＝這支指標自己的缺口框（跟「缺口」按鈕那套不同）：只看日盤、夜盤開盤跳出來的洞，要大於 0.65 個階梯寬才畫，同時最多留最近 5 個，影線補滿就消失。</div>';
   if(!inf) return zh;
   const n = (R.meta.sms || []).length;

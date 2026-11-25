@@ -55,6 +55,18 @@ try:
     _SMS_INFO = {"read_at": _SMS_RAW.get("read_at"), "last": _SMS_RAW.get("last"), "n": len(_SMS)}
 except Exception:
     _SMS = []; _SMS_INFO = {}
+# ★測穿版階梯帶要跟 TradingView 圖上的一樣，輸入就得用 TradingView 的數值（用戶 2026-11-26：「你要抓TV指標就得用TV上的數值」）：
+#   TV 的台指日K 跟期交所的不一樣（收盤是結算價；2026 年有 21 天高點混進前一個日盤的高，規律找不出來，_mm_data/sms/dk1.py、dk2.py）。
+#   所以從用戶的 TV 圖讀下來：lines＝他圖上每天的階梯上下緣（直接用）、daily＝TV 日K 的高低收（算之後幾天的寬度用）。之後的日子沒有 TV 的值 → 用期交所日K 照公式算。
+SMZ_TV_FILE = os.path.join(_HERE, "mmtx_smz_tv.json")
+try:
+    with open(SMZ_TV_FILE, encoding="utf-8") as _fh:
+        _SMZ_TV_RAW = json.load(_fh)
+    _SMZ_TV = {"read_at": _SMZ_TV_RAW.get("read_at"),
+               "lines": {str(x[0]): (float(x[1]), float(x[2])) for x in _SMZ_TV_RAW.get("lines", [])},
+               "daily": {str(x[0]): (float(x[1]), float(x[2]), float(x[3])) for x in _SMZ_TV_RAW.get("daily", [])}}
+except Exception:
+    _SMZ_TV = {"read_at": None, "lines": {}, "daily": {}}
 KEEP_DAYS ={"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
 WARM = 280                     # 台指 15 分實測：75 天窗跟全史比，前 ~280 根之後 100% 一致 → 之前不上色
 SHOW = {"15": 1500, "60": 1000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根
@@ -374,6 +386,12 @@ def sms_width(dd):
     放大日（2026-11-25 破解，另開視窗 wfx/RESULT.md；我獨立重寫驗過 wfv.py）：只看前 6 根已收完的日K，由近到遠 1~6，
       A＝(3·TR1+2·TR2+TR3)/6（近三天震幅，越近越重）、B＝(TR4+TR5+TR6)/3、M＝(3·漲跌1+2·漲跌2+漲跌3)/6（漲跌＝收−前收）
       放大＝A ≥ 1.3×B（震幅在擴張）且 |M| ≥ 0.5×A（而且是往同一邊走出去）。兩個都是大於等於；用整數比避開小數誤差。"""
+    if _SMZ_TV["daily"]:                           # 有讀到 TV 日K 的那些天，高低收改用 TV 的（他的指標吃的是這份）
+        dd = dd.copy()
+        for k, (h_, l_, c_) in _SMZ_TV["daily"].items():
+            t_ = pd.Timestamp(k)
+            if t_ in dd.index:
+                dd.loc[t_, ["h", "l", "c"]] = [h_, l_, c_]
     pc = dd.c.shift(1)
     tr = np.maximum(dd.h - dd.l, np.maximum((dd.h - pc).abs(), (dd.l - pc).abs()))
     tr[pc.isna()] = (dd.h - dd.l)[pc.isna()]
@@ -406,6 +424,10 @@ def sms_zone(m, dd):
         wid = sms_width(dd)
         out = []
         for day, c in cen.items():
+            tvl = _SMZ_TV["lines"].get(day.strftime("%Y%m%d"))
+            if tvl:                                 # 他圖上讀得到的那一天：直接用他的上下緣
+                out.append([_ts(day + pd.Timedelta(hours=13, minutes=30)), round(tvl[0], 2), round(tvl[1], 2)])
+                continue
             a = wid.get(day)
             if a is None or a != a or c != c:
                 continue
@@ -1128,6 +1150,8 @@ def dash_chart(inst, tf, since=None):
         if inst == "TX" and tf == "15" and _SMZ.get("TX"):     # 測穿版階梯帶：圖表第一根之前生效的那一組起
             z = _SMZ["TX"]; i = max(0, bisect.bisect_right([x[0] for x in z], rows[0][0]) - 1)
             meta["smz"] = z[i:]
+            _lk = sorted(_SMZ_TV["lines"])
+            meta["smz_tv"] = {"read_at": _SMZ_TV.get("read_at"), "last": _lk[-1] if _lk else None}
         if inst == "TX" and _state.get("vfix"):                 # 逐分量補量的對帳狀態（驗收用）
             meta["vfix"] = _state.get("vfix")
         if inst == "TX" and tf == "15" and _SMG.get("TX"):     # 測穿版缺口框：右端還在圖表範圍內的
