@@ -2501,7 +2501,7 @@ function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
   if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else TXPT = fl(TXPT);
   try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); }catch(e){}
-  if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txHiLo(); txLegend(null); }catch(e){} }
+  if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txSmzApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
 function txTglBar(){ return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat((TXS === 'TX' && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat(txIsC(TXS) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
@@ -2541,11 +2541,41 @@ function txSmsMarks(R, key){
   for(const m of R.meta.sms) if(have[m[0]]) out.push({time:m[0], position:(m[1] > 0 ? 'belowBar' : 'aboveBar'), color:(m[2] ? TXSMC.fail : (m[1] > 0 ? TXSMC.up : TXSMC.dn)), shape:'square', text:''});
   return out;
 }
+// ★測穿版的階梯帶（11-25 他新版把階梯畫出來，用戶：「他的階梯現在會跟著變色 綠色是支撐 紫色是壓力」）：伺服器 meta.smz＝[[生效時間, 下緣, 上緣]…]
+//   （mmtx.sms_zone：中心＝日盤 08:47~13:25 一分K 加權均價、全寬＝0.0614×前 11 個交易日震幅平均；逐日對過他圖上的線）。
+//   顏色照他的：最近三組看「現價」——整組在現價下方＝綠（支撐）、在上方＝紫（壓力）、現價在帶子裡＝原色；更早的一律原色。
+const TXSMZC = {plain:'#9B8FE5', up:'#26A69A', dn:'#B39DDB'};
+function txSmzSeg(bars, zs){
+  const out = [[], []]; if(!zs || !zs.length || !bars || !bars.length) return out;
+  const last = bars[bars.length - 1][4], idx = []; let j = -1;
+  for(const b of bars){ while(j + 1 < zs.length && zs[j + 1][0] <= b[0]) j++; idx.push((j >= 0 && b[0] - zs[j][0] < 6 * 86400) ? j : -1); }   // 超過 6 天沒有新的一組＝資料斷了，不畫
+  const rec = []; for(let i = idx.length - 1; i >= 0 && rec.length < 3; i--) if(idx[i] >= 0 && rec.indexOf(idx[i]) < 0) rec.push(idx[i]);
+  for(let i = 0; i < bars.length; i++){
+    const t = bars[i][0], k = idx[i];
+    if(k < 0){ out[0].push({time:t}); out[1].push({time:t}); continue; }
+    const z = zs[k]; let c = TXSMZC.plain;
+    if(rec.indexOf(k) >= 0) c = last > z[2] ? TXSMZC.up : (last < z[1] ? TXSMZC.dn : TXSMZC.plain);
+    if(i + 1 < bars.length && idx[i + 1] !== k) c = TXGAP;            // 每段最後一點塗透明＝不跟下一段連起來（同階梯線的做法）
+    out[0].push({time:t, value:z[2], color:c}); out[1].push({time:t, value:z[1], color:c});
+  }
+  return out;
+}
+function txSmzApply(){
+  const C = TXCH; if(!C || !C.smz) return; const R = TXDATA[C.key];
+  const on = TXSM === '1' && C.key === 'TX|15' && R && R.bars && R.bars.length && R.meta && R.meta.smz && R.meta.smz.length;
+  const seg = on ? txSmzSeg(R.bars, R.meta.smz) : null;
+  C.smz.forEach((s, j) => s.setData(seg ? seg[j] : []));
+}
 function txSmsNote(){
-  const R = TXDATA['TX|15'], inf = R && R.meta && R.meta.sms_info;
-  if(TXS !== 'TX' || TXTF !== '15' || TXSM !== '1' || !inf) return '';
+  const R = TXDATA['TX|15'], inf = R && R.meta && R.meta.sms_info, zs = R && R.meta && R.meta.smz;
+  if(TXS !== 'TX' || TXTF !== '15' || TXSM !== '1' || (!inf && !(zs && zs.length))) return '';
+  let zh = '';
+  if(zs && zs.length) zh = '<div class="sub dim">測穿版階梯帶（兩條虛線＝上緣、下緣）是照他的公式算的：中心＝日盤 08:47~13:25 的成交均價，寬度＝前 11 個交易日震幅平均的 6.14%。'
+    + '<span style="color:'+TXSMZC.up+'">綠</span>＝整組在現價下方（支撐）、<span style="color:'+TXSMZC.dn+'">紫</span>＝在現價上方（壓力），只有最近三組會變色。'
+    + '約 6% 的日子他會把寬度放大 1.36 倍，那個條件還沒破，那幾天這裡畫得比他窄；結算日當天那一組會差一個換月價差。</div>';
+  if(!inf) return zh;
   const n = (R.meta.sms || []).length;
-  return '<div class="sub dim">測穿記號＝麥門 TradingView 指標的官方方塊（<span style="color:'+TXSMC.up+'">■</span> 上行 <span style="color:'+TXSMC.dn+'">■</span> 下行 <span style="color:'+TXSMC.fail+'">■</span> 失敗），'
+  return zh + '<div class="sub dim">測穿記號＝麥門 TradingView 指標的官方方塊（<span style="color:'+TXSMC.up+'">■</span> 上行 <span style="color:'+TXSMC.dn+'">■</span> 下行 <span style="color:'+TXSMC.fail+'">■</span> 失敗），'
     + '從他的圖上讀到 '+txEscH(inf.last || '')+' 為止（'+txEscH(inf.read_at || '')+' 讀的），這張圖範圍內有 '+n+' 個；不是即時，之後的新記號要重新讀才會出現。</div>';
 }
 // ★判顏色用的均線（用戶 10-30：「各時區判斷彩色k的均線 一樣要有開關」）：K 棒第 13 欄＝參數一那組、第 14 欄＝參數二那組（[快…慢]），
@@ -3122,8 +3152,9 @@ function txCreate(){
   if(bs.createPriceLine) bs.createPriceLine({price:0, color:'rgba(143,214,195,0.5)', lineWidth:1, lineStyle:2, axisLabelVisible:false, title:'0'});
   // 判顏色用的均線：最多 4 條細線（一般均線的畫法：會參與縱軸縮放，離很遠的慢線也看得到；不要的話按「均線」關掉）
   const ma = TXMAC.map(c => ch.addLineSeries({color:c, lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}));
+  const smz = [0, 1].map(() => ch.addLineSeries(Object.assign({color:TXSMZC.plain, lineStyle:2, autoscaleInfoProvider: () => null}, lo)));   // 測穿版階梯帶：上緣、下緣（虛線；不撐開縱軸）
   const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma};
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txPsw(); txFit(); txHiLo(); txSess(); txUdMarks(); txSrDraw(); }catch(e){} }); } };
@@ -3138,14 +3169,14 @@ function txPsw(){
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [], C.smz || [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; C.sr.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  txLadApply(); txUdApply(); txStApply();
+  txLadApply(); txUdApply(); txStApply(); txSmzApply();
   txFit(); txHiLo(); txSess(); txLegend(null);
 }
 function txLadApply(){
@@ -3186,6 +3217,7 @@ function txUpdate(nb){
     }
   }
   txStApply();                // 威廉 %R 每根都可能變（盤中那根）→ 整條重餵；型態／區只在收盤後才會變（txStudy 有快取）
+  txSmzApply();               // 階梯帶的顏色看現價 → 每次整條重餵
   txHiLo(); txSess(); txLegend(null);
 }
 // 畫面範圍內的最高／最低標數值；台指的籌碼異常星畫在量上

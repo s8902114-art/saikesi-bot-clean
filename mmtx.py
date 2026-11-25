@@ -278,6 +278,44 @@ def ladders(m):
     return out
 
 
+SMZ_K = 0.0614          # 全寬＝SMZ_K × 前 11 個交易日 TR 平均
+SMZ_N = 11
+_SMZ = {}               # {"TX": [[生效時間秒, 下緣, 上緣], …]}（compute_inst 每次重算時更新）
+
+
+def sms_zone(m, dd):
+    """麥門 TradingView「SM Steps TX」的階梯帶（2026-11-25 他新版把線畫出來，逐日對過他圖上的精確值，_mm_data/sms/README_1125.md 第十輪）：
+      中心＝當天日盤 1 分K 08:47≤t<13:25 的 Σ((高+低+收)/3×量)/Σ量（＝盤面階梯參數二同一個時段；近 35 天對他的線中位差 0.016 點。
+            更早的歷史他拿不到 1 分K、退回 15 分K 09:00~13:30——那是他的近似，不是另一套規則）；
+      全寬＝0.0614 × 前 11 個交易日（夜盤算隔天）真實波幅的平均，不含當天（他的 11 日加總 94% 的日子是整數、跟這個算法只差他日K 高低收的一兩點）；
+      生效＝當天 13:30 那根起、到下一個交易日 13:30。
+    ★還沒破的：約 6% 的日子他把全寬放大 1.3587 倍（觸發條件未知）→ 那幾天這裡畫得比他窄。
+    回傳 [[生效時間秒, 下緣, 上緣], …]（照時間排）。"""
+    try:
+        if m is None or m.empty or dd is None or len(dd) < SMZ_N + 1:
+            return []
+        mins = m.index.hour * 60 + m.index.minute
+        d = m[(mins >= 527) & (mins < 805)]
+        if d.empty:
+            return []
+        g = d.index.normalize(); px = (d.h + d.l + d.c) / 3
+        cen = (px * d.v).groupby(g).sum() / d.v.groupby(g).sum()
+        pc = dd.c.shift(1)
+        tr = np.maximum(dd.h - dd.l, np.maximum((dd.h - pc).abs(), (dd.l - pc).abs()))
+        tr[pc.isna()] = (dd.h - dd.l)[pc.isna()]
+        adr = tr.rolling(SMZ_N).mean().shift(1)
+        out = []
+        for day, c in cen.items():
+            a = adr.get(day)
+            if a is None or a != a or c != c:
+                continue
+            hw = SMZ_K * float(a) / 2
+            out.append([_ts(day + pd.Timedelta(hours=13, minutes=30)), round(float(c) - hw, 2), round(float(c) + hw, 2)])
+        return out
+    except Exception:
+        return []
+
+
 def stars15(m):
     """籌碼異常星。回傳 {15分K開始: BigVol}（只回 BigVol≥3000 的，前端寫死 ≥3000 才畫星）。
     ★2026-10-29 官方答案卷破到 100% 相等（_mm_data/formula/stars_bigvol/verify.py，held-out 486 根全等、星 11/11）：
@@ -423,22 +461,37 @@ def trade_dates(m, inst):
     return pd.DatetimeIndex(np.where(day, d.values, td))
 
 
+_DAILY_REBUILT = set()
+
+
 def update_daily(inst, m):
-    """用最近 10 天的 1 分 K 重算日K、覆蓋進長期日K存檔（台指從某天 15:00 夜盤開始切，第一根交易日才完整）。"""
+    """用最近的 1 分 K 重算日K、覆蓋進長期日K存檔。
+    ★2026-11-25 修：原本固定從「10 天前 15:00」切，切點落在週六／週日／假日時，切點後第一個交易日（週一）的夜盤（週五 15:00 起）
+      在切點之前 → 那根日K 只剩日盤、高低點少一截，之後也不會再被改回來（_chk_daily_night.py：75 天裡 9 個週一全錯）。
+      日K 顏色只看收盤所以一直沒被發現；測穿版階梯帶的寬度要用日K 高低點。
+      修法：多往前切 5 天，而且「切出來的第一個交易日」可能不完整 → 存檔裡已經有那天就不覆蓋（沒有才寫，寧可不完整也不要缺）。
+      每個行程第一次叫的時候拿整段 1 分K 重算一遍，把存檔裡舊的錯值（1 分K 還留著的那幾十天）修回來。"""
     if m.empty:
         return
-    d0 = pd.Timestamp(m.index[-1].date()) - pd.Timedelta(days=10)
-    x = m[m.index >= (d0 + pd.Timedelta(hours=15) if inst == "TX" else d0)]
+    whole = inst not in _DAILY_REBUILT
+    if whole:
+        x = m; _DAILY_REBUILT.add(inst)
+    else:
+        d0 = pd.Timestamp(m.index[-1].date()) - pd.Timedelta(days=15)
+        x = m[m.index >= (d0 + pd.Timedelta(hours=15) if inst == "TX" else d0)]
     if x.empty:
         return
     dd = _agg(x, trade_dates(x, inst))
     if inst == "TX":
         dd = dd[dd.v > 0]
+        if len(dd) > 1 and dd.index[0].strftime("%Y%m%d") in _daily[inst]:
+            dd = dd.iloc[1:]
     if dd.empty:
         return
     D = _daily[inst]; lo = dd.index[0].strftime("%Y%m%d")
-    for k in [k for k in D if k >= lo]:
-        D.pop(k, None)
+    if not whole:        # 整段重算那次只「覆蓋 1 分K 真的有的日子」，不清別的（1 分K 中間斷過的日子要留著存檔原本的值）；平常才清掉切點之後的（夜盤暫記錯日期的要靠這個消掉）
+        for k in [k for k in D if k >= lo]:
+            D.pop(k, None)
     for t, r in zip(dd.index, dd.itertuples()):
         D[t.strftime("%Y%m%d")] = [float(r.o), float(r.h), float(r.l), float(r.c), float(r.v)]
 
@@ -850,6 +903,8 @@ def compute_inst(inst):
                          bs=basis_for(d60, 60, tse_c) if inst == "TX" else None, ma=(ma_lines(d60, inst, "60", 1), None))
     update_daily(inst, m)
     dd = daily_df(inst)
+    if inst == "TX":
+        _SMZ["TX"] = sms_zone(m, dd)                   # ★麥門 TV「測穿版」的階梯帶（上下緣），只給台指 15 分圖
     if len(dd) >= 3:
         cD = colors_daily(dd, inst)                                                           # ★日K＝破解公式（官方 100%）
         bsD = None
@@ -922,6 +977,9 @@ def dash_chart(inst, tf, since=None):
             t0 = rows[0][0]
             meta["sms"] = [m for m in _SMS[bisect.bisect_left(_SMS, [t0]):]]
             meta["sms_info"] = _SMS_INFO
+        if inst == "TX" and tf == "15" and _SMZ.get("TX"):     # 測穿版階梯帶：圖表第一根之前生效的那一組起
+            z = _SMZ["TX"]; i = max(0, bisect.bisect_right([x[0] for x in z], rows[0][0]) - 1)
+            meta["smz"] = z[i:]
         if since is not None:
             ts = [r[0] for r in rows]
             i = bisect.bisect_left(ts, since)
