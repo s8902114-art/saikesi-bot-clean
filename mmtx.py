@@ -32,6 +32,7 @@ DAILY_FILE = os.path.join(_PERSIST, "mmtx_daily.json.gz")          # 兩個商�
 SEED_FILE = os.path.join(_HERE, "mmtx_seed.json.gz")
 SEED_TSE_FILE = os.path.join(_HERE, "mmtx_tse_seed.json.gz")
 SEED_DAILY_FILE = os.path.join(_HERE, "mmtx_daily_seed.json.gz")
+VFIX_FILE = os.path.join(_PERSIST, "mmtx_vfix.json.gz")           # 台指 1 分K 補量（期交所逐分量在急行情會少算，見 _vfix_reconcile）
 H60_FILE = os.path.join(_PERSIST, "mmtx_60.json.gz")               # 已收完的 60 分 K（比 1 分 K 留得久，給 60 分公式的長均線）
 SEED60_FILE = os.path.join(_HERE, "mmtx_seed60.json.gz")
 MODEL_FILE = os.path.join(_HERE, "mmtx_model.json.gz")
@@ -72,6 +73,9 @@ _daily = {"TX": {}, "TSE": {}}  # "YYYYmmdd"(交易日) -> [o,h,l,c,v]
 _h60 = {"TX": {}, "TSE": {}}    # 已收完的 60 分 K："YYYYmmddHHMM"(台北時間、K 開始) -> [o,h,l,c,v]
 KEEP60_DAYS = 400
 _models = {}
+_vfix = {}                     # 台指補量："YYYYmmddHHMM" -> 這一分鐘補上的口數
+_vq = {}                       # 對帳狀態：{"<合約>|<日期>": {"end": 已對到的最後一分鐘}, "M": {夜盤最近一次報價總量}}
+_last_q = {}                   # fetch_session 順手記的報價：{合約: {"cdate":…, "tot": 總量}}
 STORE = {"TX": _bars, "TSE": _bars_tse}
 FILES = {"TX": BARS_FILE, "TSE": TSE_FILE}
 SEEDS = {"TX": SEED_FILE, "TSE": SEED_TSE_FILE}
@@ -126,6 +130,10 @@ def fetch_session(sid):
     cdate = q.get("CDate")
     fields = d.get("Field") or []
     ticks = d.get("Ticks") or []
+    try:
+        _last_q[sid] = {"cdate": cdate, "tot": float(q.get("CTotalVolume"))}
+    except Exception:
+        _last_q.pop(sid, None)
     if not cdate or not ticks or fields[:6] != ["T", "O", "H", "L", "C", "V"]:
         return {}
     base = dt.datetime.strptime(cdate, "%Y%m%d")
@@ -144,6 +152,66 @@ def fetch_session(sid):
         except Exception:
             continue
     return out
+
+
+def _vfix_reconcile(sid, b):
+    """期交所 MIS 的逐分量在行情快的時候會少算（2026-11-25 日盤：逐分加總 85,002 口、實際 125,359 口，09:00~12:15 每 15 分只有四到七成；
+    平常日與夜盤是對的）→ 用量加權算的東西（階梯中心、籌碼星）在大震日被帶偏（測穿版階梯中心跟 TradingView 差 16~98 點）。
+    報價裡的總量（CTotalVolume）是對的：日盤的總量＝前一個夜盤＋日盤到現在（2026-11-25 實測 220,986＝95,627＋125,359，跟 TV 分毫不差）。
+    做法：每次抓完，算「這盤到現在的實際量 −（逐分加總＋已經補的）」＝還少多少，補到上次對帳之後的那幾分鐘（照各分鐘的量比例分）。
+    價格（開高低收）沒辦法補，仍是期交所給的。任何不合理（總量拿不到、夜盤基準對不上、缺口大到離譜）都不補——寧可少補，不要亂補。"""
+    try:
+        q = _last_q.get(sid)
+        if not q or not b:
+            return
+        keys = sorted(b); tot = q.get("tot")
+        if tot is None or not (tot > 0):
+            return
+        mis = sum(b[k][4] for k in keys)
+        if not (mis > 0):
+            return
+        base = 0.0
+        if sid.endswith("-F"):                      # 日盤：扣掉前一個夜盤的總量
+            prev = [k for k in _bars if k < keys[0]]
+            if not prev:
+                return
+            kl = max(prev)
+            if kl[8:12] >= "0500" and kl[8:12] < "1500":
+                return                              # 前面最近的不是夜盤（資料斷了）→ 不補
+            st = dt.datetime.strptime(kl[:8], "%Y%m%d") - dt.timedelta(days=0 if kl[8:12] >= "1500" else 1)
+            ks_n = [k for k in prev if k >= st.strftime("%Y%m%d") + "1500"]
+            n_sum = sum(_bars[k][4] + _vfix.get(k, 0.0) for k in ks_n)
+            if not (n_sum > 0):
+                return
+            mrec = _vq.get("M") or {}
+            base = mrec.get("tot") if (mrec.get("last") in ks_n and mrec.get("tot")) else n_sum
+            if not (0.9 * n_sum <= base <= 1.1 * n_sum):
+                base = n_sum                        # 記下來的夜盤總量跟逐分加總差太多 → 用逐分加總
+        else:
+            _vq["M"] = {"tot": tot, "last": keys[-1], "cdate": q.get("cdate")}
+        true = tot - base
+        fixed = sum(_vfix.get(k, 0.0) for k in keys)
+        skey = sid + "|" + str(q.get("cdate")); stt = _vq.get(skey)
+        if stt is None:                             # 這一盤第一次對帳。盤已經走了一段（第一次上線、或狀態檔不見）→ 之前少的不知道落在哪幾分鐘，不回頭亂補：
+            stt = {"off": max(true - mis - fixed, 0.0) if len(keys) > 30 else 0.0}      # 記成基準（off），只補之後新少的
+        off = stt.get("off", 0.0)
+        lack = true - mis - fixed - off
+        _state["vfix"] = {"sid": sid, "true": round(true), "mis": round(mis), "fix": round(fixed), "lack": round(lack), "skip": round(off)}
+        nxt = {"end": keys[-2] if len(keys) >= 2 else keys[-1], "pv": {k: b[k][4] for k in keys[-3:]}, "off": off}     # pv＝這次看到的最後幾分鐘的量（下次算「多了多少」用）
+        if true <= 0 or lack < 1 or lack > 3 * mis:
+            _vq[skey] = nxt
+            return
+        span = [k for k in keys if k > stt.get("end", "")] or [keys[-1]]
+        pv = stt.get("pv") or {}
+        w = [max(b[k][4] - pv.get(k, 0.0), 0.0) for k in span]; sw = sum(w)      # 照「上次對帳之後各分鐘多出來的量」分（上次那一分鐘還沒走完）
+        if not (sw > 0):
+            span = [keys[-1]]; w = [1.0]; sw = 1.0
+        for k, wk in zip(span, w):
+            _vfix[k] = _vfix.get(k, 0.0) + lack * wk / sw
+        _vq[skey] = nxt
+        _state["vfix"]["fix"] = round(fixed + lack); _state["vfix"]["lack"] = 0
+    except Exception as e:
+        _state["vfix"] = {"err": type(e).__name__}
 
 
 def _load_json(f):
@@ -183,6 +251,12 @@ def _load_store():
                     _h60[inst].update(d.get(inst) or {})
         except Exception:
             bad.append(os.path.basename(f))
+    try:
+        if os.path.exists(VFIX_FILE):
+            d = _load_json(VFIX_FILE)
+            _vfix.update(d.get("fix") or {}); _vq.update(d.get("q") or {})
+    except Exception:
+        bad.append(os.path.basename(VFIX_FILE))
     for k in [k for k in _h60["TX"] if k[8:12] == "0500"]:     # 3070b52 那版存過夜盤 05:00 的假 K（官方沒有這根）
         _h60["TX"].pop(k, None)
     if bad:
@@ -196,6 +270,11 @@ def _trim():
         cut = (now - dt.timedelta(days=KEEP_DAYS[inst])).strftime("%Y%m%d%H%M")
         for k in [k for k in b if k < cut or k > fut]:
             b.pop(k, None)
+    cutv = (now - dt.timedelta(days=KEEP_DAYS["TX"])).strftime("%Y%m%d%H%M")
+    for k in [k for k in _vfix if k < cutv or k > fut]:
+        _vfix.pop(k, None)
+    for k in [k for k in _vq if "|" in k and k.split("|")[1] < cutv[:8]]:
+        _vq.pop(k, None)
     futd = fut[:8]
     for d in _daily.values():
         for k in [k for k in d if k > futd]:
@@ -213,6 +292,7 @@ def _save_store():
             _dump(STORE[inst], FILES[inst])
         _dump(_daily, DAILY_FILE)
         _dump(_h60, H60_FILE)
+        _dump({"fix": _vfix, "q": _vq}, VFIX_FILE)
         _state["save_err"] = ""
     except Exception as e:
         _state["save_err"] = type(e).__name__
@@ -230,6 +310,7 @@ def update_data():
             bad.append(sid + " 1分K 抓不到")
         elif b:
             _bars.update(b); n["TX"] += len(b)
+            _vfix_reconcile(sid, b)                 # ★逐分量補到跟報價總量一致（見函式說明）
     b = fetch_session("TXF-S")            # 加權指數（期交所的現貨行情，只有日盤）
     if b is None:
         bad.append("加權(TXF-S) 1分K 抓不到")
@@ -248,6 +329,8 @@ def minute_df(bars=None):
         return pd.DataFrame(columns=["o", "h", "l", "c", "v"])
     ks = sorted(b)
     a = np.array([b[k] for k in ks], dtype=float)
+    if b is _bars and _vfix:                       # 台指：加上補的量（四捨五入到口）
+        a[:, 4] += np.round([_vfix.get(k, 0.0) for k in ks])
     idx = pd.to_datetime(ks, format="%Y%m%d%H%M")
     return pd.DataFrame(a, index=idx, columns=["o", "h", "l", "c", "v"])
 
@@ -1045,6 +1128,8 @@ def dash_chart(inst, tf, since=None):
         if inst == "TX" and tf == "15" and _SMZ.get("TX"):     # 測穿版階梯帶：圖表第一根之前生效的那一組起
             z = _SMZ["TX"]; i = max(0, bisect.bisect_right([x[0] for x in z], rows[0][0]) - 1)
             meta["smz"] = z[i:]
+        if inst == "TX" and _state.get("vfix"):                 # 逐分量補量的對帳狀態（驗收用）
+            meta["vfix"] = _state.get("vfix")
         if inst == "TX" and tf == "15" and _SMG.get("TX"):     # 測穿版缺口框：右端還在圖表範圍內的
             meta["smg"] = [g for g in _SMG["TX"] if g[1] >= rows[0][0]]
         if since is not None:
