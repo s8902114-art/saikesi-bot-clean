@@ -2545,6 +2545,7 @@ function txSmsMarks(R, key){
 //   （mmtx.sms_zone：中心＝日盤 08:47~13:25 一分K 加權均價、全寬＝0.0614×前 11 個交易日震幅平均；逐日對過他圖上的線）。
 //   顏色照他的：最近三組看「現價」——整組在現價下方＝綠（支撐）、在上方＝紫（壓力）、現價在帶子裡＝原色；更早的一律原色。
 const TXSMZC = {plain:'#9B8FE5', up:'#26A69A', dn:'#B39DDB'};
+const TXSMGC = {fill:'rgba(255,224,130,0.16)', edge:'rgba(255,224,130,0.45)'};      // 測穿版缺口框：淺黃（他圖上也是淺黃底）
 function txSmzSeg(bars, zs){
   const out = [[], []]; if(!zs || !zs.length || !bars || !bars.length) return out;
   const last = bars[bars.length - 1][4], idx = []; let j = -1;
@@ -2573,6 +2574,7 @@ function txSmsNote(){
   if(zs && zs.length) zh = '<div class="sub dim">測穿版階梯帶（兩條虛線＝上緣、下緣）是照他的公式算的：中心＝日盤 08:47~13:25 的成交均價，寬度＝前 11 個交易日震幅平均的 6.14%。'
     + '<span style="color:'+TXSMZC.up+'">綠</span>＝整組在現價下方（支撐）、<span style="color:'+TXSMZC.dn+'">紫</span>＝在現價上方（壓力），只有最近三組會變色。'
     + '約 6% 的日子他會把寬度放大 1.36 倍，那個條件還沒破，那幾天這裡畫得比他窄；結算日當天那一組會差一個換月價差。</div>';
+  if(R.meta.smg && R.meta.smg.length) zh += '<div class="sub dim">淺黃框＝這支指標自己的缺口框（跟「缺口」按鈕那套不同）：只看日盤、夜盤開盤跳出來的洞，要大於 0.65 個階梯寬才畫，同時最多留最近 5 個，影線補滿就消失。</div>';
   if(!inf) return zh;
   const n = (R.meta.sms || []).length;
   return zh + '<div class="sub dim">測穿記號＝麥門 TradingView 指標的官方方塊（<span style="color:'+TXSMC.up+'">■</span> 上行 <span style="color:'+TXSMC.dn+'">■</span> 下行 <span style="color:'+TXSMC.fail+'">■</span> 失敗），'
@@ -2639,7 +2641,8 @@ function txMx(R, key){
 // 支撐壓力區＝半透明框（從第一個轉折畫到右邊）；型態＝區突破畫虛線框到突破那根、三角形畫頸線（平的）＋另一邊轉折的回歸線。縮放後重畫。
 function txSrDraw(){
   const C = TXCH; if(!C || !C.sr) return; const R = TXDATA[C.key];
-  if(!R || !R.bars || !R.bars.length || (TXSR !== '1' && TXPT !== '1' && TXWR !== '1' && TXKD !== '1' && TXGP !== '1')){ C.sr.innerHTML = ''; return; }
+  const smgOn = TXSM === '1' && C.key === 'TX|15' && R && R.meta && R.meta.smg && R.meta.smg.length;      // 測穿版的缺口框也畫在這層
+  if(!R || !R.bars || !R.bars.length || (TXSR !== '1' && TXPT !== '1' && TXWR !== '1' && TXKD !== '1' && TXGP !== '1' && !smgOn)){ C.sr.innerHTML = ''; return; }
   const st = txStudy(R), ts = C.ch.timeScale(), cs = C.cs;
   if(!st || typeof ts.logicalToCoordinate !== 'function' || typeof cs.priceToCoordinate !== 'function'){ C.sr.innerHTML = ''; return; }
   const W = C.sr.clientWidth || Math.max(0, (C.box.clientWidth || 0) - 60), prec = R.meta ? R.meta.prec : 2;
@@ -2663,6 +2666,19 @@ function txSrDraw(){
       const x0 = Math.max(0, xa), x1 = Math.min(W, xb); if(x1 <= x0) continue;
       g += '<rect x="'+x0+'" y="'+Math.min(y1, y2)+'" width="'+(x1 - x0)+'" height="'+Math.max(2, Math.abs(y2 - y1))+'" fill="'+TXSTC.gap+'" stroke="none"/>';
     } } }
+  // ★測穿版的缺口框（麥門 TradingView 指標畫的淺黃框；規則跟上面「跳空輔助」不同：只認換盤缺口、> 0.65 個階梯寬、最多追 5 個、影線補滿就消失、邊不縮）
+  //   伺服器 meta.smg＝[[左端秒, 右端秒, 下緣, 上緣, 還在追]…]（mmtx.sms_gaps，對過他圖上的框）。跟「測穿」同一個開關。
+  if(smgOn){ const bt = R.bars, n = bt.length;
+    for(const gb of R.meta.smg){
+      let ia = 0, ib = -1;
+      if(gb[0] > bt[0][0]){ let lo = 0, hi = n - 1; while(lo < hi){ const md = (lo + hi) >> 1; if(bt[md][0] < gb[0]) lo = md + 1; else hi = md; } ia = lo; }
+      { let lo = 0, hi = n - 1; while(lo < hi){ const md = (lo + hi + 1) >> 1; if(bt[md][0] <= gb[1]) lo = md; else hi = md - 1; } ib = bt[lo][0] <= gb[1] ? lo : -1; }
+      if(ib < 0 || ib < ia) continue;
+      const xa = X(ia), xb = X(ib), y1 = Y(gb[3]), y2 = Y(gb[2]);
+      if(bad(xa) || bad(xb) || bad(y1) || bad(y2) || xb < 0 || xa > W) continue;
+      const x0 = Math.max(0, xa), x1 = Math.min(W, Math.max(xb, xa + 3)); if(x1 <= x0) continue;
+      g += '<rect x="'+x0+'" y="'+Math.min(y1, y2)+'" width="'+(x1 - x0)+'" height="'+Math.max(2, Math.abs(y2 - y1))+'" fill="'+TXSMGC.fill+'" stroke="'+TXSMGC.edge+'" stroke-width="1"/>';
+    } }
   // 支撐壓力（第六版，挑哪些區見 txSrPick）：每一段都畫成判圖那種帶狀（帶狀＋上下緣＋轉折點），顏色＝那一段的角色（壓力紅、支撐綠），不寫字；
   //   轉折點顏色＝區原本的角色。
   if(TXSR === '1') for(const z of (st.life || [])){

@@ -316,6 +316,53 @@ def sms_zone(m, dd):
         return []
 
 
+SMG_MIN = 0.65          # 缺口 > 0.65 個階梯全寬才追（＝0.04×日均震幅；八年 3,533/3,537）
+SMG_KEEP = 5            # 同時最多追 5 個還沒補的；第 6 個進來把最舊的擠出去（框留著、不再延伸）
+SMG_NEAR = 8.2          # 框右端：收盤在缺口裡，或離最近的缺口邊 ≤ 8.2 個全寬時延伸到這根
+_SMG = {}               # {"TX": [[左端時間秒, 右端時間秒, 下緣, 上緣, 還在追=1/被擠出=0], …]}
+
+
+def sms_gaps(df, zones):
+    """麥門 TradingView「SM Steps TX」畫的淺黃缺口框（跟神乎期技的「跳空輔助」是兩套規則，那套在前端 mxGaps，沒動）。
+    規則（_mm_data/sms/README_1125.md 第十六、十八輪；用 TV 的 K 棒重算，對 2026-11-25 圖上 3 個框的左右端與上下緣完全相同，gb1.py）：
+      只認換盤缺口（日盤 08:45、夜盤 15:00 第一根跟前一根之間，高低不重疊）；缺口邊固定不縮；
+      大小 > SMG_MIN × 當時那組階梯全寬才追；同時最多追 SMG_KEEP 個；影線碰到遠邊＝補滿，框刪掉；
+      框左端＝缺口前一根，右端＝最後一根「收盤離缺口夠近」的 K。
+    ★盤面的階梯寬度在約 6% 的放大日比他窄 → 那幾天的門檻也跟著偏小（多畫小缺口的機會很小，但不是零）。
+    回傳 [[左端秒, 右端秒, 下緣, 上緣, 還在追], …]（照左端排）。"""
+    try:
+        if df is None or len(df) < 3 or not zones:
+            return []
+        zt = np.array([z[0] for z in zones], dtype="int64"); zw = np.array([z[2] - z[1] for z in zones], dtype=float)
+        ts = np.array([_ts(t) for t in df.index], dtype="int64")
+        mins = (df.index.hour * 60 + df.index.minute).values
+        H = df.h.values.astype(float); L = df.l.values.astype(float); C = df.c.values.astype(float)
+        kz = np.searchsorted(zt, ts, side="right") - 1
+        arr = []; frozen = []
+        for k in range(1, len(ts)):
+            if kz[k] < 0:
+                continue
+            w = zw[kz[k]]; keep = []
+            for g in arr:                                   # g＝[產生根, 下緣, 上緣, 向上缺口?, 右端根]
+                if k > g[0] and ((L[k] <= g[1]) if g[3] else (H[k] >= g[2])):
+                    continue                                # 影線碰到遠邊＝補滿
+                if g[1] <= C[k] <= g[2] or min(abs(C[k] - g[1]), abs(C[k] - g[2])) <= SMG_NEAR * w:
+                    g[4] = k
+                keep.append(g)
+            arr = keep
+            if mins[k] in (525, 900) and ts[k] - ts[k - 1] > 900 and (L[k] > H[k - 1] or H[k] < L[k - 1]):
+                up = bool(L[k] > H[k - 1]); lo, hi = (H[k - 1], L[k]) if up else (H[k], L[k - 1])
+                if (hi - lo) > SMG_MIN * w:
+                    if len(arr) >= SMG_KEEP:
+                        frozen.append(arr.pop(0))
+                    arr.append([k, lo, hi, up, k])
+        out = [[int(ts[g[0] - 1]), int(ts[g[4]]), round(float(g[1]), 2), round(float(g[2]), 2), 1] for g in arr]
+        out += [[int(ts[g[0] - 1]), int(ts[g[4]]), round(float(g[1]), 2), round(float(g[2]), 2), 0] for g in frozen]
+        return sorted(out)
+    except Exception:
+        return []
+
+
 def stars15(m):
     """籌碼異常星。回傳 {15分K開始: BigVol}（只回 BigVol≥3000 的，前端寫死 ≥3000 才畫星）。
     ★2026-10-29 官方答案卷破到 100% 相等（_mm_data/formula/stars_bigvol/verify.py，held-out 486 根全等、星 11/11）：
@@ -905,6 +952,7 @@ def compute_inst(inst):
     dd = daily_df(inst)
     if inst == "TX":
         _SMZ["TX"] = sms_zone(m, dd)                   # ★麥門 TV「測穿版」的階梯帶（上下緣），只給台指 15 分圖
+        _SMG["TX"] = sms_gaps(df, _SMZ["TX"])          # ★同一支指標畫的缺口框（規則跟神乎期技的跳空輔助不同）
     if len(dd) >= 3:
         cD = colors_daily(dd, inst)                                                           # ★日K＝破解公式（官方 100%）
         bsD = None
@@ -980,6 +1028,8 @@ def dash_chart(inst, tf, since=None):
         if inst == "TX" and tf == "15" and _SMZ.get("TX"):     # 測穿版階梯帶：圖表第一根之前生效的那一組起
             z = _SMZ["TX"]; i = max(0, bisect.bisect_right([x[0] for x in z], rows[0][0]) - 1)
             meta["smz"] = z[i:]
+        if inst == "TX" and tf == "15" and _SMG.get("TX"):     # 測穿版缺口框：右端還在圖表範圍內的
+            meta["smg"] = [g for g in _SMG["TX"] if g[1] >= rows[0][0]]
         if since is not None:
             ts = [r[0] for r in rows]
             i = bisect.bisect_left(ts, since)
