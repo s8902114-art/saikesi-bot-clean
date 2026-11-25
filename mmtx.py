@@ -283,13 +283,33 @@ SMZ_N = 11
 _SMZ = {}               # {"TX": [[生效時間秒, 下緣, 上緣], …]}（compute_inst 每次重算時更新）
 
 
+SMZ_WIDE = 125.0 / 92.0   # 放大日的倍數（116 天每一天都剛好是這個數）
+
+
+def sms_width(dd):
+    """測穿版階梯的全寬（每個交易日一個值，index 同 dd）＝SMZ_K × 前 11 根已收完日K 的 TR 平均 ×（放大日 ? 125/92 : 1）。
+    放大日（2026-11-25 破解，另開視窗 wfx/RESULT.md；我獨立重寫驗過 wfv.py）：只看前 6 根已收完的日K，由近到遠 1~6，
+      A＝(3·TR1+2·TR2+TR3)/6（近三天震幅，越近越重）、B＝(TR4+TR5+TR6)/3、M＝(3·漲跌1+2·漲跌2+漲跌3)/6（漲跌＝收−前收）
+      放大＝A ≥ 1.3×B（震幅在擴張）且 |M| ≥ 0.5×A（而且是往同一邊走出去）。兩個都是大於等於；用整數比避開小數誤差。"""
+    pc = dd.c.shift(1)
+    tr = np.maximum(dd.h - dd.l, np.maximum((dd.h - pc).abs(), (dd.l - pc).abs()))
+    tr[pc.isna()] = (dd.h - dd.l)[pc.isna()]
+    ch = dd.c - pc
+    a6 = 3 * tr.shift(1) + 2 * tr.shift(2) + tr.shift(3)
+    b3 = tr.shift(4) + tr.shift(5) + tr.shift(6)
+    m6 = (3 * ch.shift(1) + 2 * ch.shift(2) + ch.shift(3)).abs()
+    wide = (10 * a6 >= 26 * b3) & (2 * m6 >= a6)           # 有缺值時比較結果是 False＝不放大
+    return SMZ_K * tr.rolling(SMZ_N).mean().shift(1) * np.where(wide, SMZ_WIDE, 1.0)
+
+
 def sms_zone(m, dd):
     """麥門 TradingView「SM Steps TX」的階梯帶（2026-11-25 他新版把線畫出來，逐日對過他圖上的精確值，_mm_data/sms/README_1125.md 第十輪）：
       中心＝當天日盤 1 分K 08:47≤t<13:25 的 Σ((高+低+收)/3×量)/Σ量（＝盤面階梯參數二同一個時段；近 35 天對他的線中位差 0.016 點。
             更早的歷史他拿不到 1 分K、退回 15 分K 09:00~13:30——那是他的近似，不是另一套規則）；
-      全寬＝0.0614 × 前 11 個交易日（夜盤算隔天）真實波幅的平均，不含當天（他的 11 日加總 94% 的日子是整數、跟這個算法只差他日K 高低收的一兩點）；
+      全寬＝0.0614 × 前 11 個交易日（夜盤算隔天）真實波幅的平均，不含當天（他的 11 日加總 94% 的日子是整數、跟這個算法只差他日K 高低收的一兩點），放大日再乘 125/92；
       生效＝當天 13:30 那根起、到下一個交易日 13:30。
-    ★還沒破的：約 6% 的日子他把全寬放大 1.3587 倍（觸發條件未知）→ 那幾天這裡畫得比他窄。
+    ★約 6% 的日子他把全寬放大 125/92＝1.3587 倍，條件 2026-11-25 破了（sms_width；TV 日K 八年 1,879 天：放大日 116 天全中、漏 0、多判 0，
+      算出來的全寬 1,878 天跟他圖上的線分毫不差，_mm_data/sms/wfv.py）。盤面的日K 是期交所資料拼的，跟 TV 有一點出入 → 貼著門檻的日子可能判反。
     回傳 [[生效時間秒, 下緣, 上緣], …]（照時間排）。"""
     try:
         if m is None or m.empty or dd is None or len(dd) < SMZ_N + 1:
@@ -300,16 +320,13 @@ def sms_zone(m, dd):
             return []
         g = d.index.normalize(); px = (d.h + d.l + d.c) / 3
         cen = (px * d.v).groupby(g).sum() / d.v.groupby(g).sum()
-        pc = dd.c.shift(1)
-        tr = np.maximum(dd.h - dd.l, np.maximum((dd.h - pc).abs(), (dd.l - pc).abs()))
-        tr[pc.isna()] = (dd.h - dd.l)[pc.isna()]
-        adr = tr.rolling(SMZ_N).mean().shift(1)
+        wid = sms_width(dd)
         out = []
         for day, c in cen.items():
-            a = adr.get(day)
+            a = wid.get(day)
             if a is None or a != a or c != c:
                 continue
-            hw = SMZ_K * float(a) / 2
+            hw = float(a) / 2
             out.append([_ts(day + pd.Timedelta(hours=13, minutes=30)), round(float(c) - hw, 2), round(float(c) + hw, 2)])
         return out
     except Exception:
