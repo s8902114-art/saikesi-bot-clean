@@ -997,6 +997,7 @@ def register(app, G):
         """
         if not _token_ok(tok):
             return "", 404
+        import json
         import urllib.request
         import urllib.error
         cands = [
@@ -1031,13 +1032,32 @@ def register(app, G):
             ("Yahoo q2 NQ 15分", "https://query2.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=15m&range=1d"),
             ("Yahoo q1 NQ 1分",  "https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=1m&range=1d"),
             ("Yahoo q1 NQ 日K",  "https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=1d&range=5d"),
+            # ★比 Yahoo NQ=F（延遲約 10 分）更即時的候選（2026-11-26 用戶：「nq沒有更即時的嗎」）：本機量過延遲與追蹤程度（_mm_data/nq/probe_rt*.py），
+            #   這裡只量 Railway 打不打得通。POST 的請求內容寫死在這裡（不吃 request 參數）。
+            ("Yahoo ^NDX 指數",   "https://query1.finance.yahoo.com/v8/finance/chart/%5ENDX?interval=1m&range=1d"),
+            ("Yahoo QQQ",         "https://query1.finance.yahoo.com/v8/finance/chart/QQQ?interval=1m&range=1d"),
+            ("Hyperliquid xyz:XYZ100", "https://api.hyperliquid.xyz/info", {"type": "allMids", "dex": "xyz"}),
+            ("OKX US100 永續",    "https://www.okx.com/api/v5/market/candles?instId=US100-USDT-SWAP&bar=1m&limit=2"),
+            ("OKX QQQ 永續",      "https://www.okx.com/api/v5/market/candles?instId=QQQ-USDT-SWAP&bar=1m&limit=2"),
+            ("Binance QQQ 永續(www)", "https://www.binance.com/fapi/v1/klines?symbol=QQQUSDT&interval=1m&limit=2"),
+            ("Bitget NDX100 永續", "https://api.bitget.com/api/v2/mix/market/candles?symbol=NDX100USDT&productType=usdt-futures&granularity=1m&limit=2"),
+            ("Gate NAS100 永續",  "https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=NAS100_USDT&interval=1m&limit=2"),
+            ("MEXC NAS100 永續",  "https://contract.mexc.com/api/v1/contract/ticker?symbol=NAS100_USDT"),
+            ("BingX NASDAQ100 永續", "https://open-api.bingx.com/openApi/swap/v3/quote/klines?symbol=NCSINASDAQ1002USD-USDT&interval=1m&limit=2"),
+            ("TradingView scanner NQ1!", "https://scanner.tradingview.com/futures/scan",
+                                 {"symbols": {"tickers": ["CME_MINI:NQ1!"]}, "columns": ["close", "update_mode"]}),
+            ("CME 官網報價",      "https://www.cmegroup.com/CmeWS/mvc/Quotes/Future/146/G"),
+            ("Pyth Hermes QQQ",   "https://hermes.pyth.network/v2/price_feeds?query=QQQ&asset_type=equity"),
         ]
         out = []
-        for name, url in cands:
+        for cand in cands:
+            name, url = cand[0], cand[1]
+            body = json.dumps(cand[2]).encode() if len(cand) > 2 else None
             row = {"name": name, "host": url.split("/")[2]}
             try:
                 req = urllib.request.Request(
-                    url, headers={"User-Agent": "Mozilla/5.0", "accept": "application/json"})
+                    url, data=body, headers=dict({"User-Agent": "Mozilla/5.0", "accept": "application/json"},
+                                                 **({"Content-Type": "application/json"} if body else {})))
                 with urllib.request.urlopen(req, timeout=6) as resp:
                     row["code"] = resp.status
                     row["body"] = resp.read(160).decode("utf-8", "replace")[:160]
@@ -2237,12 +2257,12 @@ function txColSel(k){ TXCOLP = k; try{ localStorage.setItem('txcolp', k); }catch
 // 參數列：追價氛圍（彩色K）、階梯各自選（週K 沒有顏色；階梯只有台指和幣的 15 分／1H／4H）
 function txParIn(sep){
   const pick = (cur, fn) => [['1','參數一'],['2','參數二']].map(([k, n]) => `<span class="wb ${cur===k?'on':''}" onclick="${fn}('${k}')">${n}</span>`).join(' ');
-  const col = TXTF !== 'W' && TXS !== 'NQ', lad = (TXS === 'TX' || txIsC(TXS)) && txIntra();
+  const col = TXTF !== 'W', lad = (TXS === 'TX' || TXS === 'NQ' || txIsC(TXS)) && txIntra();
   return (col ? '<span class="pg"><span class="dim">追價氛圍</span>' + pick(TXCOLP, 'txColSel') + '</span>' : '') + (col && lad ? sep : '')
     + (lad ? '<span class="pg"><span class="dim">階梯</span>' + pick(TXLAD, 'txLadSel') + '</span>' : '');
 }
 function txNoP2(){ const Rk = TXDATA[TXS + '|' + TXTF];
-  return (TXCOLP === '2' && TXS !== 'NQ' && Rk && Rk.bars && Rk.bars.length && !txHasP2(Rk) && TXTF !== 'W')
+  return (TXCOLP === '2' && Rk && Rk.bars && Rk.bars.length && !txHasP2(Rk) && TXTF !== 'W')
     ? '<div class="sub dim">⚠ 這個週期沒有參數二的顏色（'+((TXTF === '60' || TXTF === '240') ? '官方 60 分只有參數一' : '還沒解出來')+'），K 棒顏色和均線是參數一。</div>' : ''; }
 function txParBar(){ const s = txParIn('<span class="txsp"></span>'); return s ? '<div class="ctl"><label>參數</label><div class="ci">' + s + '</div></div>' : ''; }
 // ★上下線（麥門「到價推撥」的上線／下線＝帳號自己設的警示價，不是公式；2026-10-11）：值從麥門文章圖讀出（mmtx_updown.json，±3 點）。
@@ -2521,7 +2541,7 @@ function txTgl(k){
   if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txSmzApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ const nq = TXS === 'NQ'; return ((TXTF === 'W' || nq) ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
+function txTglBar(){ const nq = TXS === 'NQ'; return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -2638,12 +2658,22 @@ function txMx(R, key){
   const h = bars.slice(0, n).map(b => b[2]), l = bars.slice(0, n).map(b => b[3]), c = bars.slice(0, n).map(b => b[4]);
   const mx = {N:N, lc:bars[N-1][4], t0:bars[0][0], key:key, gaps:(n > 1 ? mxGaps(h, l) : []), div:[]};
   const tf = String(key || '').split('|')[1], isC = txIsC(key);
-  if(n > 60 && ((isC && (tf === '15' || tf === '60')) || (String(key).indexOf('TX|') === 0 && tf === '15'))){
+  const isN = String(key).indexOf('NQ|') === 0;
+  if(n > 60 && ((isC && (tf === '15' || tf === '60')) || ((String(key).indexOf('TX|') === 0 || isN) && tf === '15'))){
     const ev = [], day = [];
     if(isC){
       let prev = null, k = -1;
       for(let i = 0; i < n; i++){ let d = null; try{ const q = txCt(R.raw[i][7]); d = txCmeDay(q[0], q[1]); }catch(e){} if(d === null) d = prev; if(d !== prev){ k++; prev = d; } day.push(k); ev.push(true); }
       mx.div = mxDiv(h, l, c, ev, day, (i, j) => day[j] === day[i]);
+    } else if(isN){
+      // ★NQ（台指的規則直接套，我定的）：日盤＝美股正規盤（芝加哥 08:30~15:00＝紐約 09:30~16:00）才評；交易日照 CME（芝加哥 17:00 換日），
+      //   參考高低點從前一個交易日起、不能是同一天的正規盤（＝台指「只評日盤、參考點不能在當天日盤」）。K 棒時間是台灣當 UTC → 減 8 小時才是真的 UTC。
+      const ds = [];
+      for(let i = 0; i < n; i++){ let q = null; try{ q = txCt((bars[i][0] - 28800) * 1000); }catch(e){}
+        ev.push(!!q && q[1] >= 510 && q[1] < 900); ds.push(q ? (txCmeDay(q[0], q[1]) || txDayAdd(q[0], 1)) : null); }
+      const uq = Array.from(new Set(ds.filter(x => x))).sort();
+      for(let i = 0; i < n; i++) day.push(ds[i] ? uq.indexOf(ds[i]) : (i ? day[i - 1] : 0));
+      mx.div = mxDiv(h, l, c, ev, day, (i, j) => ev[j] && day[j] === day[i]);
     } else {
       const ymd = t => { const x = new Date(t * 1000); return x.getUTCFullYear()*10000 + (x.getUTCMonth()+1)*100 + x.getUTCDate(); };
       const mins = bars.slice(0, n).map(b => { const x = new Date(b[0] * 1000); return x.getUTCHours()*60 + x.getUTCMinutes(); });
@@ -3459,23 +3489,31 @@ function txRecHTML(r){
   if(r.err) h += '<div class="warn">⚠ 最近一次錯誤（'+ago(r.err_at)+'）：'+txEscH(r.err)+'</div>';
   return h;
 }
-// ★NQ（那斯達克 100 期貨，2026-11-26 用戶：「邊破解 另外把 nq 也做到盤面上」）：伺服器 mmnq（Yahoo NQ=F）算好 K 棒、測穿版階梯帶（meta.smz）、缺口框（meta.smg），
-//   K 棒列格式同台指（第 6 欄 -2＝不上色→漲紅跌綠、第 10 欄＝'o' 美股開盤／'c' 換階）。這一區只放 NQ 自己的摘要與說明；圖表、疊圖跟台指共用。
+// ★NQ（那斯達克 100 期貨，2026-11-26 用戶：「邊破解 另外把 nq 也做到盤面上」「麥門那些指標都要有」）：伺服器 mmnq（Yahoo NQ=F）算好 K 棒、
+//   彩色K／判色均線／控盤階梯／籌碼星（台指公式直接套，參數沒校正）、測穿版階梯帶（meta.smz）、缺口框（meta.smg）；背離星、跳空缺口在前端（txMx）。
+//   K 棒列格式同台指（第 10 欄＝'o' 美股開盤／'c' 換階；舊版伺服器第 6 欄 -2＝不上色→漲紅跌綠）。這一區只放 NQ 自己的摘要與說明；圖表、疊圖跟台指共用。
 function nqWarn(p){
   if(!p || !p.ok || !(p.stale || p.fetch_err)) return '';
   return '<div class="warn">⚠ '+(p.stale ? 'CME 在交易、但最新一根是 '+txEscH(p.lag_min)+' 分鐘前的（美國假日那一盤 Yahoo 不給分K，也會這樣）。' : '')+txEscH(p.fetch_err || '')+'</div>';
 }
 function nqSum(p){
   if(!p || !p.ok) return '<div class="empty">'+txEscH((p && p.err) || 'NQ 還沒有資料')+(p && p.fetch_err ? '（'+txEscH(p.fetch_err)+'）' : '')+'</div>';
-  const z = p.zone, nx = p.next;
-  let h = '<div class="fpsum">最新 <b>'+txNum(p.last, 2)+'</b> <span class="dim">最後一根 台灣 '+txEscH(p.last_bar || '—')+'（紐約 '+txEscH(p.last_ny || '—')+'）</span>';
+  const z = p.zone, nx = p.next, two = TXCOLP === '2' && p.c2 !== undefined, pc = two ? p.c2 : p.c, pcl = two ? p.closed2 : p.closed, plc = two ? p.last_change2 : p.last_change;
+  let h = '<div class="fpsum">';
+  if(pc !== undefined && pcl) h += (p.live_bar ? '15 分盤中這根 '+txBadge(pc)+' <span class="dim">（還沒收，可能再變）</span>　上一根收盤 '+txBadge(pcl[1]) : '15 分 現在 '+txBadge(pc))
+    + ' <span class="dim">'+(two ? '參數二' : '參數一')+'・台指公式</span>' + (plc ? '　最近換色 <b>'+txEscH(plc[0])+'</b> '+txEscH(plc[1])+' → '+txEscH(plc[2]) : '') + '<br>';
+  h += '最新 <b>'+txNum(p.last, 2)+'</b>';
+  if(p.ladder1 != null || p.ladder2 != null) h += (TXLAD === '2' ? '　階梯(參數二) <b>'+txNum(p.ladder2, 2)+'</b> ±'+(p.half || 9)+' <span class="dim">參數一 '+txNum(p.ladder1, 2)+'</span>'
+                                                               : '　階梯(參數一) <b>'+txNum(p.ladder1, 2)+'</b> ±'+(p.half || 9)+' <span class="dim">參數二 '+txNum(p.ladder2, 2)+'</span>');
+  h += '　<span class="dim">最後一根 台灣 '+txEscH(p.last_bar || '—')+'（紐約 '+txEscH(p.last_ny || '—')+'）</span>';
   h += z ? '<br>測穿階梯 <b>'+txNum(z.lo, 2)+' ~ '+txNum(z.hi, 2)+'</b> <span class="dim">中心 '+txNum(z.c, 2)+'・全寬 '+txNum(z.w, 2)+' 點'+(z.wide ? '・放大日' : '')+'・'+txEscH(z.from)+' 起</span>'
          : '<br><span class="dim">測穿階梯還算不出來（日K 不到 12 天）</span>';
   if(nx) h += '<br><span class="dim">下一組 '+txNum(nx.lo, 2)+' ~ '+txNum(nx.hi, 2)+'，'+txEscH(nx.from)+' 起</span>';
   return h + '</div>';
 }
 function nqNote(){
-  let h = '<div class="sub dim">台灣時間；Yahoo NQ=F 延遲約 10 分鐘，美國假日那一盤 Yahoo 不給分K。K 棒漲紅跌綠（NQ 沒有彩色K）。</div>';
+  let h = '<div class="sub dim">台灣時間；Yahoo NQ=F 延遲約 10 分鐘，美國假日那一盤 Yahoo 不給分K。'
+    + '彩色K、控盤階梯、籌碼星、背離星都是<b>台指的公式直接套到 NQ，參數沒校正（我定的）</b>，NQ 沒有官方答案可以對；「日盤」一律換成美股正規盤（紐約 09:30~16:00）。</div>';
   if(TXTF === '15' && TXSM === '1') h += '<div class="sub dim">虛線＝測穿版階梯帶（紐約 16:00 換）：中心＝美股 09:45~15:45 成交均價、全寬＝0.0735×前 11 日震幅，拿他 NQ 示意圖 16 組校的（中心差平均 2.1 點、全寬差中位 0.3 點）。'
     + '淺黃框＝缺口框，「換盤」是我定的。方塊還沒破解，先不顯示。</div>';
   return h;
@@ -3497,8 +3535,17 @@ function nqRules(){
     + '<br><b>缺口框</b>（淺黃）：規則照台指版（只看換盤跳空、大於 0.65 個階梯全寬才畫、最多追 5 個、影線補滿就消失）。'
     + 'NQ 幾乎 23 小時連續交易，<b>「換盤」我定成</b>每天 17:00~18:00（紐約）休市後重新開盤那根（含週日開盤），沒有官方答案可對。'
     + '<br><b>測穿方塊</b>：規則還沒破解（台指版另一邊正在破），NQ 也沒有答案卷，先不顯示。'
-    + '<br><b>K 棒顏色</b>：NQ 沒有彩色K、也沒有參數一／二的階梯，K 棒是漲紅跌綠。'
-    + '<br><b>其他開關</b>（威廉%R、KD、支撐壓力、型態、缺口＝跳空輔助）：算法跟台指頁一樣（說明在台指頁），在 NQ 上都沒驗證。'
+    + '<br><b>以下全部是台指的公式直接套到 NQ，參數沒校正（我定的）</b>——都是在台指／加權上拿官方答案破解的，NQ 沒有官方答案可以對：'
+    + '<br>・<b>彩色K（追價氛圍）</b>：呼叫台指同一支公式、用台指那組均線：15 分 參數一 WMA34／EMA55／WMA120／WMA241、參數二 WMA55／EMA144／SMA228；1H（只有參數一）EMA144／EMA377／WMA987；'
+    + '日K 參數一 SMA9／WMA21／SMA22＋收盤比 9 天前高、參數二 WMA21／SMA22／WMA89／SMA90；週K 不上色。「均線」開關畫的就是這幾條。'
+    + '日K 用 Yahoo 日K 補到 10 年前（1H 只有兩年多），長均線才暖得起來。'
+    + '<br>・<b>控盤階梯</b>：台指＝當天日盤的口數加權均價（參數二 08:47~13:25、參數一 09:00~10:45，13:30 換階、雙線 ±9 點）。'
+    + 'NQ 的日盤＝美股正規盤：參數二＝紐約 09:45~15:45（跟測穿版階梯中心同一段，所以兩個中心同值）、參數一＝紐約 09:30~11:15（美股開盤後 1 小時 45 分，對照台指的加權開盤 09:00~10:45），'
+    + '價格用 (高+低)/2×量，紐約 16:00 換階，雙線照台指 ±9 點。'
+    + '<br>・<b>籌碼異常星</b>：台指＝這根 15 分K 裡最大的 5 分K 量 ≥3000 口、只算台股盤中。NQ 只算美股正規盤的 5 分K；3000 口直接套會每天 23 顆（幾乎每根），'
+    + '所以門檻定成 26,000 口＝讓出星頻率跟台指一樣（台指 58 個日盤 18 顆＝每根 1.72%、每天 0.31 顆；NQ 50 天用 26,000 口是 1.78%、每天 0.46 顆；台指樣本只有 18 顆，只能當參考）。'
+    + '<br>・<b>背離星</b>：台指規則（價格創前一交易日起的新高／新低、KD 的 K 沒跟上且 K＜70／＞30），只評美股正規盤的 15 分K，交易日照 CME（芝加哥 17:00 換日），參考點不能是同一天的正規盤。'
+    + '<br>・<b>缺口（跳空輔助）</b>、<b>威廉%R</b>、<b>KD</b>、<b>支撐壓力</b>、<b>型態</b>：算法跟台指頁一樣（說明在台指頁），在 NQ 上都沒驗證。NQ 幾乎 23 小時連續交易，跳空輔助的缺口很少。'
     + '</div></details><div class="sub">資料 Yahoo Finance NQ=F（連續近月）</div>';
 }
 function viewTx(){
@@ -3513,7 +3560,7 @@ function viewTx(){
   h += '<div class="ctl"><label>商品</label><div class="ci">' + [['TX','台指'],['TSE','加權']].map(([k, n]) => {
       const q = P[k] || {};
       return `<span class="wb ${TXS===k?'on':''}" onclick="txSel('${k}')">${n} ${q.ok ? txBadge(TXCOLP === '2' && q.c2 !== undefined ? q.c2 : q.c) : ''}</span>`; }).join('')
-    + `<span class="wb ${isN?'on':''}" onclick="txSel('NQ')">NQ</span>`
+    + (() => { const q = P.NQ || {}; return `<span class="wb ${isN?'on':''}" onclick="txSel('NQ')">NQ ${q.ok && q.c !== undefined ? txBadge(TXCOLP === '2' && q.c2 !== undefined ? q.c2 : q.c) : ''}</span>`; })()
     + '<span class="gap"></span>'
     + txCoins().map(c => `<span class="wb ${TXS==='C:'+c+'-USDT-SWAP'?'on':''}" onclick="txSel('C:${c}-USDT-SWAP')">${c}</span>`).join('')
     + '<span class="txqw"><input id="txq" class="txq" placeholder="其他幣" autocomplete="off" onkeydown="txKey(event)"><span class="wb" onclick="txGo()">看</span></span>'
@@ -3543,7 +3590,7 @@ function viewTx(){
   h += txNoP2();
   h += '<div id="txslot"></div>';
   h += txSmsNote();
-  h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。'+(isN ? '' : '灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。')+'</div>';
+  h += '<div class="sub dim">雙指／滾輪縮放、左右拖曳；手指按住或滑鼠移上去看那根的開高低收。'+'灰色＝每個週期最前面 '+(P.warm || 280)+' 根長均線還沒穩，不上色。</div>';
   if(!isC && !isN && TXUD === '1'){
     const ob = txUdObs().slice().reverse();
     h += '<div class="sech">上下線紀錄 <span class="dim">（麥門文章圖讀出、±3 點；時間＝圖上傳時間）</span></div>'
@@ -3553,9 +3600,9 @@ function viewTx(){
        + '<div class="sub dim">「—」＝那張圖上沒讀到（可能在畫面外），不是被取消。</div>';
   }
   if(!isC && !isN) h += txRecHTML(P.rec);
-  if(TXS === 'TX' && p.ok){
+  if((TXS === 'TX' || isN) && p.ok){
     const st = (p.stars || []).slice().reverse();
-    h += '<div class="sech">最近的籌碼異常星</div>' + (st.length ? st.map(s => '<div class="sub">★ '+s[0]+'　5 分 K 量 <b>'+s[1]+'</b> 口</div>').join('') : '<div class="empty">最近沒有</div>');
+    h += '<div class="sech">最近的籌碼異常星'+(isN ? ' <span class="dim">（NQ 門檻 '+(p.star_vol || 26000)+' 口，我定的）</span>' : '')+'</div>' + (st.length ? st.map(s => '<div class="sub">★ '+s[0]+'　5 分 K 量 <b>'+s[1]+'</b> 口</div>').join('') : '<div class="empty">最近沒有</div>');
   }
   if(isN) return h + nqRules() + '</div>';
   h += '<details><summary class="sech">規則與準確度</summary><div class="note">'
