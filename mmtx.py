@@ -35,6 +35,8 @@ SEED_DAILY_FILE = os.path.join(_HERE, "mmtx_daily_seed.json.gz")
 VFIX_FILE = os.path.join(_PERSIST, "mmtx_vfix.json.gz")           # 台指 1 分K 補量（期交所逐分量在急行情會少算，見 _vfix_reconcile）
 H60_FILE = os.path.join(_PERSIST, "mmtx_60.json.gz")               # 已收完的 60 分 K（比 1 分 K 留得久，給 60 分公式的長均線）
 SEED60_FILE = os.path.join(_HERE, "mmtx_seed60.json.gz")
+H15_FILE = os.path.join(_PERSIST, "mmtx_15.json.gz")               # ★已收完的台指 15 分 K（2026-11-27 用戶「15 分 K 棒再多」：1 分K 只留 75 天）
+SEED15_FILE = os.path.join(_HERE, "mmtx_seed15.json.gz")           # 種子＝TV TXF1! 15 分K（_mm_data/mk_seed15.py，2026-05-01~11-25）
 MODEL_FILE = os.path.join(_HERE, "mmtx_model.json.gz")
 MODEL_TSE_FILE = os.path.join(_HERE, "mmtx_model_tse.json.gz")
 # 麥門「上線／下線」（到價推撥＝帳號自己設的警示價，不是公式）：從麥門文章圖讀出來的歷史值（_mm_data/updown_export.py 產生）
@@ -69,7 +71,7 @@ except Exception:
     _SMZ_TV = {"read_at": None, "lines": {}, "daily": {}}
 KEEP_DAYS ={"TX": 75, "TSE": 150}   # 1 分 K 保留日曆天數（加權一天只有 18 根 15 分 K，留久一點）
 WARM = 280                     # 台指 15 分實測：75 天窗跟全史比，前 ~280 根之後 100% 一致 → 之前不上色
-SHOW = {"15": 6000, "60": 6000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根（2026-11-27 用戶「K 能不能多一點 看不到舊的走勢」：15 分 1500→有多少送多少≈75 天、60 分 1000→≈400 天；封包 gzip 約 180 KB，之後只抓最後一根）
+SHOW = {"15": 12000, "60": 6000, "D": 2000, "W": 1000}   # 圖表每個週期最多送幾根（2026-11-27 用戶「K 能不能多一點 看不到舊的走勢」：15 分 1500→有多少送多少≈75 天、60 分 1000→≈400 天；封包 gzip 約 180 KB，之後只抓最後一根）
 INST_NAME = {"TX": "台指", "TSE": "加權"}
 STAR_VOL = 3000
 LADDER_HALF = 9
@@ -84,6 +86,8 @@ _bars_tse = {}                 # 加權：同上（量恆為 0）
 _daily = {"TX": {}, "TSE": {}}  # "YYYYmmdd"(交易日) -> [o,h,l,c,v]
 _h60 = {"TX": {}, "TSE": {}}    # 已收完的 60 分 K："YYYYmmddHHMM"(台北時間、K 開始) -> [o,h,l,c,v]
 KEEP60_DAYS = 400
+_h15 = {"TX": {}}               # 已收完的台指 15 分 K："YYYYmmddHHMM"(台北時間、K 開始) -> [o,h,l,c,v]
+KEEP15_DAYS = 200
 _models = {}
 _vfix = {}                     # 台指補量："YYYYmmddHHMM" -> 這一分鐘補上的口數
 _vq = {}                       # 對帳狀態：{"<合約>|<日期>": {"end": 已對到的最後一分鐘}, "M": {夜盤最近一次報價總量}}
@@ -358,6 +362,12 @@ def _load_store():
             _vfix.update(d.get("fix") or {}); _vq.update(d.get("q") or {})
     except Exception:
         bad.append(os.path.basename(VFIX_FILE))
+    for f in (SEED15_FILE, H15_FILE):
+        try:
+            if os.path.exists(f):
+                _h15["TX"].update((_load_json(f) or {}).get("TX") or {})
+        except Exception:
+            bad.append(os.path.basename(f))
     for k in [k for k in _h60["TX"] if k[8:12] == "0500"]:     # 3070b52 那版存過夜盤 05:00 的假 K（官方沒有這根）
         _h60["TX"].pop(k, None)
     if bad:
@@ -388,6 +398,10 @@ def _trim():
     for d in _h60.values():
         for k in [k for k in d if k < cut60 or k > fut]:
             d.pop(k, None)
+    cut15 = (now - dt.timedelta(days=KEEP15_DAYS)).strftime("%Y%m%d%H%M")
+    for d in _h15.values():
+        for k in [k for k in d if k < cut15 or k > fut]:
+            d.pop(k, None)
 
 
 def _save_store():
@@ -397,6 +411,7 @@ def _save_store():
             _dump(STORE[inst], FILES[inst])
         _dump(_daily, DAILY_FILE)
         _dump(_h60, H60_FILE)
+        _dump(_h15, H15_FILE)
         _dump({"fix": _vfix, "q": _vq}, VFIX_FILE)
         _state["save_err"] = ""
     except Exception as e:
@@ -1050,6 +1065,24 @@ def _with_hist60(inst, d60):
     return pd.concat([old, d60.iloc[1:]])
 
 
+def _with_hist15(df):
+    """★台指 15 分圖接舊K（2026-11-27）：1 分K 窗之前用存檔（種子＝TV 15 分K＋每次算完補進來的已收完 15 分K）接上，做法同 _with_hist60。
+    1 分K 窗的第一根可能只有半根、最後一根還沒收完 → 都不寫進存檔；接的時候只取窗第一根「之前」的。"""
+    H = _h15["TX"]
+    if len(df) > 2:
+        for t, r in zip(df.index[1:-1], df.iloc[1:-1].itertuples(index=False)):
+            H[t.strftime("%Y%m%d%H%M")] = [float(r.o), float(r.h), float(r.l), float(r.c), float(r.v)]
+    if not H or len(df) < 2:
+        return df
+    t1 = df.index[1].strftime("%Y%m%d%H%M")
+    ks = sorted(k for k in H if k < t1)
+    if not ks:
+        return df
+    old = pd.DataFrame(np.array([H[k] for k in ks], dtype=float), index=pd.to_datetime(ks, format="%Y%m%d%H%M"),
+                       columns=["o", "h", "l", "c", "v"])
+    return pd.concat([old, df.iloc[1:][["o", "h", "l", "c", "v"]]])
+
+
 def colors(df, inst="TX"):
     """回傳 (模型版顏色, 公式版顏色, 是否用到模型)。加權模型多一欄來源旗標 src=1（台指＋加權合併訓練）。"""
     X, cols, p0, ce55, cs35, Ro, Ko = features(df)
@@ -1165,6 +1198,8 @@ def compute_inst(inst):
     charts = {}
     mk = merge_close(m) if inst == "TX" else m           # ★台指 13:45 收盤那筆併進日盤最後一根（同官方切法）
     df = to15(mk) if inst == "TX" else to15_tse(m)
+    if inst == "TX":
+        df = _with_hist15(df)                              # ★1 分K 窗之前接存檔的 15 分K（圖表看得到更舊的走勢）
     col = colors15_v3(df, inst); used = "v3"               # ★2026-10-30 第四輪無狀態公式（台指／加權 held-out 100%）
     P2 = P1 = None; st = {}
     if inst == "TX":
