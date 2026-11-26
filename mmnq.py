@@ -250,6 +250,7 @@ def clean5(f):
         wh, wl = o[i] == h[i], o[i] == l[i]; o[i] = pc[i]
         if wh: h[i] = max(o[i], c[i])
         if wl: l[i] = min(o[i], c[i])
+        h[i] = max(h[i], o[i]); l[i] = min(l[i], o[i])   # 前一根收盤可能在這根高低之外（10-30 15:00：前收 28234.25 < 這根低 28283.25）→ 高低要把新開盤包進去
     for i in np.where(B)[0]:
         wh, wl = c[i] == h[i], c[i] == l[i]; c[i] = o[i]
         if wh: h[i] = max(o[i], c[i])
