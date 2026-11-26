@@ -67,6 +67,11 @@ except Exception as _mme:
     mmtx = None
     print(f"[麥門台指] 模組載入失敗：{_mme}", flush=True)
 try:
+    import mmnq                     # ★2026-11-26 NQ（那斯達克 100 期貨）盤面：Yahoo NQ=F → K 線／測穿版階梯帶／缺口框（只顯示、不下單）
+except Exception as _mqe:
+    mmnq = None
+    print(f"[NQ 盤面] 模組載入失敗：{_mqe}", flush=True)
+try:
     import mainow                   # ★2026-10-29 麥門官方值記錄器（燈號每 5 分鐘＋每天存官方顏色/背離；讀 MAINOW_TOKEN，沒設就不動；只記錄、不下單）
 except Exception as _mne:
     mainow = None
@@ -11748,6 +11753,9 @@ if __name__ == "__main__":
 # 2d. 麥門台指（盤中每 60 秒抓期交所 1 分 K（資料沒變不重算）、盤後每 10 分鐘；只算顯示用指標、不下單）
     if mmtx:
         Thread(target=mmtx.loop, name="mmtx", daemon=True).start()
+# 2d'. NQ 盤面（CME 開盤時每 2 分鐘抓 Yahoo 5 分 K、休市每 15 分鐘；資料沒變不重算；只算顯示用指標、不下單）
+    if mmnq:
+        Thread(target=mmnq.loop, name="mmnq", daemon=True).start()
 # 2e. 麥門官方值記錄器（用戶 10-29：燈號沒有歷史、要在他沒開電腦時也記；憑證只從環境變數讀，不印不存）
     if mainow:
         Thread(target=mainow.loop, args=(dc_log,), name="mainow", daemon=True).start()
