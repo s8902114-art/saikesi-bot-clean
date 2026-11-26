@@ -1088,7 +1088,7 @@ def _lad(P, index):
     return [None if x != x else round(float(x), 1) for x in v]
 
 
-def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, col2=None, ma=None):
+def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, col2=None, ma=None, e6=None):
     """圖表用：[時間秒, 開, 高, 低, 收, 量, 顏色P1(-1=暖機不上色), 階梯P2, 階梯P1, 星(5分K量,0=無), 0, 期現價差, 顏色P2, 均線P1, 均線P2]。
     第 10 欄留給幣圖的 CME 標記（台指恆 0）；沒有價差給 None；沒有參數二顏色就不帶第 12 欄。
     ma＝(參數一那組線, 參數二那組線)（ma_lines 的輸出，沒有給 None）：有給就補滿到第 12 欄，第 13／14 欄＝[這根每條線的值]（沒有那組＝None）。"""
@@ -1113,8 +1113,27 @@ def _rows(df, col, inst, lad2=None, lad1=None, st=None, n_show=1500, bs=None, co
                 r.append(None)
             for L in mr:
                 r.append(None if L is None else [a[i - i0] for a in L])
+        if e6 is not None and len(r) == 15:              # 第 15 欄＝台指 60 分 EMA60（測穿方向線，2026-11-27）
+            r.append(None if e6[i] != e6[i] else round(float(e6[i]), 1))
         out.append(r)
     return out
+
+
+SMS_EMA_N = 60     # ★測穿方向線（_mm_data/sms h25/h26a/h26b）：八年 480 個方塊，藍＝15 分收盤在台指 60 分 EMA 上方、金＝下方，例外 6 個（都是缺口型）；長度 55~78 結果一樣
+
+
+def sms_ema60(df15, d60):
+    """台指 60 分K 收盤的 EMA60。回傳 (每根 15 分K 對應的值, 每根 60 分K 的值)。
+    15 分那邊只用「這根 15 分收盤時已經收完」的 60 分K（＝TV 那邊 60 分組的最後一根 15 分收盤才算進去）：
+    60 分K 以開始時間標記、每組 4 根 15 分 → 這根 15 分開始時間 −45 分 之前（含）開始的那根 60 分已收完。"""
+    try:
+        if d60 is None or len(d60) < 2 or not len(df15):
+            return None, None
+        e = d60.c.astype(float).ewm(span=SMS_EMA_N, adjust=False).mean().values
+        k = d60.index.searchsorted(df15.index - pd.Timedelta(minutes=45), side="right") - 1
+        return np.where(k >= 0, e[np.clip(k, 0, None)], np.nan), e
+    except Exception:
+        return None, None
 
 
 def basis_for(df, minutes, tse_c):
@@ -1157,13 +1176,14 @@ def compute_inst(inst):
         except Exception:
             tse_c = None
     col2 = colors15_p2(df, inst)                           # ★參數二（台指 99.93%；加權還沒定稿＝None）
+    d60 = _with_hist60(inst, to60(mk, inst))           # ★1 分K 窗之前接存檔的 60 分K（SMA600 要夠長）
+    e6_15, e6_60 = (sms_ema60(df, d60) if inst == "TX" else (None, None))
     charts["15"] = _rows(df, col, inst, _lad(P2, df.index), _lad(P1, df.index), st, SHOW["15"],
                          bs=basis_for(df, 15, tse_c) if inst == "TX" else None, col2=col2,
-                         ma=(ma_lines(df, inst, "15", 1), ma_lines(df, inst, "15", 2)))
-    d60 = _with_hist60(inst, to60(mk, inst))           # ★1 分K 窗之前接存檔的 60 分K（SMA600 要夠長）
+                         ma=(ma_lines(df, inst, "15", 1), ma_lines(df, inst, "15", 2)), e6=e6_15)
     c60 = colors60_v3(d60, inst)                       # ★2026-10-30 第三輪公式（台指 97.8%／加權 96.8%，舊 GBM 40.4%／85.2%）
     charts["60"] = _rows(d60, c60, inst, _lad(P2, d60.index), _lad(P1, d60.index), None, SHOW["60"],
-                         bs=basis_for(d60, 60, tse_c) if inst == "TX" else None, ma=(ma_lines(d60, inst, "60", 1), None))
+                         bs=basis_for(d60, 60, tse_c) if inst == "TX" else None, ma=(ma_lines(d60, inst, "60", 1), None), e6=e6_60)
     update_daily(inst, m)
     dd = daily_df(inst)
     if inst == "TX":

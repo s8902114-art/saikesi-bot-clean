@@ -2552,18 +2552,18 @@ function txSrPick(h, l, c, a, act, ze, n){
   return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0', kdk:'#5ec4f2', kdd:'#f0a43a', bs:'#8fd6c3', gap:'rgba(242,229,191,0.30)', div:'#f59e0b'};   // KD 顏色照麥門軟體（K 淺藍、D 橘）     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
-let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1', TXSM = '1', TXES = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
+let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1', TXSM = '1', TXES = '1', TXE6 = '0';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
   if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d;
-  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v], ['txsm', v => TXSM = v], ['txes', v => TXES = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
+  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v], ['txsm', v => TXSM = v], ['txes', v => TXES = v], ['txe6', v => TXE6 = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
 function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
-  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else if(k === 'es') TXES = fl(TXES); else TXPT = fl(TXPT);
-  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); localStorage.setItem('txes', TXES); }catch(e){}
+  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else if(k === 'es') TXES = fl(TXES); else if(k === 'e6') TXE6 = fl(TXE6); else TXPT = fl(TXPT);
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); localStorage.setItem('txes', TXES); localStorage.setItem('txe6', TXE6); }catch(e){}
   if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txSmzApply(); nqEstApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ const nq = TXS === 'NQ'; return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat((nq && (TXTF === '15' || TXTF === '60')) ? [['es', '即時估價', TXES]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
+function txTglBar(){ const nq = TXS === 'NQ'; return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat((nq && (TXTF === '15' || TXTF === '60')) ? [['es', '即時估價', TXES]] : []).concat((TXS === 'TX' && (TXTF === '15' || TXTF === '60')) ? [['e6', '60分EMA60', TXE6]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -2654,7 +2654,17 @@ function txMaApply(){
   if(C.el) C.el.className = nm.length ? 'txwrap mal' : 'txwrap';
   C.ma.forEach((s, j) => s.setData(j < nm.length ? R.bars.map(b => { const v = b[k] ? b[k][j] : null;
     return (typeof v === 'number' && v === v && txCol(b) !== -1) ? {time:b[0], value:v} : {time:b[0]}; }) : []));
+  txE6Apply();
 }
+// ★測穿方向線（2026-11-27）：台指 60 分K 收盤的 EMA60，伺服器第 15 欄（15 分圖＝這根收盤時已收完的那根 60 分的值）。
+//   八年 480 個方塊：藍都在這條線上方收、金都在下方收（例外 6 個，都是靠缺口的）。只畫線、不參與縱軸縮放。
+const TXE6C = '#a3e635';
+function txE6On(R){ return TXE6 === '1' && TXCH && (TXCH.key === 'TX|15' || TXCH.key === 'TX|60') && R && R.bars && R.bars.length; }
+function txE6Apply(){
+  const C = TXCH; if(!C || !C.e6) return; const R = TXDATA[C.key];
+  C.e6.setData(txE6On(R) ? R.bars.map(b => (typeof b[15] === 'number' && b[15] === b[15]) ? {time:b[0], value:b[15]} : {time:b[0]}) : []);
+}
+function txE6Leg(R, i){ const b = txE6On(R) ? R.bars[i] : null; return (b && typeof b[15] === 'number') ? ' <span style="color:'+TXE6C+'">60分EMA60 '+txNum(b[15], R.meta.prec || 0)+'</span>' : ''; }
 function txMaLeg(R, i){
   const nm = TXMA === '1' ? txMaNames(R) : [], v = (nm.length && R.bars[i] && txCol(R.bars[i]) !== -1) ? R.bars[i][txMaIdx(R)] : null; if(!v) return '';
   const pr = R.meta.prec || 0;
@@ -3242,12 +3252,13 @@ function txCreate(){
   if(bs.createPriceLine) bs.createPriceLine({price:0, color:'rgba(143,214,195,0.5)', lineWidth:1, lineStyle:2, axisLabelVisible:false, title:'0'});
   // 判顏色用的均線：最多 4 條細線（一般均線的畫法：會參與縱軸縮放，離很遠的慢線也看得到；不要的話按「均線」關掉）
   const ma = TXMAC.map(c => ch.addLineSeries({color:c, lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}));
-  const smz = [0, 1].map(() => ch.addLineSeries(Object.assign({color:TXSMZC.plain, lineStyle:2, autoscaleInfoProvider: () => null}, lo)));   // 測穿版階梯帶：上緣、下緣（虛線；不撐開縱軸）
+  const smz = [0, 1].map(() => ch.addLineSeries(Object.assign({color:TXSMZC.plain, lineStyle:2, autoscaleInfoProvider: () => null}, lo)));
+  const e6 = ch.addLineSeries({color:TXE6C, lineWidth:2, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false, autoscaleInfoProvider: () => null});   // 測穿方向線（60 分 EMA60）   // 測穿版階梯帶：上緣、下緣（虛線；不撐開縱軸）
   // ★NQ 即時估價（2026-11-27）：Yahoo 最後一根右邊一格、空心黃K＋黃色虛線現價（不是 NQ 本身，見 nqEst）
   const es = ch.addCandlestickSeries({upColor:'rgba(0,0,0,0)', downColor:'rgba(0,0,0,0)', borderUpColor:TXESC, borderDownColor:TXESC, wickUpColor:TXESC, wickDownColor:TXESC,
     priceLineVisible:true, priceLineStyle:2, priceLineColor:TXESC, lastValueVisible:true});   // 不放 title：線上 11-27 截圖，「即時估價」字樣的標籤剛好蓋住估價K 本身 → 名稱寫在摘要／圖例，價格軸只標黃色數字
   const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz, es:es};
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz, es:es, e6:e6};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txPsw(); txFit(); txHiLo(); txSess(); txUdMarks(); txSrDraw(); }catch(e){} }); } };
@@ -3262,7 +3273,7 @@ function txPsw(){
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [], C.smz || [], C.es ? [C.es] : [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [], C.smz || [], C.es ? [C.es] : [], C.e6 ? [C.e6] : [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; C.sr.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
@@ -3390,7 +3401,7 @@ function txLegend(t){
   C.lg.innerHTML = '<b>'+txTime(b[0], txIntra())+'</b> '+txBadge(txCol(b))
     + ' 開 '+txNum(b[1], m.prec)+' 高 '+txNum(b[2], m.prec)+' 低 '+txNum(b[3], m.prec)+' 收 <b>'+txNum(b[4], m.prec)+'</b> '+txChg(b[4] - pv, m.prec)
     + (m.vol ? ' 量 '+(m.crypto ? txVolS(b[5]) : b[5]) : '') + (m.ladder && b[txLadIdx()] !== null && b[txLadIdx()] !== undefined ? ' 階梯'+(TXLAD === '2' ? '二 ' : '一 ')+(m.crypto ? txNum(b[txLadIdx()], m.prec) : b[txLadIdx()]) : '') + (b[9] > 0 ? ' ★'+(m.crypto ? 'OI+'+b[9]+'%' : b[9]) : '') + txUdLeg(b[0])
-    + txWrLeg(R, i) + txKdLeg(R, i) + ((TXBS === '1' && txHasBs(R) && b[11] !== null && b[11] !== undefined) ? ' <span style="color:'+TXSTC.bs+'">價差 '+(b[11] > 0 ? '+' : '')+b[11].toFixed(1)+'</span>' : '') + txMaLeg(R, i);
+    + txWrLeg(R, i) + txKdLeg(R, i) + ((TXBS === '1' && txHasBs(R) && b[11] !== null && b[11] !== undefined) ? ' <span style="color:'+TXSTC.bs+'">價差 '+(b[11] > 0 ? '+' : '')+b[11].toFixed(1)+'</span>' : '') + txMaLeg(R, i) + txE6Leg(R, i);
 }
 function txWrLeg(R, i){
   if(TXWR !== '1') return ''; const st = txStudy(R); if(!st || st.wr[i] === null || st.wr[i] === undefined) return '';
