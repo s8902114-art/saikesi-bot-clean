@@ -15,15 +15,18 @@
     階梯、星的「日盤」換成美股正規盤（見 ladders、stars15）。背離星、缺口（跳空輔助）在前端算（同台指）。NQ 沒有官方答案可以對。
 
 ★測穿版階梯帶（麥門 TV「Smart Money Steps [mai-now]」NQ 版；用戶沒有 NQ 版權限）：
-  拿他說明頁 3 張示意圖上量到的 16 組線（_mm_data/sms/nqzone.pkl，像素量測、一個像素約 1 點；第 4 張是 2026-05 的圖、沒有那段 K 線）校正，
-  公式型照台指版（mmtx.sms_zone／sms_width，那邊已定死）：
-    中心＝當天（紐約日期）美股正規盤 09:45 ≤ t < 15:45 的 5 分K，Σ((高+低)/2×量)/Σ量。
-         TV 15 分K：平均差 2.4 點、最大 3.9；Yahoo 5 分K（14 組）：平均差 2.1、最大 4.0、圖上一律低約 2 點（_mm_data/nq/calib.py）。
-         整個正規盤 09:30~16:00 平均差 8~10 點、整個 Globex 日 44 點、亞洲／歐洲時段 140~185 點 → 不是那些時段。
-    全寬＝0.0735 × 前 11 個 CME 交易日（不含當天）真實波幅的平均；16 組全寬誤差中位 0.12 點、最大 0.87 點（全寬約 29~37 點）。
-         N＝11 跟台指版一樣（N＝10／12／14 最大誤差 5~10%）；係數不一樣（台指 0.0614）。
-    放大日（×125/92）照台指版的條件算 —— ★NQ 圖上 16 組剛好都不是放大日，這條**沒驗到，是我定的**。
-    生效＝紐約 16:00（美股收盤）那根起、到下一個交易日 16:00（README_1125 第四輪看圖量的）。
+  拿他說明頁 4 張示意圖上的 23 組線校正（2026-11-26 第二輪，_mm_data/nq/remeasure.py／align_img.py／scan_center*.py／width_check.py）：
+    ・量圖：價格軸改用格線定（先前用標籤文字中心，比格線高 2 像素 → 每個價格被量低 1.5~2.6 點，那就是「一律低約 2 點」的來源）；
+      每根 K 對到 TradingView NQ1! 的 15 分K（成交量序列相關 0.998~0.999），影線頂點／底點對 TV 高低只差 ±0.5 點。
+    ・第 4 張（0McTRgcq）＝2026-05-20~05-28，截圖時開著回溯調整：整張比 TV 高 +585.5 點（加法、跟價位無關），扣掉才比。
+    中心＝當天（紐約日期）紐約 09:45 ≤ t < 15:45 的 **1 分K** Σ((高+低+收)/3×量)/Σ量；拿不到 1 分K 的日子退回 **15 分K** 同一段（他自己也是這樣，同台指版）。
+         9、10 月 16 組（他拿得到 1 分K）用 TV 1 分K：平均差 0.22 點、最大 0.62；5 月 7 組（拿不到）用 TV 15 分K：平均差 0.11、最大 0.38。
+         起點 09:42／09:48 平均差就變 2.4／1.8 點、終點 15:39／15:51 變 1.8／2.0 點 → 時段很尖；價格取法 1 分K 上分不出來，15 分K 上 hlc3 明顯最好。
+    全寬＝0.0735 × 前 11 個 CME 交易日（不含當天）真實波幅的平均；23 組全寬差中位 0.16 點、最大 0.92 點（全寬約 29~41 點）；
+         假日那一盤（勞動節、陣亡將士紀念日）算進下一個交易日（CME 的交易日期），那兩天的兩組全寬一樣（圖上 38.67／38.67）。
+         N＝11 跟台指版一樣；係數不一樣（台指 0.0614）。
+    放大日（×125/92）照台指版的條件算 —— ★NQ 圖上 23 組剛好都不是放大日，這條**沒驗到，是我定的**。
+    生效＝紐約 16:00（美股收盤）那根起、到下一個交易日 16:00（圖上 23 組的換組點都在 15:45／16:00 那兩根之間；假日沒有 16:00 那根 → 下一盤開盤）。
 ★缺口框：規則照台指版 mmtx.sms_gaps（> 0.65 個階梯全寬才追、最多追 5 個、影線補滿就消失、框右端＝收盤離缺口 ≤ 8.2 個全寬的最後一根）。
   NQ 幾乎 23 小時連續交易，「換盤」**我定成**每天 17:00~18:00（紐約）休市後重新開盤那根（含週日開盤）；沒有官方答案可對。
 """
@@ -40,7 +43,10 @@ _PERSIST = os.environ.get("PERSIST_DIR") or ("/data" if os.path.isdir("/data") e
 F5 = os.path.join(_PERSIST, "mmnq_5m.json.gz")
 F60 = os.path.join(_PERSIST, "mmnq_60m.json.gz")
 FD = os.path.join(_PERSIST, "mmnq_daily.json.gz")
+F1 = os.path.join(_PERSIST, "mmnq_1m.json.gz")
 KEEP5_DAYS = 120
+KEEP1_DAYS = 120
+ONE_WIN = (570, 960)              # 1 分K 只存紐約 09:30~16:00（中心、階梯只用這一段；Yahoo 1 分K 只回得到最近 30 天）
 KEEP60_DAYS = 1100
 SHOW = {"15": 1500, "60": 1000, "D": 2000, "W": 1000}
 TW = 8 * 3600                     # 台灣時間 − UTC
@@ -50,6 +56,7 @@ SMZ_N = 11
 SMZ_WIDE = 125.0 / 92.0
 SMZ_A, SMZ_B = 585, 945           # 中心的時段：紐約 09:45 ≤ t < 15:45（分鐘）
 SMZ_EFF = 960                     # 紐約 16:00 起生效
+CEN_PX = "hlc3"                   # 中心的價格取法：(高+低+收)/3（5 月那 7 組 15 分K 上 hlc3 平均差 0.11、hl2 2.48）
 SMG_MIN, SMG_KEEP, SMG_NEAR = 0.65, 5, 8.2
 OPEN_MIN = 1080                   # 紐約 18:00＝CME 休市後重新開盤（我定的「換盤」）
 LAD_P2 = (585, 945)               # 控盤階梯參數二：紐約 09:45~15:45（＝測穿版階梯中心那段）
@@ -67,8 +74,9 @@ except Exception:
 _b5 = {}                          # UTC 秒 → [開, 高, 低, 收, 量]（5 分K，Yahoo 原始值）
 _b60 = {}                         # 同上（60 分K）
 _dly = {}                         # 日序（1970 起第幾天，紐約日期）→ [開, 高, 低, 收, 量, 1H 根數]（CME 交易日）
+_b1 = {}                          # UTC 秒 → [開, 高, 低, 收, 量]（1 分K，只存紐約 09:30~16:00）
 _d1 = {}                          # Yahoo 日K：日序 → [開, 高, 低, 收, 量]（只拿來補週日開盤缺的 10 分鐘，見 patch_sunday；不存檔，啟動時重抓）
-_state = {"ok": False, "err": "", "fetch_err": "", "last_fetch": 0, "last60": 0, "last1d": 0, "last_calc": 0, "sig": None,
+_state = {"ok": False, "err": "", "fetch_err": "", "last_fetch": 0, "last60": 0, "last1d": 0, "last1m": 0, "last_calc": 0, "sig": None,
           "charts": {}, "summ": None, "zones": [], "gaps": [], "zinfo": [], "save_err": "", "meta": {}}
 
 
@@ -129,14 +137,15 @@ def globex_open(now=None):
 
 
 # ───────────────────────── 資料 ─────────────────────────
-def _yget(interval, rng):
-    """Yahoo chart API → ({UTC 秒: [開高低收量]}, 錯誤字串)。兩個主機輪流試；抓不到回 (None, 原因)。"""
+def _yget(interval, rng=None, p1=None, p2=None):
+    """Yahoo chart API → ({UTC 秒: [開高低收量]}, 錯誤字串)。兩個主機輪流試；抓不到回 (None, 原因)。rng 或 (p1, p2)＝起訖 UTC 秒。"""
     step = 300 if interval == "5m" else 60          # 5 分K 對齊到 5 分（盤中最後一根的時間偶爾沒對齊）；60 分K／日K 只對齊到分鐘（半天盤的 1H K 在 :30）
     last = ""
     for host in YH:
         try:
-            r = requests.get(host + "/v8/finance/chart/NQ%3DF", params={"interval": interval, "range": rng, "includePrePost": "true"},
-                             headers=UA, timeout=25)
+            prm = {"interval": interval, "includePrePost": "true"}
+            prm.update({"range": rng} if rng else {"period1": int(p1), "period2": int(p2)})
+            r = requests.get(host + "/v8/finance/chart/NQ%3DF", params=prm, headers=UA, timeout=25)
             if r.status_code != 200:
                 last = f"HTTP {r.status_code}"; continue
             res = ((r.json() or {}).get("chart") or {}).get("result") or []
@@ -169,6 +178,14 @@ def _yget(interval, rng):
     return None, last
 
 
+def _rth1(b):
+    """只留紐約 09:30~16:00（ONE_WIN）的 1 分K。"""
+    if not b:
+        return {}
+    ks = np.array(sorted(b), dtype="int64"); _, mins, _, _ = et_parts(ks)
+    return {int(k): b[int(k)] for k, m in zip(ks, mins) if ONE_WIN[0] <= m < ONE_WIN[1]}
+
+
 def update_data():
     bad = []; n = 0
     b, err = _yget("5m", "60d" if len(_b5) < 3000 else "2d")
@@ -182,6 +199,23 @@ def update_data():
             bad.append("Yahoo 60 分K 抓不到（" + err + "）")
         else:
             _b60.update(b); _state["last60"] = time.time()
+    # 1 分K：第一次往回補 4 段 × 7 天（Yahoo 1 分K 只給最近 30 天、一次最多 8 天），之後每輪抓今天；只存紐約 09:30~16:00
+    if len(_b1) < 2000:
+        now = int(time.time()); got = 0
+        for k in range(4):
+            b, err = _yget("1m", p1=now - (k + 1) * 7 * 86400, p2=now - k * 7 * 86400)
+            if b:
+                _b1.update(_rth1(b)); got += 1
+        if not got:
+            bad.append("Yahoo 1 分K 抓不到（" + err + "）")
+        else:
+            _state["last1m"] = time.time()
+    else:
+        b, err = _yget("1m", "1d")
+        if b is None:
+            bad.append("Yahoo 1 分K 抓不到（" + err + "）")
+        else:
+            _b1.update(_rth1(b)); _state["last1m"] = time.time()
     if not _d1 or time.time() - _state["last1d"] > 1800:
         b, err = _yget("1d", "10y" if not _d1 else "1mo")
         if b is None:
@@ -195,7 +229,7 @@ def update_data():
 
 def _trim():
     now = int(time.time()); fut = now + 86400
-    for st, keep in ((_b5, KEEP5_DAYS), (_b60, KEEP60_DAYS)):
+    for st, keep in ((_b5, KEEP5_DAYS), (_b60, KEEP60_DAYS), (_b1, KEEP1_DAYS)):
         cut = now - keep * 86400
         for k in [k for k in st if k < cut or k > fut]:
             st.pop(k, None)
@@ -214,7 +248,7 @@ def _dump(obj, path):
 def _save():
     try:
         _trim()
-        _dump(_b5, F5); _dump(_b60, F60); _dump(_dly, FD)
+        _dump(_b5, F5); _dump(_b60, F60); _dump(_dly, FD); _dump(_b1, F1)
         _state["save_err"] = ""
     except Exception as e:
         _state["save_err"] = type(e).__name__
@@ -222,14 +256,14 @@ def _save():
 
 def _load():
     bad = []
-    for f, st in ((F5, _b5), (F60, _b60), (FD, _dly)):
+    for f, st in ((F5, _b5), (F60, _b60), (FD, _dly), (F1, _b1)):
         try:
             if os.path.exists(f):
                 with gzip.open(f, "rt", encoding="utf-8") as fh:
                     st.update({int(k): v for k, v in json.load(fh).items()})
         except Exception:
             bad.append(os.path.basename(f))
-    _state["loaded"] = {"5m": len(_b5), "60m": len(_b60), "d": len(_dly), "dir": _PERSIST}     # 啟動時從存檔讀回幾根（驗收「redeploy 後歷史還在」）
+    _state["loaded"] = {"5m": len(_b5), "60m": len(_b60), "d": len(_dly), "1m": len(_b1), "dir": _PERSIST}     # 啟動時從存檔讀回幾根（驗收「redeploy 後歷史還在」）
     if bad:
         _state["err"] = "讀檔失敗 " + "、".join(bad)
 
@@ -400,25 +434,42 @@ def sms_width(dd, k=None, n=None):
     return k * tr.rolling(n).mean().shift(1) * np.where(wide, SMZ_WIDE, 1.0), wide
 
 
-def sms_zone(f5, dd):
-    """測穿版階梯帶 → (zones [[生效秒（台灣當 UTC）, 下緣, 上緣], …], info [{d, c, w, wide, eff}, …])，照時間排。
-    當天的時段還沒走完（還沒有 15:45 以後的 K）就不出那一組。"""
+def centers(f5, a, b, f1=None):
+    """每個紐約日期 [a, b) 分鐘的 Σ((高+低+收)/3×量)/Σ量 → {日序: (值, "1m"／"15m")}。
+    那天有完整的 1 分K（≥ 那段 15 分K 根數×15 的 9 成）就用 1 分K，不然退回 15 分K（由 5 分K 組）——
+    他自己也是這樣：截圖前 1~1.5 個月的 16 組對 TV 1 分K 平均差 0.22 點，5 個月前的 7 組對 TV 15 分K 平均差 0.11 點（同台指版）。"""
+    def agg(fr):
+        t = fr.index.values.astype("int64"); _, mins, day, wd = et_parts(t)
+        v = fr.v.values.astype(float); m = (mins >= a) & (mins < b) & (wd < 5) & (v > 0)
+        px = (fr.h.values + fr.l.values + fr.c.values) / 3 if CEN_PX == "hlc3" else (fr.h.values + fr.l.values) / 2
+        return pd.DataFrame({"d": day[m], "pv": px[m] * v[m], "v": v[m], "n": 1}).groupby("d").sum()
+    out = {}
+    if f5 is None or not len(f5):
+        return out
+    g15 = agg(bars15(f5)); g1 = agg(f1) if f1 is not None and len(f1) else None
+    for d, r in g15.iterrows():
+        d = int(d)
+        if g1 is not None and d in g1.index and g1.n[d] >= 0.9 * r.n * 15 and g1.v[d] > 0:
+            out[d] = (float(g1.pv[d] / g1.v[d]), "1m")
+        elif r.v > 0:
+            out[d] = (float(r.pv / r.v), "15m")
+    return out
+
+
+def sms_zone(f5, dd, f1=None):
+    """測穿版階梯帶 → (zones [[生效秒（台灣當 UTC）, 下緣, 上緣], …], info [{d, c, w, wide, eff, src}, …])，照時間排。
+    當天的時段還沒走完（還沒有 15:45 以後的 K）就不出那一組。f1＝1 分K（有就用，見 centers）。"""
     try:
         if f5 is None or not len(f5) or dd is None or len(dd) < SMZ_N + 1:
             return [], []
         t = f5.index.values.astype("int64")
-        _, mins, day, wd = et_parts(t)
-        v = f5.v.values.astype(float)
-        m = (mins >= SMZ_A) & (mins < SMZ_B) & (wd < 5) & (v > 0)
-        if not m.any():
+        cen = centers(f5, SMZ_A, SMZ_B, f1)
+        if not cen:
             return [], []
-        px = (f5.h.values + f5.l.values) / 2
-        g = pd.DataFrame({"d": day[m], "pv": px[m] * v[m], "v": v[m]}).groupby("d").sum()
-        cen = g.pv / g.v
         wid, wide = sms_width(dd)
         last_t = int(t[-1])
         out, info = [], []
-        for d, c in cen.items():
+        for d, (c, src) in sorted(cen.items()):
             d = int(d)
             if last_t < et_to_utc(d, SMZ_B):
                 continue
@@ -430,7 +481,7 @@ def sms_zone(f5, dd):
             eff = et_to_utc(d, SMZ_EFF) + TW
             hw = float(w) / 2
             out.append([int(eff), round(float(c) - hw, 2), round(float(c) + hw, 2)])
-            info.append({"d": d, "c": round(float(c), 2), "w": round(float(w), 2), "wide": bool(wide.loc[d]), "eff": int(eff)})
+            info.append({"d": d, "c": round(float(c), 2), "w": round(float(w), 2), "wide": bool(wide.loc[d]), "eff": int(eff), "src": src})
         return out, info
     except Exception:
         traceback.print_exc()
@@ -483,21 +534,18 @@ def sms_gaps(d15, zones):
     return sms_gaps_core(t + TW, d15.h.values, d15.l.values, d15.c.values, mins == OPEN_MIN, zones)
 
 
-def ladders(f5):
+def ladders(f5, f1=None):
     """控盤階梯（麥門台指軟體的參數一／二；台指＝當天日盤口數加權均價，P2 08:47~13:25、P1 09:00~10:45，13:30 生效，mmtx.ladders）套到 NQ。
-    ★我定的（NQ 沒有官方答案）：「日盤」＝美股正規盤。參數二＝紐約 09:45~15:45（＝測穿版階梯中心那段，所以兩個中心同值）、
-      參數一＝紐約 09:30~11:15（美股開盤後 1 小時 45 分，對照台指＝加權開盤 09:00~10:45；同幣圖的參數一）；價格＝(高+低)/2×量（同台指），
-      紐約 16:00 生效。那段還沒走完（還沒有段尾以後的 K）就不出。回傳 (參數二, 參數一)，各為 [(生效 UTC 秒, 值), …]。"""
+    ★我定的（NQ 沒有官方答案）：「日盤」＝美股正規盤。參數二＝紐約 09:45~15:45（＝測穿版階梯中心，同一個算法所以同值）、
+      參數一＝紐約 09:30~11:15（美股開盤後 1 小時 45 分，對照台指＝加權開盤 09:00~10:45；同幣圖的參數一）；
+      價格＝(高+低+收)/3×量、有 1 分K 用 1 分K（同測穿版中心，見 centers），紐約 16:00 生效。那段還沒走完就不出。
+    回傳 (參數二, 參數一)，各為 [(生效 UTC 秒, 值), …]。"""
     out = []
     if f5 is None or not len(f5):
         return [], []
-    t = f5.index.values.astype("int64")
-    _, mins, day, wd = et_parts(t)
-    v = f5.v.values.astype(float); px = (f5.h.values + f5.l.values) / 2; last_t = int(t[-1])
+    last_t = int(f5.index.values[-1])
     for a, b in (LAD_P2, LAD_P1):
-        m = (mins >= a) & (mins < b) & (wd < 5) & (v > 0)
-        g = pd.DataFrame({"d": day[m], "pv": px[m] * v[m], "v": v[m]}).groupby("d").sum()
-        out.append([(et_to_utc(int(d), SMZ_EFF), float(r.pv / r.v)) for d, r in g.iterrows() if last_t >= et_to_utc(int(d), b)])
+        out.append([(et_to_utc(d, SMZ_EFF), v) for d, (v, _) in sorted(centers(f5, a, b, f1).items()) if last_t >= et_to_utc(d, b)])
     return out[0], out[1]
 
 
@@ -587,9 +635,10 @@ def compute():
     h1 = bars60(f5, _frame(_b60))
     _merge_daily(globex_days(h1), _d1)
     dd = daily_df()
-    zs, zinfo = sms_zone(f5, dd)
+    f1 = clean5(_frame(_b1))[0] if _b1 else None
+    zs, zinfo = sms_zone(f5, dd, f1)
     gp = sms_gaps(d15, zs)
-    P2, P1 = ladders(f5); st = stars15(f5); C = colors(d15, h1, dd)
+    P2, P1 = ladders(f5, f1); st = stars15(f5); C = colors(d15, h1, dd)
     t15, t60 = d15.index.values.astype("int64"), h1.index.values.astype("int64")
     c15, c15b = C.get("15", (None, None)); c60 = C.get("60", (None, None))[0]; cD, cD2 = C.get("D", (None, None))
     charts = {"15": _rows(d15, SHOW["15"], _marks(d15, {570: "o", 960: "c"}), col=c15, col2=c15b, lad2=lad_at(P2, t15), lad1=lad_at(P1, t15), st=st, ma=ma(d15, "15")),
@@ -601,12 +650,12 @@ def compute():
     act = [z for z in zinfo if z["eff"] <= now_tw]
     nxt = [z for z in zinfo if z["eff"] > now_tw]
     zf = lambda z: None if not z else {"lo": round(z["c"] - z["w"] / 2, 2), "hi": round(z["c"] + z["w"] / 2, 2), "c": z["c"], "w": z["w"],
-                                         "wide": z["wide"], "from": time.strftime("%m-%d %H:%M", time.gmtime(z["eff"])),
+                                         "wide": z["wide"], "src": z.get("src"), "from": time.strftime("%m-%d %H:%M", time.gmtime(z["eff"])),
                                          "day": time.strftime("%Y-%m-%d", time.gmtime(z["d"] * 86400))}
     s = {"ok": True, "err": "", "name": "NQ", "last": round(float(f5.c.iloc[-1]), 2), "last_t": lt,
          "last_bar": _fmt(lt, TW), "last_ny": _fmt(lt, int(et_off(np.array([lt]))[0])),
          "zone": zf(act[-1] if act else None), "next": zf(nxt[-1] if nxt else None), "n_gaps": sum(1 for g in gp if g[4]),
-         "n5": len(f5), "nfix": nfix, "npatch": npatch, "days": len(dd), "first_day": time.strftime("%Y-%m-%d", time.gmtime(int(dd.index[0]) * 86400)) if len(dd) else None,
+         "n5": len(f5), "n1": len(_b1), "nfix": nfix, "npatch": npatch, "days": len(dd), "first_day": time.strftime("%Y-%m-%d", time.gmtime(int(dd.index[0]) * 86400)) if len(dd) else None,
          "k": SMZ_K, "n": SMZ_N, "half": LAD_HALF, "star_vol": STAR_VOL, "warm": WARM}
     r15 = charts["15"]
     if r15:
@@ -633,7 +682,7 @@ def _sig():
     if not _b5:
         return None
     k = max(_b5)
-    return (k, tuple(_b5[k]), sum(1 for x in _b5 if x >= k - 2 * 86400), max(_b60) if _b60 else None, len(_d1))
+    return (k, tuple(_b5[k]), sum(1 for x in _b5 if x >= k - 2 * 86400), max(_b60) if _b60 else None, len(_d1), max(_b1) if _b1 else None)
 
 
 def run_once():
