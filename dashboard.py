@@ -1015,6 +1015,12 @@ def register(app, G):
             # **封鎖按網域**（fapi 擋、www 通），所以 Bybit 的備援網域也要各試一次。
             ("Bybit bytick",     "https://api.bytick.com/v5/market/tickers?category=linear"),
             ("Bybit .nl",        "https://api.bybit.nl/v5/market/tickers?category=linear"),
+            # ★NQ（那斯達克 100 期貨）K 線來源（2026-11-26，盤面要加 NQ）：Yahoo Finance chart API 本機通（1 分／15 分／日K 都有量），
+            #   雲端通不通要從這裡量（本機通不代表 Railway 通；兩個主機各試一次）。
+            ("Yahoo q1 NQ 15分", "https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=15m&range=1d"),
+            ("Yahoo q2 NQ 15分", "https://query2.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=15m&range=1d"),
+            ("Yahoo q1 NQ 1分",  "https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=1m&range=1d"),
+            ("Yahoo q1 NQ 日K",  "https://query1.finance.yahoo.com/v8/finance/chart/NQ%3DF?interval=1d&range=5d"),
         ]
         out = []
         for name, url in cands:
