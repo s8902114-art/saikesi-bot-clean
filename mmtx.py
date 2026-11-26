@@ -167,6 +167,14 @@ def fetch_session(sid):
 
 
 def _vfix_reconcile(sid, b):
+    """對帳一次，並把這個合約（日盤／夜盤各一份）最近一次的對帳結果留在 _state["vfs"]，驗收時兩盤都看得到。"""
+    _vfix_reconcile_core(sid, b)
+    v = _state.get("vfix")
+    if isinstance(v, dict) and v.get("sid") == sid:
+        _state.setdefault("vfs", {})[sid] = dict(v)
+
+
+def _vfix_reconcile_core(sid, b):
     """期交所 MIS 的逐分量在行情快的時候會少算（2026-11-25 日盤：逐分加總 85,002 口、實際 125,359 口，09:00~12:15 每 15 分只有四到七成；
     平常日與夜盤是對的）→ 用量加權算的東西（階梯中心、籌碼星）在大震日被帶偏（測穿版階梯中心跟 TradingView 差 16~98 點）。
     報價裡的總量（CTotalVolume）是對的：日盤的總量＝前一個夜盤＋日盤到現在（2026-11-25 實測 220,986＝95,627＋125,359，跟 TV 分毫不差）。
@@ -1175,7 +1183,7 @@ def dash_chart(inst, tf, since=None):
             _lk = sorted(_SMZ_TV["lines"])
             meta["smz_tv"] = {"read_at": _SMZ_TV.get("read_at"), "last": _lk[-1] if _lk else None}
         if inst == "TX" and _state.get("vfix"):                 # 逐分量補量的對帳狀態（驗收用）
-            meta["vfix"] = _state.get("vfix")
+            meta["vfix"] = _state.get("vfix"); meta["vfs"] = _state.get("vfs")
         if inst == "TX" and tf == "15" and _SMG.get("TX"):     # 測穿版缺口框：右端還在圖表範圍內的
             meta["smg"] = [g for g in _SMG["TX"] if g[1] >= rows[0][0]]
         if since is not None:
