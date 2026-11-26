@@ -182,8 +182,14 @@ def _vfix_reconcile(sid, b):
         mis = sum(b[k][4] for k in keys)
         if not (mis > 0):
             return
-        base = 0.0
-        if sid.endswith("-F"):                      # 日盤：扣掉前一個夜盤的總量
+        base = 0.0; mode = "D"
+        skey = sid + "|" + str(q.get("cdate")); stt = _vq.get(skey)
+        if stt is not None and stt.get("v") != 2:
+            stt = None                              # 舊版留下的狀態（那版把盤中的日盤總量也扣了夜盤，整盤都沒補到）不可信 → 當成這一盤第一次對帳
+        p_mode = (stt or {}).get("mode"); p_pt = (stt or {}).get("pt")
+        if sid.endswith("-F"):
+            # 日盤的報價總量有兩種：盤中＝只有日盤（2026-11-26 09:36 實測 23,790、夜盤是 79,442；同時 TV 09:00 那 15 分 8,744、期交所逐分只有 4,621）；
+            # 收盤後＝前一個夜盤＋日盤（2026-11-25 晚上實測 220,986＝95,627＋125,359）。→ 先算夜盤總量，再判斷這次拿到的是哪一種。
             prev = [k for k in _bars if k < keys[0]]
             if not prev:
                 return
@@ -196,26 +202,42 @@ def _vfix_reconcile(sid, b):
             if not (n_sum > 0):
                 return
             mrec = _vq.get("M") or {}
-            base = mrec.get("tot") if (mrec.get("last") in ks_n and mrec.get("tot")) else n_sum
-            if not (0.9 * n_sum <= base <= 1.1 * n_sum):
-                base = n_sum                        # 記下來的夜盤總量跟逐分加總差太多 → 用逐分加總
+            nb = mrec.get("tot") if (mrec.get("last") in ks_n and mrec.get("tot")) else n_sum
+            if not (0.9 * n_sum <= nb <= 1.1 * n_sum):
+                nb = n_sum                          # 記下來的夜盤總量跟逐分加總差太多 → 用逐分加總
+            comb = (tot - nb) >= 0.995 * mis        # 扣掉夜盤還蓋得住逐分加總 → 這個總量有可能含夜盤
+            if p_mode is None:
+                mode = "C" if comb else "D"         # 這一盤第一次對帳：照上面那個判斷
+            elif p_mode == "D" and comb and p_pt is not None and (tot - p_pt) >= 0.5 * nb:
+                mode = "C"                          # 總量一口氣多了半個夜盤以上 → 收盤後換成含夜盤的算法
+            else:
+                mode = p_mode
+            if mode == "C":
+                base = nb
         else:
             _vq["M"] = {"tot": tot, "last": keys[-1], "cdate": q.get("cdate")}
         true = tot - base
         fixed = sum(_vfix.get(k, 0.0) for k in keys)
-        skey = sid + "|" + str(q.get("cdate")); stt = _vq.get(skey)
         if stt is None:                             # 這一盤第一次對帳。盤已經走了一段（第一次上線、或狀態檔不見）→ 之前少的不知道落在哪幾分鐘，不回頭亂補：
             stt = {"off": max(true - mis - fixed, 0.0) if len(keys) > 30 else 0.0}      # 記成基準（off），只補之後新少的
         off = stt.get("off", 0.0)
         lack = true - mis - fixed - off
-        _state["vfix"] = {"sid": sid, "true": round(true), "mis": round(mis), "fix": round(fixed), "lack": round(lack), "skip": round(off)}
-        nxt = {"end": keys[-2] if len(keys) >= 2 else keys[-1], "pv": {k: b[k][4] for k in keys[-3:]}, "off": off}     # pv＝這次看到的最後幾分鐘的量（下次算「多了多少」用）
-        if true <= 0 or lack < 1 or lack > 3 * mis:
+        _state["vfix"] = {"sid": sid, "true": round(true), "mis": round(mis), "fix": round(fixed), "lack": round(lack), "skip": round(off), "mode": mode}
+        nxt = {"v": 2, "end": keys[-2] if len(keys) >= 2 else keys[-1], "pv": {k: b[k][4] for k in keys[-3:]}, "off": off, "mode": mode, "pt": tot}     # pv＝這次看到的最後幾分鐘的量（下次算「多了多少」用）；pt＝這次的報價總量
+        if true <= 0 or lack > 3 * mis:             # 總量不合理 → 不補，而且不讓這一次的讀數改掉「哪一種算法」與上次的總量
+            nxt["mode"] = p_mode or mode; nxt["pt"] = p_pt if p_pt is not None else tot
+            _vq[skey] = nxt
+            return
+        if lack < 1:
             _vq[skey] = nxt
             return
         span = [k for k in keys if k > stt.get("end", "")] or [keys[-1]]
         pv = stt.get("pv") or {}
         w = [max(b[k][4] - pv.get(k, 0.0), 0.0) for k in span]; sw = sum(w)      # 照「上次對帳之後各分鐘多出來的量」分（上次那一分鐘還沒走完）
+        if lack > 8 * sw + 500:                     # 要補的量遠大於這段期交所新增的成交 → 不是「這幾分鐘少算」→ 不補，記成基準（寧可少補）
+            nxt["off"] = off + lack; _vq[skey] = nxt
+            _state["vfix"]["skip"] = round(off + lack); _state["vfix"]["lack"] = 0
+            return
         if not (sw > 0):
             span = [keys[-1]]; w = [1.0]; sw = 1.0
         for k, wk in zip(span, w):
