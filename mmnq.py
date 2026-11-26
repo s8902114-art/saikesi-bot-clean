@@ -215,6 +215,7 @@ def _load():
                     st.update({int(k): v for k, v in json.load(fh).items()})
         except Exception:
             bad.append(os.path.basename(f))
+    _state["loaded"] = {"5m": len(_b5), "60m": len(_b60), "d": len(_dly), "dir": _PERSIST}     # 啟動時從存檔讀回幾根（驗收「redeploy 後歷史還在」）
     if bad:
         _state["err"] = "讀檔失敗 " + "、".join(bad)
 
@@ -560,6 +561,7 @@ def dash_payload():
             # 盤中最後一根比現在晚超過 40 分鐘（Yahoo 延遲約 10 分＋一根 5 分）＝過期（美國假日那盤 Yahoo 不給分K，也會這樣）
             p["stale"] = bool(globex_open(now) and lag > 40 * 60)
         p["save_err"] = _state.get("save_err") or ""
+        p["loaded"] = _state.get("loaded")
         return p
     except Exception as e:
         return {"ok": False, "err": type(e).__name__}
