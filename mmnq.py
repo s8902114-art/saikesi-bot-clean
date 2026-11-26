@@ -10,6 +10,9 @@
 存（Railway volume /data，redeploy 後還在）：5 分K（留 120 天）、60 分K（留 1100 天；5 分K 沒蓋到的更早的 1H／日K 用它）、日K（長期）。
   記憶體裡的時間一律是 UTC 秒；畫圖用「台灣時間當成 UTC」的秒（跟台指那頁一樣，畫面上直接是台灣時間）。
 畫：15 分／1H／日／週 K＋量；15 分圖加測穿版階梯帶（sms_zone）與缺口框（sms_gaps）。方塊（測穿記號）還沒破解，不畫。
+  ★2026-11-26 第二刀（用戶：「麥門那些指標都要有」）：彩色K（15 分參數一／二、60 分、日K 參數一／二）、判色均線、控盤階梯（參數一／二）、籌碼星
+    —— **全部是台指的公式直接套到 NQ，參數沒校正（我定的）**：彩色K／均線直接呼叫 mmtx 現成函式（inst="TX"）；
+    階梯、星的「日盤」換成美股正規盤（見 ladders、stars15）。背離星、缺口（跳空輔助）在前端算（同台指）。NQ 沒有官方答案可以對。
 
 ★測穿版階梯帶（麥門 TV「Smart Money Steps [mai-now]」NQ 版；用戶沒有 NQ 版權限）：
   拿他說明頁 3 張示意圖上量到的 16 組線（_mm_data/sms/nqzone.pkl，像素量測、一個像素約 1 點；第 4 張是 2026-05 的圖、沒有那段 K 線）校正，
@@ -49,6 +52,17 @@ SMZ_A, SMZ_B = 585, 945           # 中心的時段：紐約 09:45 ≤ t < 15:45
 SMZ_EFF = 960                     # 紐約 16:00 起生效
 SMG_MIN, SMG_KEEP, SMG_NEAR = 0.65, 5, 8.2
 OPEN_MIN = 1080                   # 紐約 18:00＝CME 休市後重新開盤（我定的「換盤」）
+LAD_P2 = (585, 945)               # 控盤階梯參數二：紐約 09:45~15:45（＝測穿版階梯中心那段）
+LAD_P1 = (570, 675)               # 控盤階梯參數一：紐約 09:30~11:15（美股開盤後 1 小時 45 分，對照台指＝加權開盤 09:00~10:45）
+LAD_HALF = 9.0                    # 階梯雙線 ±9 點（照台指）
+STAR_WIN = (570, 960)             # 籌碼星只算美股正規盤 09:30~16:00
+STAR_VOL = 26000                  # 籌碼星門檻（台指 3000 口；NQ 取「出星頻率跟台指一樣」的口數，我定的，見 stars15）
+WARM = 280                        # 同台指：每個週期最前面 280 根長均線還沒穩 → 不上色
+COLOR_NAME = {0: "黑", 1: "金", 2: "藍", 3: "紅"}
+try:
+    import mmtx as _MX            # 彩色K／判色均線的公式（台指那組）；載不到就只畫 K 線
+except Exception:
+    _MX = None
 
 _b5 = {}                          # UTC 秒 → [開, 高, 低, 收, 量]（5 分K，Yahoo 原始值）
 _b60 = {}                         # 同上（60 分K）
@@ -169,7 +183,7 @@ def update_data():
         else:
             _b60.update(b); _state["last60"] = time.time()
     if not _d1 or time.time() - _state["last1d"] > 1800:
-        b, err = _yget("1d", "6mo" if not _d1 else "1mo")
+        b, err = _yget("1d", "10y" if not _d1 else "1mo")
         if b is None:
             bad.append("Yahoo 日K 抓不到（" + err + "）")
         else:
@@ -335,10 +349,14 @@ def globex_days(f1h):
     return d
 
 
-def _merge_daily(dn):
-    """把 1H 組出來的交易日寫進長期日K：1H 蓋到的範圍以新的為準（短日被併掉的舊紀錄要刪），第一天可能不完整 → 已經有就不覆蓋。"""
+def _merge_daily(dn, d1=None):
+    """把 1H 組出來的交易日寫進長期日K：1H 蓋到的範圍以新的為準（短日被併掉的舊紀錄要刪），第一天可能不完整 → 已經有就不覆蓋。
+    1H 蓋不到的更早日子用 Yahoo 日K（d1，10 年）補（彩色K 日K 的長均線要暖機；Yahoo 日K 的收盤在週五／換月那幾天跟分K 不一樣，只當舊歷史用）。"""
     if not len(dn):
         return
+    for d, r in (d1 or {}).items():
+        if d < int(dn.index[0]) and d not in _dly and ((d + 3) % 7) < 5:
+            _dly[int(d)] = [float(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), 0]
     first, last = int(dn.index[0]), int(dn.index[-1])
     have = set(int(x) for x in dn.index)
     for k in [k for k in _dly if first < k <= last and k not in have]:
@@ -465,16 +483,90 @@ def sms_gaps(d15, zones):
     return sms_gaps_core(t + TW, d15.h.values, d15.l.values, d15.c.values, mins == OPEN_MIN, zones)
 
 
+def ladders(f5):
+    """控盤階梯（麥門台指軟體的參數一／二；台指＝當天日盤口數加權均價，P2 08:47~13:25、P1 09:00~10:45，13:30 生效，mmtx.ladders）套到 NQ。
+    ★我定的（NQ 沒有官方答案）：「日盤」＝美股正規盤。參數二＝紐約 09:45~15:45（＝測穿版階梯中心那段，所以兩個中心同值）、
+      參數一＝紐約 09:30~11:15（美股開盤後 1 小時 45 分，對照台指＝加權開盤 09:00~10:45；同幣圖的參數一）；價格＝(高+低)/2×量（同台指），
+      紐約 16:00 生效。那段還沒走完（還沒有段尾以後的 K）就不出。回傳 (參數二, 參數一)，各為 [(生效 UTC 秒, 值), …]。"""
+    out = []
+    if f5 is None or not len(f5):
+        return [], []
+    t = f5.index.values.astype("int64")
+    _, mins, day, wd = et_parts(t)
+    v = f5.v.values.astype(float); px = (f5.h.values + f5.l.values) / 2; last_t = int(t[-1])
+    for a, b in (LAD_P2, LAD_P1):
+        m = (mins >= a) & (mins < b) & (wd < 5) & (v > 0)
+        g = pd.DataFrame({"d": day[m], "pv": px[m] * v[m], "v": v[m]}).groupby("d").sum()
+        out.append([(et_to_utc(int(d), SMZ_EFF), float(r.pv / r.v)) for d, r in g.iterrows() if last_t >= et_to_utc(int(d), b)])
+    return out[0], out[1]
+
+
+def lad_at(ev, t):
+    """每根 K（UTC 秒陣列）當時生效的階梯值（最後一個 生效 ≤ 這根起點 的；之前沒有＝None）。"""
+    if not ev:
+        return [None] * len(t)
+    et = np.array([e[0] for e in ev], dtype="int64"); val = [e[1] for e in ev]
+    k = np.searchsorted(et, np.asarray(t, dtype="int64"), side="right") - 1
+    return [None if j < 0 else round(float(val[j]), 2) for j in k]
+
+
+def stars15(f5):
+    """籌碼異常星（台指＝這根 15 分K 裡最大的 5 分K 量 ≥3000 口、只算台股盤中，mmtx.stars15）套到 NQ。回傳 {15 分K 起點 UTC 秒: 那根最大的 5 分K 量}（只回 ≥ 門檻的）。
+    ★我定的：只算美股正規盤 09:30~16:00（紐約）的 5 分K；門檻 STAR_VOL＝26,000 口＝讓 NQ 出星的頻率跟台指一樣
+      （台指 58 個日盤 18 顆＝每根 15 分K 1.72%、每天 0.31 顆；NQ 50 個正規盤用 26,000 口是 1.78%、每天 0.46 顆。台指樣本只有 18 顆，只能當參考）。
+      3000 口直接套 → NQ 每天 23.5 顆（幾乎每根）。台指 09:00 那一分鐘不算，NQ 的 5 分K 切不出來 → 09:30 那根照算。"""
+    if f5 is None or not len(f5):
+        return {}
+    t = f5.index.values.astype("int64")
+    _, mins, _, wd = et_parts(t)
+    m = (mins >= STAR_WIN[0]) & (mins < STAR_WIN[1]) & (wd < 5)
+    if not m.any():
+        return {}
+    big = pd.Series(f5.v.values[m].astype(float)).groupby((t[m] // 900) * 900).max()
+    return {int(k): float(v) for k, v in big.items() if v >= STAR_VOL}
+
+
+def colors(d15, h1, dd):
+    """彩色K：台指的公式直接套（mmtx.colors15_v3／colors15_p2／colors60_v3／colors_daily／colors_daily_p2，inst="TX"），參數沒校正（我定的）。
+    回傳 {"15": (參數一, 參數二), "60": (參數一, None), "D": (參數一, 參數二)}；mmtx 載不到回 {}。"""
+    if _MX is None:
+        return {}
+    out = {}
+    try:
+        out["15"] = (_MX.colors15_v3(d15, "TX"), _MX.colors15_p2(d15, "TX"))
+        out["60"] = (_MX.colors60_v3(h1, "TX"), None)
+        out["D"] = (np.asarray(_MX.colors_daily(dd, "TX"), float), np.asarray(_MX.colors_daily_p2(dd, "TX"), float))
+    except Exception:
+        traceback.print_exc()
+    return out
+
+
+def ma(df, tf):
+    """判顏色用的均線（同台指那組 mmtx.MA_SPEC）→ (參數一那組, 參數二那組)，沒有給 None。"""
+    if _MX is None or not len(df):
+        return (None, None)
+    return (_MX.ma_lines(df, "TX", tf, 1), _MX.ma_lines(df, "TX", tf, 2))
+
+
+def ma_names(tf):
+    return _MX.ma_names("TX", tf) if _MX is not None else {}
+
+
 # ───────────────────────── 組裝 ─────────────────────────
-def _rows(df, n_show, mk=None, daily=False):
-    """圖表列（格式同台指那頁）：[時間秒（台灣當 UTC；日K＝那天 00:00）, 開, 高, 低, 收, 量, -2（不上色＝漲紅跌綠）, None, None, 0, 盤別記號]。
+def _rows(df, n_show, mk=None, daily=False, col=None, col2=None, lad2=None, lad1=None, st=None, ma=None):
+    """圖表列（格式同台指那頁 mmtx._rows）：[時間秒（台灣當 UTC；日K＝那天 00:00）, 開, 高, 低, 收, 量, 顏色參數一（-1＝暖機／不上色）,
+      階梯參數二, 階梯參數一, 星（5 分K 量，0＝無）, 盤別記號, 期現價差（NQ 沒有＝None）, 顏色參數二（沒有＝None）, 均線參數一 [..], 均線參數二 [..]]。
     盤別記號：'o'＝美股開盤（紐約 09:30）、'c'＝換階（紐約 16:00）、0＝沒有。"""
     n = len(df); i0 = max(0, n - n_show)
     t = df.index.values.astype("int64")
     ts = t * 86400 if daily else t + TW
     o, h, l, c, v = (df[k].values for k in ("o", "h", "l", "c", "v"))
+    cc = lambda a, i: int(a[i]) if (a is not None and i >= WARM and a[i] == a[i]) else -1
+    mr = [None if L is None else [[None if x != x else round(float(x), 2) for x in np.asarray(a, float)[i0:]] for a in L] for L in (ma or (None, None))]
     return [[int(ts[i]), round(float(o[i]), 2), round(float(h[i]), 2), round(float(l[i]), 2), round(float(c[i]), 2),
-             int(round(float(v[i]))), -2, None, None, 0, (mk[i] if mk is not None else 0)] for i in range(i0, n)]
+             int(round(float(v[i]))), cc(col, i), lad2[i] if lad2 else None, lad1[i] if lad1 else None,
+             int(round(st.get(int(t[i]), 0))) if st else 0, (mk[i] if mk is not None else 0), None,
+             (cc(col2, i) if col2 is not None else None)] + [None if L is None else [a[i - i0] for a in L] for L in mr] for i in range(i0, n)]
 
 
 def _marks(df, labels):
@@ -493,13 +585,16 @@ def compute():
     f5, npatch = patch_sunday(f5, _d1)
     d15 = bars15(f5)
     h1 = bars60(f5, _frame(_b60))
-    _merge_daily(globex_days(h1))
+    _merge_daily(globex_days(h1), _d1)
     dd = daily_df()
     zs, zinfo = sms_zone(f5, dd)
     gp = sms_gaps(d15, zs)
-    charts = {"15": _rows(d15, SHOW["15"], _marks(d15, {570: "o", 960: "c"})),
-              "60": _rows(h1, SHOW["60"], _marks(h1, {570: "o", 960: "c"})),
-              "D": _rows(dd, SHOW["D"], daily=True),
+    P2, P1 = ladders(f5); st = stars15(f5); C = colors(d15, h1, dd)
+    t15, t60 = d15.index.values.astype("int64"), h1.index.values.astype("int64")
+    c15, c15b = C.get("15", (None, None)); c60 = C.get("60", (None, None))[0]; cD, cD2 = C.get("D", (None, None))
+    charts = {"15": _rows(d15, SHOW["15"], _marks(d15, {570: "o", 960: "c"}), col=c15, col2=c15b, lad2=lad_at(P2, t15), lad1=lad_at(P1, t15), st=st, ma=ma(d15, "15")),
+              "60": _rows(h1, SHOW["60"], _marks(h1, {570: "o", 960: "c"}), col=c60, lad2=lad_at(P2, t60), lad1=lad_at(P1, t60), ma=ma(h1, "60")),
+              "D": _rows(dd, SHOW["D"], daily=True, col=cD, col2=cD2, ma=ma(dd, "D")),
               "W": _rows(to_week(dd), SHOW["W"], daily=True)}
     _state["zones"] = zs; _state["gaps"] = gp; _state["zinfo"] = zinfo
     lt = int(f5.index[-1]); now_tw = lt + TW
@@ -512,7 +607,25 @@ def compute():
          "last_bar": _fmt(lt, TW), "last_ny": _fmt(lt, int(et_off(np.array([lt]))[0])),
          "zone": zf(act[-1] if act else None), "next": zf(nxt[-1] if nxt else None), "n_gaps": sum(1 for g in gp if g[4]),
          "n5": len(f5), "nfix": nfix, "npatch": npatch, "days": len(dd), "first_day": time.strftime("%Y-%m-%d", time.gmtime(int(dd.index[0]) * 86400)) if len(dd) else None,
-         "k": SMZ_K, "n": SMZ_N}
+         "k": SMZ_K, "n": SMZ_N, "half": LAD_HALF, "star_vol": STAR_VOL, "warm": WARM}
+    r15 = charts["15"]
+    if r15:
+        s["ladder2"], s["ladder1"] = r15[-1][7], r15[-1][8]
+    s["stars"] = [[_fmt(k, TW), int(v)] for k, v in sorted(st.items())[-12:]]
+    if c15 is not None and len(d15) > 1:
+        live = bool(int(f5.index[-1]) < int(t15[-1]) + 600)            # 最後一根 15 分K 的第三根 5 分K 還沒出來＝還沒收完
+        ci = len(d15) - 2 if live else len(d15) - 1
+        def last_chg(cc):
+            for i in range(len(cc) - 1, max(WARM, 1) - 1, -1):
+                if cc[i] != cc[i - 1] and cc[i] == cc[i] and cc[i - 1] == cc[i - 1]:
+                    return [_fmt(t15[i], TW), COLOR_NAME[int(cc[i - 1])], COLOR_NAME[int(cc[i])]]
+            return None
+        for key, cc in (("", c15), ("2", c15b)):
+            if cc is None or cc[-1] != cc[-1] or cc[ci] != cc[ci]:
+                continue
+            s["c" + key] = int(cc[-1]); s["color" + key] = COLOR_NAME[int(cc[-1])]
+            s["closed" + key] = [_fmt(t15[ci], TW), int(cc[ci])]; s["last_change" + key] = last_chg(cc)
+        s["live_bar"] = live
     return s, charts
 
 
@@ -575,7 +688,8 @@ def dash_chart(tf, since=None):
         rows = (_state.get("charts") or {}).get(tf)
         if not rows:
             return {"ok": False, "err": _state.get("err") or _state.get("fetch_err") or "NQ 還沒算完第一次"}
-        meta = {"ok": True, "s": "NQ", "tf": tf, "ladder": False, "vol": True, "prec": 2, "half": 0, "n": len(rows), "nq": True}
+        meta = {"ok": True, "s": "NQ", "tf": tf, "ladder": tf in ("15", "60"), "vol": True, "prec": 2, "half": LAD_HALF, "n": len(rows), "nq": True,
+                "ma": ma_names(tf) if tf != "W" else {}, "star_vol": STAR_VOL}
         if tf == "15":
             z = _state.get("zones") or []
             if z:
