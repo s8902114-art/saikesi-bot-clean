@@ -3245,7 +3245,7 @@ function txCreate(){
   const smz = [0, 1].map(() => ch.addLineSeries(Object.assign({color:TXSMZC.plain, lineStyle:2, autoscaleInfoProvider: () => null}, lo)));   // 測穿版階梯帶：上緣、下緣（虛線；不撐開縱軸）
   // ★NQ 即時估價（2026-11-27）：Yahoo 最後一根右邊一格、空心黃K＋黃色虛線現價（不是 NQ 本身，見 nqEst）
   const es = ch.addCandlestickSeries({upColor:'rgba(0,0,0,0)', downColor:'rgba(0,0,0,0)', borderUpColor:TXESC, borderDownColor:TXESC, wickUpColor:TXESC, wickDownColor:TXESC,
-    priceLineVisible:true, priceLineStyle:2, priceLineColor:TXESC, lastValueVisible:true, title:'即時估價'});
+    priceLineVisible:true, priceLineStyle:2, priceLineColor:TXESC, lastValueVisible:true});   // 不放 title：線上 11-27 截圖，「即時估價」字樣的標籤剛好蓋住估價K 本身 → 名稱寫在摘要／圖例，價格軸只標黃色數字
   const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
   TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz, es:es};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
