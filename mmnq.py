@@ -65,6 +65,18 @@ LAD_HALF = 9.0                    # 階梯雙線 ±9 點（照台指）
 STAR_WIN = (570, 960)             # 籌碼星只算美股正規盤 09:30~16:00
 STAR_VOL = 26000                  # 籌碼星門檻（台指 3000 口；NQ 取「出星頻率跟台指一樣」的口數，我定的，見 stars15）
 WARM = 280                        # 同台指：每個週期最前面 280 根長均線還沒穩 → 不上色
+# ★即時估價（2026-11-27，用戶：「nq沒有更即時的嗎」）：Yahoo 延遲約 10 分 → 用即時的替身（不是 NQ 本身）換算一根「正在形成」的估價K。
+#   換算＝NQ ≈ 替身 × 比值；比值＝最近 60 根「Yahoo NQ=F 1 分K 收盤 ÷ 替身同一分鐘收盤」的中位數（_mm_data/nq/est_eval.py：
+#   11-20~11-26 照線上做法模擬，Hyperliquid 比值法誤差中位 2.2 點、90% 6.4 點；差值法 2.2／6.5；Binance QQQ 比值 3.3／9.0、差值 49.9／160.6 → 用比值）。
+EST_SRCS = ("hl", "bn")           # 主來源 Hyperliquid xyz:XYZ100，不行就退到 Binance QQQUSDT（www 網域）
+EST_NAME = {"hl": "Hyperliquid 那斯達克 100 永續（xyz:XYZ100）", "bn": "Binance QQQ 永續（QQQUSDT）"}
+EST_ERR = {"hl": (2.2, 6.4), "bn": (3.3, 9.0)}       # 換算誤差（點）中位／90%（校正資料是最新的時候）
+EST_ERR_OLD = {"hl": ((6, (3.9, 11.5)), (24, (7.3, 13.6)))}   # 比值舊了 ≤6／≤24 小時（Yahoo 1 分K 停了，例：美國假日）；Binance 舊的沒量
+EST_MAX_TRADE_AGE = 30            # 替身最新成交超過 30 秒＝這個來源過期 → 換下一個
+EST_WIN = 60                      # 比值用最近 60 根配對的 1 分K
+EST_JUMP = 0.004                  # 最近 5 分鐘的比值跟整段中位數差 > 0.4%（約 100 點）＝換月跳空 → 只用跳空之後的
+EST_CAL_MAX_AGE = 24 * 3600       # 校正資料超過一天就不畫（舊 24 小時誤差中位 7.3、90% 13.6 點）
+EST_MODE = "ratio"
 COLOR_NAME = {0: "黑", 1: "金", 2: "藍", 3: "紅"}
 try:
     import mmtx as _MX            # 彩色K／判色均線的公式（台指那組）；載不到就只畫 K 線
@@ -75,6 +87,7 @@ _b5 = {}                          # UTC 秒 → [開, 高, 低, 收, 量]（5 �
 _b60 = {}                         # 同上（60 分K）
 _dly = {}                         # 日序（1970 起第幾天，紐約日期）→ [開, 高, 低, 收, 量, 1H 根數]（CME 交易日）
 _b1 = {}                          # UTC 秒 → [開, 高, 低, 收, 量]（1 分K，只存紐約 09:30~16:00）
+_y1raw = {}                       # 最近幾天 Yahoo 1 分K（全時段、不存檔）：只拿來校正即時估價的比值
 _d1 = {}                          # Yahoo 日K：日序 → [開, 高, 低, 收, 量]（只拿來補週日開盤缺的 10 分鐘，見 patch_sunday；不存檔，啟動時重抓）
 _state = {"ok": False, "err": "", "fetch_err": "", "last_fetch": 0, "last60": 0, "last1d": 0, "last1m": 0, "last_calc": 0, "sig": None,
           "charts": {}, "summ": None, "zones": [], "gaps": [], "zinfo": [], "save_err": "", "meta": {}}
@@ -206,16 +219,17 @@ def update_data():
             b, err = _yget("1m", p1=now - (k + 1) * 7 * 86400, p2=now - k * 7 * 86400)
             if b:
                 _b1.update(_rth1(b)); got += 1
+                if k == 0: _y1raw.update(b)
         if not got:
             bad.append("Yahoo 1 分K 抓不到（" + err + "）")
         else:
             _state["last1m"] = time.time()
     else:
-        b, err = _yget("1m", "1d")
+        b, err = _yget("1m", "5d" if not _y1raw else "1d")
         if b is None:
             bad.append("Yahoo 1 分K 抓不到（" + err + "）")
         else:
-            _b1.update(_rth1(b)); _state["last1m"] = time.time()
+            _b1.update(_rth1(b)); _y1raw.update(b); _state["last1m"] = time.time()
     if not _d1 or time.time() - _state["last1d"] > 1800:
         b, err = _yget("1d", "10y" if not _d1 else "1mo")
         if b is None:
@@ -233,6 +247,8 @@ def _trim():
         cut = now - keep * 86400
         for k in [k for k in st if k < cut or k > fut]:
             st.pop(k, None)
+    for k in [k for k in _y1raw if k < now - 3 * 86400 or k > fut]:
+        _y1raw.pop(k, None)
     fd = (now + 2 * 86400) // 86400
     for k in [k for k in _dly if k > fd]:
         _dly.pop(k, None)
@@ -600,6 +616,94 @@ def ma_names(tf):
     return _MX.ma_names("TX", tf) if _MX is not None else {}
 
 
+# ───────────────────────── 即時估價 ─────────────────────────
+def _post(url, body, timeout=10):
+    r = requests.post(url, json=body, headers=UA, timeout=timeout)
+    r.raise_for_status()
+    return r.json()
+
+
+def _proxy(src, cal_end):
+    """替身的 (最新成交 UTC 秒, 最新成交價, {1 分K 起點 UTC 秒: [開, 高, 低, 收]})。1 分K 要蓋到兩段：
+    校正用的「Yahoo 最後一根往前 75 分鐘」（美國假日 Yahoo 停很久時離現在可能十幾小時）、估價K 用的最近 4 小時。抓不到就拋例外。"""
+    now = int(time.time()); a = int(min(cal_end, now) - 75 * 60)
+    if src == "hl":
+        tr = _post("https://api.hyperliquid.xyz/info", {"type": "recentTrades", "coin": "xyz:XYZ100"})            # 只取時間、價格（錢包地址不留）
+        t = max(tr, key=lambda x: x["time"])
+        cs = _post("https://api.hyperliquid.xyz/info", {"type": "candleSnapshot", "req": {"coin": "xyz:XYZ100", "interval": "1m", "startTime": max(a, now - 26 * 3600) * 1000, "endTime": now * 1000}})
+        return int(t["time"]) / 1000, float(t["px"]), {int(x["t"]) // 1000: [float(x["o"]), float(x["h"]), float(x["l"]), float(x["c"])] for x in cs}
+    r = requests.get("https://www.binance.com/fapi/v1/trades", params={"symbol": "QQQUSDT", "limit": 1}, headers=UA, timeout=10); r.raise_for_status(); t = r.json()[-1]
+    pc = {}
+    for prm in ({"startTime": a * 1000, "limit": 90}, {"limit": 240}):
+        r = requests.get("https://www.binance.com/fapi/v1/klines", params=dict({"symbol": "QQQUSDT", "interval": "1m"}, **prm), headers=UA, timeout=10); r.raise_for_status()
+        pc.update({int(x[0]) // 1000: [float(x[1]), float(x[2]), float(x[3]), float(x[4])] for x in r.json()})
+    return int(t["time"]) / 1000, float(t["price"]), pc
+
+
+def est_calib(y1, pc):
+    """比值（或差值，EST_MODE）＝最近 EST_WIN 根配對 1 分K 的中位數；Yahoo 最後一根（還在走）不算。
+    換月跳空：最近 5 根的中位跟整段中位差 > EST_JUMP → 只用跳空之後、跟最近 5 根接近的那一段。回傳 (係數, 最後配對那根 UTC 秒, 用了幾根) 或 (None, None, 0)。"""
+    ks = sorted(k for k in y1 if k in pc)
+    if y1 and ks and ks[-1] == max(y1):
+        ks = ks[:-1]
+    ks = ks[-EST_WIN:]
+    if len(ks) < 10:
+        return None, None, len(ks)
+    f = np.array([(y1[k][3] / pc[k][3]) if EST_MODE == "ratio" else (y1[k][3] - pc[k][3]) for k in ks])
+    m5 = float(np.median(f[-5:])); mall = float(np.median(f)); scale = abs(m5) if EST_MODE == "ratio" else abs(y1[ks[-1]][3])
+    if abs(m5 - mall) > EST_JUMP * scale:
+        i = len(f)
+        while i > 0 and abs(f[i - 1] - m5) <= EST_JUMP / 2 * scale:
+            i -= 1
+        f = f[i:]; ks = ks[i:]
+    return float(np.median(f)), int(ks[-1]), len(ks)
+
+
+def estimate(y1=None, last_end=None, now=None, fetch=None):
+    """即時估價：主來源 → 退路，回傳 {"ok": True, 來源、換算後開高低收、成交時間…} 或 {"ok": False, "why": 原因}。
+    y1＝Yahoo 1 分K（全時段）、last_end＝Yahoo 資料最後一根的結束（UTC 秒；估價K 從這裡畫到現在）。fetch 可換掉（測試用）。"""
+    now = time.time() if now is None else now; y1 = _y1raw if y1 is None else y1; fetch = fetch or _proxy
+    if not globex_open(now):
+        return {"ok": False, "why": "CME 休市中"}
+    if not y1:
+        return {"ok": False, "why": "還沒有 Yahoo 1 分K 可以校正"}
+    if last_end is None:
+        last_end = max(y1) + 60
+    why = []
+    for src in EST_SRCS:
+        nm = EST_NAME[src]
+        try:
+            lt, lpx, pc = fetch(src, max(y1))
+        except Exception as e:
+            why.append(f"{nm} 抓不到（{type(e).__name__}）"); continue
+        if now - lt > EST_MAX_TRADE_AGE:
+            why.append(f"{nm} 最新成交是 {int(now - lt)} 秒前（超過 {EST_MAX_TRADE_AGE} 秒）"); continue
+        k, ct, n = est_calib(y1, pc)
+        if k is None:
+            why.append(f"{nm} 跟 Yahoo 重疊的 1 分K 只有 {n} 根，比值算不出來"); continue
+        if now - ct > EST_CAL_MAX_AGE:
+            why.append(f"{nm} 的比值是 {int((now - ct) // 3600)} 小時前校的（超過 24 小時）"); continue
+        age_h = (now - ct) / 3600; err = EST_ERR[src]; note = ""
+        if age_h > 1:
+            olds = EST_ERR_OLD.get(src)
+            if olds:
+                err = next((e for h, e in olds if age_h <= h), olds[-1][1]); note = f"比值是 {age_h:.0f} 小時前校的（Yahoo 1 分K 停了），誤差變大"
+            else:
+                note = f"比值是 {age_h:.0f} 小時前校的，這個來源舊比值的誤差沒量過"
+        cv = (lambda x: x * k) if EST_MODE == "ratio" else (lambda x: x + k)
+        seg = [pc[t] for t in sorted(pc) if last_end <= t <= now]
+        o = cv(seg[0][0]) if seg else cv(lpx); c = cv(lpx)
+        h = max([cv(x[1]) for x in seg] + [o, c]); l = min([cv(x[2]) for x in seg] + [o, c])
+        return {"ok": True, "src": src, "name": nm, "o": round(o, 2), "h": round(h, 2), "l": round(l, 2), "c": round(c, 2), "raw": lpx, "k": round(k, 6), "mode": EST_MODE,
+                "cal_n": n, "cal_at": _fmt(ct, TW), "cal_age_h": round((now - ct) / 3600, 1), "at": _fmt_s(lt), "t0": int(last_end) + TW,
+                "fetched": now, "err": err, "err_note": note, "fallback": src != EST_SRCS[0], "why_main": why[:1]}
+    return {"ok": False, "why": "；".join(why) or "沒有可用的替身"}
+
+
+def _fmt_s(t):
+    return time.strftime("%H:%M:%S", time.gmtime(int(t) + TW))
+
+
 # ───────────────────────── 組裝 ─────────────────────────
 def _rows(df, n_show, mk=None, daily=False, col=None, col2=None, lad2=None, lad1=None, st=None, ma=None):
     """圖表列（格式同台指那頁 mmtx._rows）：[時間秒（台灣當 UTC；日K＝那天 00:00）, 開, 高, 低, 收, 量, 顏色參數一（-1＝暖機／不上色）,
@@ -689,6 +793,12 @@ def run_once():
     try:
         update_data()
         _trim()
+        try:
+            f5k = max(_b5) + 300 if _b5 else None
+            e = estimate(last_end=max(max(_y1raw) + 60, f5k) if (_y1raw and f5k) else None)
+        except Exception as ex:
+            e = {"ok": False, "why": f"{type(ex).__name__}: {ex}"[:160]}
+        e["fetched"] = time.time(); _state["est"] = e
         sig = _sig()
         if sig == _state["sig"] and _state["summ"]:
             return                          # 資料沒變 → 不重算（跟交易主迴圈共用 GIL）
@@ -723,6 +833,7 @@ def dash_payload():
             # 盤中最後一根比現在晚超過 40 分鐘（Yahoo 延遲約 10 分＋一根 5 分）＝過期（美國假日那盤 Yahoo 不給分K，也會這樣）
             p["stale"] = bool(globex_open(now) and lag > 40 * 60)
         p["save_err"] = _state.get("save_err") or ""
+        p["est"] = _state.get("est")
         p["loaded"] = _state.get("loaded")
         return p
     except Exception as e:
@@ -738,7 +849,7 @@ def dash_chart(tf, since=None):
         if not rows:
             return {"ok": False, "err": _state.get("err") or _state.get("fetch_err") or "NQ 還沒算完第一次"}
         meta = {"ok": True, "s": "NQ", "tf": tf, "ladder": tf in ("15", "60"), "vol": True, "prec": 2, "half": LAD_HALF, "n": len(rows), "nq": True,
-                "ma": ma_names(tf) if tf != "W" else {}, "star_vol": STAR_VOL}
+                "ma": ma_names(tf) if tf != "W" else {}, "star_vol": STAR_VOL, "est": _state.get("est")}
         if tf == "15":
             z = _state.get("zones") or []
             if z:

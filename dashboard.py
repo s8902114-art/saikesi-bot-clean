@@ -2552,18 +2552,18 @@ function txSrPick(h, l, c, a, act, ze, n){
   return {life:brk.concat(open.filter(z => z.live)).sort((x, y) => x.first - y.first), open:open};
 }
 const TXSTC = {res:'#e5484d', sup:'#30a46c', wr:'#b48ef0', kdk:'#5ec4f2', kdd:'#f0a43a', bs:'#8fd6c3', gap:'rgba(242,229,191,0.30)', div:'#f59e0b'};   // KD 顏色照麥門軟體（K 淺藍、D 橘）     // 用戶 10-14：支撐綠、壓力紅（淡紫會跟階梯撞色）
-let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1', TXSM = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
+let TXWR = '1', TXSR = '1', TXPT = '1', TXKD = '1', TXGP = '1', TXDV = '1', TXBS = '1', TXLT = '0', TXMA = '1', TXSM = '1', TXES = '1';   // 燈號圓點預設關（用戶 10-30：「醜死了」）
 try{ const a = localStorage.getItem('txwr'), b = localStorage.getItem('txsr'), d = localStorage.getItem('txpt');
   if(a === '0' || a === '1') TXWR = a; if(b === '0' || b === '1') TXSR = b; if(d === '0' || d === '1') TXPT = d;
-  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v], ['txsm', v => TXSM = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
+  for(const [k, f] of [['txkd', v => TXKD = v], ['txgp', v => TXGP = v], ['txdv', v => TXDV = v], ['txbs', v => TXBS = v], ['txlt', v => TXLT = v], ['txma', v => TXMA = v], ['txsm', v => TXSM = v], ['txes', v => TXES = v]]){ const v = localStorage.getItem(k); if(v === '0' || v === '1') f(v); } }catch(e){}
 function txTgl(k){
   const fl = x => x === '1' ? '0' : '1';
-  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else TXPT = fl(TXPT);
-  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); }catch(e){}
-  if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txSmzApply(); txHiLo(); txLegend(null); }catch(e){} }
+  if(k === 'wr') TXWR = fl(TXWR); else if(k === 'sr') TXSR = fl(TXSR); else if(k === 'kd') TXKD = fl(TXKD); else if(k === 'gp') TXGP = fl(TXGP); else if(k === 'dv') TXDV = fl(TXDV); else if(k === 'bs') TXBS = fl(TXBS); else if(k === 'lt') TXLT = fl(TXLT); else if(k === 'ma') TXMA = fl(TXMA); else if(k === 'sm') TXSM = fl(TXSM); else if(k === 'es') TXES = fl(TXES); else TXPT = fl(TXPT);
+  try{ localStorage.setItem('txwr', TXWR); localStorage.setItem('txsr', TXSR); localStorage.setItem('txpt', TXPT); localStorage.setItem('txkd', TXKD); localStorage.setItem('txgp', TXGP); localStorage.setItem('txdv', TXDV); localStorage.setItem('txbs', TXBS); localStorage.setItem('txlt', TXLT); localStorage.setItem('txma', TXMA); localStorage.setItem('txsm', TXSM); localStorage.setItem('txes', TXES); }catch(e){}
+  if(TXCH && TXDATA[TXCH.key]){ try{ txStApply(); txSmzApply(); nqEstApply(); txHiLo(); txLegend(null); }catch(e){} }
   draw();
 }
-function txTglBar(){ const nq = TXS === 'NQ'; return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
+function txTglBar(){ const nq = TXS === 'NQ'; return (TXTF === 'W' ? [] : [['ma', '均線', TXMA]]).concat(((TXS === 'TX' || nq) && TXTF === '15') ? [['sm', '測穿', TXSM]] : []).concat((nq && (TXTF === '15' || TXTF === '60')) ? [['es', '即時估價', TXES]] : []).concat([['wr', '威廉%R', TXWR], ['kd', 'KD', TXKD], ['sr', '支撐壓力', TXSR], ['pt', '型態', TXPT], ['gp', '缺口', TXGP], ['dv', '背離', TXDV]]).concat((txIsC(TXS) || nq) ? [] : (TXS === 'TSE' ? [['lt', '燈號', TXLT]] : [['bs', '期現價差', TXBS]]))
   .map(([k, n, v]) => `<span class="wb tg2 ${v==='1'?'on':''}" onclick="txTgl('${k}')">${n}</span>`).join(''); }
 // 每份 K 棒算一次（K 數或最後一根收盤變了才重算）。幣：OKX 第 9 欄 '1'＝收完；台指/加權沒有這欄 → 最後一根當盤中不算型態。
 function txStudy(R){
@@ -3243,8 +3243,11 @@ function txCreate(){
   // 判顏色用的均線：最多 4 條細線（一般均線的畫法：會參與縱軸縮放，離很遠的慢線也看得到；不要的話按「均線」關掉）
   const ma = TXMAC.map(c => ch.addLineSeries({color:c, lineWidth:1, lineType:0, priceLineVisible:false, lastValueVisible:false, crosshairMarkerVisible:false}));
   const smz = [0, 1].map(() => ch.addLineSeries(Object.assign({color:TXSMZC.plain, lineStyle:2, autoscaleInfoProvider: () => null}, lo)));   // 測穿版階梯帶：上緣、下緣（虛線；不撐開縱軸）
+  // ★NQ 即時估價（2026-11-27）：Yahoo 最後一根右邊一格、空心黃K＋黃色虛線現價（不是 NQ 本身，見 nqEst）
+  const es = ch.addCandlestickSeries({upColor:'rgba(0,0,0,0)', downColor:'rgba(0,0,0,0)', borderUpColor:TXESC, borderDownColor:TXESC, wickUpColor:TXESC, wickDownColor:TXESC,
+    priceLineVisible:true, priceLineStyle:2, priceLineColor:TXESC, lastValueVisible:true, title:'即時估價'});
   const sr = document.createElement('div'); sr.className = 'txsr'; el.appendChild(sr);     // 支撐壓力／型態的疊圖（SVG）
-  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz};
+  TXCH = {el:el, box:box, ov:ov, lg:lg, ch:ch, cs:cs, vs:vs, lad:lad, uu:uu, ud:ud, udm:{}, udpl:{}, key:'', fit:true, hl:0, wr:wr, kdk:kdk, kdd:kdd, bs:bs, sr:sr, ma:ma, smz:smz, es:es};
   ch.subscribeCrosshairMove(p => { try{ txLegend(p && p.time !== undefined ? p.time : null); }catch(e){} });
   const later = window.requestAnimationFrame || (f => setTimeout(f, 16));
   const redo = () => { if(!TXCH.hl){ TXCH.hl = 1; later(() => { TXCH.hl = 0; try{ txPsw(); txFit(); txHiLo(); txSess(); txUdMarks(); txSrDraw(); }catch(e){} }); } };
@@ -3259,14 +3262,14 @@ function txPsw(){
 }
 function txApply(){
   const C = TXCH, R = TXDATA[C.key];
-  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [], C.smz || [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
+  if(!R || !R.bars.length){ for(const s of [C.cs, C.vs, C.uu, C.ud, C.wr].concat(C.lad, C.kdk ? [C.kdk, C.kdd] : [], C.bs ? [C.bs] : [], C.ma || [], C.smz || [], C.es ? [C.es] : [])) s.setData([]); C.cs.setMarkers([]); C.vs.setMarkers([]);
     C.lg.innerHTML = '<span class="dim">'+(TXERR ? '抓不到：'+TXERR : '載入中…')+'</span>'; C.ov.innerHTML = ''; C.sr.innerHTML = ''; return; }
   const bars = R.bars, m = R.meta;
   C.cs.applyOptions({priceFormat:{type:'price', precision:m.prec, minMove: m.prec ? 0.01 : 1}});
   C.ch.applyOptions({timeScale:{timeVisible: txIntra()}});
   C.cs.setData(bars.map(txCandle));
   C.vs.setData(m.vol ? bars.map(txVol) : []);
-  txLadApply(); txUdApply(); txStApply(); txSmzApply();
+  txLadApply(); txUdApply(); txStApply(); txSmzApply(); nqEstApply();
   txFit(); txHiLo(); txSess(); txLegend(null);
 }
 function txLadApply(){
@@ -3308,6 +3311,7 @@ function txUpdate(nb){
   }
   txStApply();                // 威廉 %R 每根都可能變（盤中那根）→ 整條重餵；型態／區只在收盤後才會變（txStudy 有快取）
   txSmzApply();               // 階梯帶的顏色看現價 → 每次整條重餵
+  nqEstApply();               // 即時估價跟著每次輪詢的 meta.est 換
   txHiLo(); txSess(); txLegend(null);
 }
 // 畫面範圍內的最高／最低標數值；台指的籌碼異常星畫在量上
@@ -3378,6 +3382,8 @@ function txSess(){
 function txLegend(t){
   const C = TXCH; if(!C) return; const R = TXDATA[C.key]; if(!R || !R.bars.length) return;
   const bars = R.bars, m = R.meta; let i = bars.length - 1;
+  if(t !== null && t !== undefined && m.nq && t > bars[i][0]){ const v = nqEst(R);
+    if(v.draw){ const e = v.e; C.lg.innerHTML = '<b style="color:'+TXESC+'">即時估價</b> '+nqHMS(e.t0)+'~'+txEscH(e.at)+' 開 '+txNum(e.o, 2)+' 高 '+txNum(e.h, 2)+' 低 '+txNum(e.l, 2)+' 收 <b>'+txNum(e.c, 2)+'</b> <span class="dim">（'+nqEstSrc(e)+'換算，非 NQ 本身、沒有量）</span>'; return; } }
   if(t !== null && t !== undefined){ let lo = 0, hi = bars.length - 1;
     while(lo < hi){ const mid = (lo + hi + 1) >> 1; if(bars[mid][0] <= t) lo = mid; else hi = mid - 1; } i = lo; }
   const b = bars[i], pv = i > 0 ? bars[i-1][4] : b[1];
@@ -3518,6 +3524,43 @@ function nqWarn(p){
   if(!p || !p.ok || !(p.stale || p.fetch_err)) return '';
   return '<div class="warn">⚠ '+(p.stale ? 'CME 在交易、但最新一根是 '+txEscH(p.lag_min)+' 分鐘前的（美國假日那一盤 Yahoo 不給分K，也會這樣）。' : '')+txEscH(p.fetch_err || '')+'</div>';
 }
+// ★NQ 即時估價（2026-11-27，用戶「nq沒有更即時的嗎」）：後端 mmnq.estimate 每 2 分鐘算一次放在 meta.est／摘要 est；
+//   這裡只決定畫不畫：後端說不行（CME 休市、替身過期、比值太舊…）→ 不畫、寫原因；後端那次是 5 分鐘以前算的（後端卡住）→ 不畫（我定的）。
+//   ★舊的值不准當成即時的顯示。
+const TXESC = '#f2c94c', NQ_EST_MAX_AGE = 300;
+function nqEstOf(R){
+  let e = R && R.meta ? R.meta.est : null; const p = (typeof D !== 'undefined' && D && D.tx && D.tx.NQ) ? D.tx.NQ.est : null;
+  if(p && (!e || (p.fetched || 0) > (e.fetched || 0))) e = p;
+  return e || null;
+}
+function nqEst(R){        // {e, ok:能不能畫, draw:現在要不要畫（開關）, why:不能畫的原因}
+  const e = nqEstOf(R);
+  if(!e) return {e:null, ok:false, draw:false, why:'後端還沒算即時估價'};
+  if(!e.ok) return {e:e, ok:false, draw:false, why:e.why || '估價抓不到'};
+  const age = Date.now() / 1000 - (e.fetched || 0);
+  if(!(age <= NQ_EST_MAX_AGE)) return {e:e, ok:false, draw:false, why:'手上的估價是 '+Math.round(age / 60)+' 分鐘前算的（後端應該每 2 分鐘算一次，可能卡住了），舊的不畫'};
+  return {e:e, ok:true, draw:TXES === '1', why:''};
+}
+function nqEstSrc(e){ return e.src === 'hl' ? 'Hyperliquid 那斯達克 100 永續' : 'Binance QQQ 永續'; }
+function nqHMS(t){ const d = new Date(t * 1000); return String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0'); }
+function nqEstApply(){
+  const C = TXCH; if(!C || !C.es) return; const R = TXDATA[C.key];
+  const v = (R && R.bars && R.bars.length && R.meta && R.meta.nq && (TXTF === '15' || TXTF === '60')) ? nqEst(R) : null;
+  if(!v || !v.draw){ C.es.setData([]); return; }
+  const e = v.e, last = R.bars[R.bars.length - 1];
+  C.es.setData([{time: last[0] + (TXTF === '60' ? 3600 : 900), open: e.o, high: e.h, low: e.l, close: e.c}]);
+}
+function nqEstLine(p){
+  const v = nqEst(TXDATA[TXS + '|' + TXTF] || null);
+  if(!v.ok) return '<br><span class="dim">即時估價：不畫——'+txEscH(v.why)+'</span>';
+  const e = v.e, err = e.err || [null, null], d = (p && p.last != null) ? e.c - p.last : null;
+  return '<br><span style="color:'+TXESC+'">即時估價 <b>'+txNum(e.c, 2)+'</b></span>（'+nqEstSrc(e)+'換算，非 NQ 本身，誤差約 '+err[0]+' 點）'
+    + (TXES === '1' ? '' : ' <span class="dim">圖上已關</span>')
+    + '<br><span class="dim">最後成交 '+txEscH(e.at)+'（台灣時間）'+(d != null ? '・比 Yahoo 最新 '+(d >= 0 ? '+' : '')+d.toFixed(2)+' 點' : '')
+    + '・九成在 '+err[1]+' 點內・後端每 2 分鐘抓一次'
+    + (e.fallback ? '・主來源這次不能用（'+txEscH((e.why_main || []).join('；'))+'），改用 Binance QQQ' : '')
+    + (e.err_note ? '・'+txEscH(e.err_note) : '') + '</span>';
+}
 function nqSum(p){
   if(!p || !p.ok) return '<div class="empty">'+txEscH((p && p.err) || 'NQ 還沒有資料')+(p && p.fetch_err ? '（'+txEscH(p.fetch_err)+'）' : '')+'</div>';
   const z = p.zone, nx = p.next, two = TXCOLP === '2' && p.c2 !== undefined, pc = two ? p.c2 : p.c, pcl = two ? p.closed2 : p.closed, plc = two ? p.last_change2 : p.last_change;
@@ -3531,6 +3574,7 @@ function nqSum(p){
   h += z ? '<br>測穿階梯 <b>'+txNum(z.lo, 2)+' ~ '+txNum(z.hi, 2)+'</b> <span class="dim">中心 '+txNum(z.c, 2)+'・全寬 '+txNum(z.w, 2)+' 點'+(z.wide ? '・放大日' : '')+(z.src ? '・'+(z.src === '1m' ? '1 分K' : '15 分K')+'算的' : '')+'・'+txEscH(z.from)+' 起</span>'
          : '<br><span class="dim">測穿階梯還算不出來（日K 不到 12 天）</span>';
   if(nx) h += '<br><span class="dim">下一組 '+txNum(nx.lo, 2)+' ~ '+txNum(nx.hi, 2)+'，'+txEscH(nx.from)+' 起</span>';
+  h += nqEstLine(p);
   return h + '</div>';
 }
 function nqNote(){
@@ -3539,11 +3583,20 @@ function nqNote(){
   if(TXTF === '15' && TXSM === '1') h += '<div class="sub dim">虛線＝測穿版階梯帶，每天'+nqT(960)+'換：中心＝'+nqT(585, 945)+'那段的 1 分K (高+低+收)/3 加權均價（舊日子沒有 1 分K 用 15 分K，他自己也是）、全寬＝0.0735×前 11 日震幅；'
     + '拿他 NQ 說明頁 4 張示意圖 23 組校的：中心差平均 0.19 點、最大 0.62，全寬差中位 0.16、最大 0.92。'
     + '淺黃框＝缺口框，「換盤」是我定的。方塊還沒破解，先不顯示。</div>';
+  if((TXTF === '15' || TXTF === '60') && TXES === '1') h += '<div class="sub dim">最右邊空心黃K＋黃色虛線＝<b>即時估價</b>：Yahoo 最後一根之後到現在這段，用即時的替身價換算（不是 NQ 本身、沒有量，指標全部照舊只用 Yahoo）。</div>';
   return h;
 }
 function nqRules(){
   return '<details><summary class="sech">規則與準確度（NQ）</summary><div class="note">'
     + '時間全部是台灣時間；美國夏令／冬令時台灣時間差一小時，先寫現在這一季、括號裡是另一季。'
+    + '<br><b>即時估價</b>（15 分、1H 圖最右邊空心黃K＋黃色虛線，開關「即時估價」）：Yahoo 晚約 10 分鐘，所以拿即時的替身換算 Yahoo 最後一根之後到現在這段——'
+    + '主來源 Hyperliquid 那斯達克 100 永續（xyz:XYZ100）；它抓不到或超過 30 秒沒成交，改用 Binance QQQ 永續（QQQUSDT）。'
+    + '換算＝替身價 × 比值，比值＝最近 60 根「Yahoo NQ 1 分K 收盤 ÷ 替身同一分鐘收盤」的中位數（換月跳空時只用跳空之後的）。'
+    + '11-20~11-26 照這個做法模擬（每一分鐘只用當下拿得到、晚 10 分鐘的 Yahoo）：Hyperliquid 誤差中位 2.2 點、九成在 6.4 點內；Binance QQQ 3.3／9.0 點；'
+    + '改用差值法：Hyperliquid 2.2／6.5（差不多）、Binance QQQ 49.9／160.6（差很多）→ 用比值法。'
+    + 'Yahoo 1 分K 停了（例如美國假日）比值會變舊：舊 6 小時 Hyperliquid 誤差中位 3.9、九成 11.5 點，舊 24 小時 7.3／13.6 點；'
+    + '比值超過 24 小時、CME 休市、兩個替身都過期時不畫，摘要寫原因。<b>它不是 NQ 本身、沒有成交量</b>，彩色K／階梯／星這些指標全部照舊只用 Yahoo。'
+    + '後端每 2 分鐘抓一次，所以畫面上的估價最多晚約 2 分鐘（摘要寫了最後成交時間）；手上的估價超過 5 分鐘沒更新就不畫。30 秒、60 根、0.4% 跳空、5 分鐘都是<b>我定的</b>。'
     + '<br><b>資料</b>：Yahoo Finance 的 NQ=F（CME 那斯達克 100 期貨連續近月），bot 盤中每 2 分鐘抓一次 5 分K（15 分、1H 由它組；更早的 1H、日K 用 Yahoo 60 分K），延遲約 10 分鐘。'
     + '跟 TradingView NQ1! 的 15 分K 比（09-17~11-24 共 4,407 根）：高低完全相同 98.3%、美股正規盤成交量比中位 1.000。'
     + '不一樣的地方：每天'+nqT(0)+'那根 Yahoo 少前幾分鐘；美國假日那一盤 Yahoo 不給分K（那段圖上是空的）；季度換月那幾天 Yahoo 換合約的日子跟 TV 不同（09-14 那天高點多 301 點）。'
