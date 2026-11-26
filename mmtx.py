@@ -194,7 +194,7 @@ def _vfix_reconcile_core(sid, b):
         skey = sid + "|" + str(q.get("cdate")); stt = _vq.get(skey)
         if stt is not None and stt.get("v") != 2:
             stt = None                              # 舊版留下的狀態（那版把盤中的日盤總量也扣了夜盤，整盤都沒補到）不可信 → 當成這一盤第一次對帳
-        p_mode = (stt or {}).get("mode"); p_pt = (stt or {}).get("pt")
+        p_mode = (stt or {}).get("mode"); p_pt = (stt or {}).get("pt"); cb = (stt or {}).get("cb")
         if sid.endswith("-F"):
             # 日盤的報價總量有兩種：盤中＝只有日盤（2026-11-26 09:36 實測 23,790、夜盤是 79,442；同時 TV 09:00 那 15 分 8,744、期交所逐分只有 4,621）；
             # 收盤後＝前一個夜盤＋日盤（2026-11-25 晚上實測 220,986＝95,627＋125,359）。→ 先算夜盤總量，再判斷這次拿到的是哪一種。
@@ -217,13 +217,15 @@ def _vfix_reconcile_core(sid, b):
             if p_mode is None:
                 mode = "C" if comb else "D"         # 這一盤第一次對帳：照上面那個判斷
             elif p_mode == "D" and comb and p_pt is not None and (tot - p_pt) >= 0.5 * nb:
-                mode = "C"                          # 總量一口氣多了半個夜盤以上 → 收盤後換成含夜盤的算法
+                mode = "C"; cb = tot - p_pt         # 總量一口氣多了半個夜盤以上 → 收盤後換成含夜盤的算法。日盤已收，多出來的那一截就是併進來的夜盤（比自己估的夜盤量準）
             else:
                 mode = p_mode
             if mode == "C":
-                base = nb
+                base = cb if cb is not None else nb
         else:
             _vq["M"] = {"tot": tot, "last": keys[-1], "cdate": q.get("cdate")}
+        if p_pt is not None and p_mode == mode and tot < p_pt - 0.5:
+            return                                  # 總量只會增加；變少＝這次讀到的不對 → 當作沒看到
         true = tot - base
         fixed = sum(_vfix.get(k, 0.0) for k in keys)
         if stt is None:                             # 這一盤第一次對帳。盤已經走了一段（第一次上線、或狀態檔不見）→ 之前少的不知道落在哪幾分鐘，不回頭亂補：
@@ -231,10 +233,29 @@ def _vfix_reconcile_core(sid, b):
         off = stt.get("off", 0.0)
         lack = true - mis - fixed - off
         _state["vfix"] = {"sid": sid, "true": round(true), "mis": round(mis), "fix": round(fixed), "lack": round(lack), "skip": round(off), "mode": mode}
-        nxt = {"v": 2, "end": keys[-2] if len(keys) >= 2 else keys[-1], "pv": {k: b[k][4] for k in keys[-3:]}, "off": off, "mode": mode, "pt": tot}     # pv＝這次看到的最後幾分鐘的量（下次算「多了多少」用）；pt＝這次的報價總量
+        nxt = {"v": 2, "end": keys[-2] if len(keys) >= 2 else keys[-1], "pv": {k: b[k][4] for k in keys[-3:]}, "off": off, "mode": mode, "pt": tot, "cb": cb}     # pv＝這次看到的最後幾分鐘的量（下次算「多了多少」用）；pt＝這次的報價總量
         if true <= 0 or lack > 3 * mis:             # 總量不合理 → 不補，而且不讓這一次的讀數改掉「哪一種算法」與上次的總量
             nxt["mode"] = p_mode or mode; nxt["pt"] = p_pt if p_pt is not None else tot
             _vq[skey] = nxt
+            return
+        if lack <= -1:
+            # 補過頭了：報價總量會比逐分資料早到幾秒（行情快、收盤撮合時差最多），上一次對帳把那個時間差也當成少算補了進去；
+            # 逐分資料跟上之後這裡就變負的（2026-11-26 實測整盤多補約 550 口，390 口在 13:30 那根）。→ 從最後補的那幾分鐘收回來。
+            rem = -lack
+            for k in reversed(keys):
+                have = _vfix.get(k, 0.0)
+                if have > 0:
+                    d = min(have, rem); rem -= d
+                    if have - d > 1e-9:
+                        _vfix[k] = have - d
+                    else:
+                        _vfix.pop(k, None)
+                    if rem <= 1e-9:
+                        break
+            if rem > 1e-9:                          # 沒有補量可收了 → 是接手時記的基準記多了（當時也有時間差），把基準調回來
+                nxt["off"] = max(off - rem, 0.0)
+            _vq[skey] = nxt
+            _state["vfix"]["fix"] = round(sum(_vfix.get(k, 0.0) for k in keys)); _state["vfix"]["skip"] = round(nxt["off"]); _state["vfix"]["lack"] = 0
             return
         if lack < 1:
             _vq[skey] = nxt
