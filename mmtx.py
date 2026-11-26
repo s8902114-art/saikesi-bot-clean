@@ -277,6 +277,44 @@ def _vfix_reconcile_core(sid, b):
         _state["vfix"] = {"err": type(e).__name__}
 
 
+VSEED_FILE = os.path.join(_HERE, "mmtx_vfix_seed.json")   # 用 TradingView 15 分K 的量補回期交所拿不回來的少算（見 _vseed_apply）
+
+
+def _vseed_apply():
+    """期交所逐分量少算、而且已經過了能用報價總量對帳的時間（補量修好之前的日子、盤中接手之前的那一段）→ 沒辦法從期交所補回來。
+    種子檔記「這根 15 分K（開始時間）TradingView 的量 − 盤面當時的量」，照那 15 分鐘裡各分鐘期交所的量比例分進去；每根只套一次（_vq['seed'] 記帳）。
+    套到還在對帳的那一盤時，把接手時記的基準（off）扣掉同樣的量——那一段本來就是「不知道落在哪、所以沒補」的，現在知道了；不扣的話下一次對帳會把它收回去。"""
+    try:
+        if not os.path.exists(VSEED_FILE):
+            return 0
+        with open(VSEED_FILE, encoding="utf-8") as fh:
+            seed = (json.load(fh) or {}).get("bars") or {}
+        done = _vq.setdefault("seed", {}); n = 0
+        for bk, lack in seed.items():
+            if bk in done or isinstance(lack, bool) or not isinstance(lack, (int, float)) or not (lack > 0):
+                continue
+            t0 = dt.datetime.strptime(bk, "%Y%m%d%H%M")
+            ks = [k for k in ((t0 + dt.timedelta(minutes=i)).strftime("%Y%m%d%H%M") for i in range(15)) if k in _bars]
+            if not ks:
+                continue                            # 這根的 1 分K 不在手上（太舊、或還沒抓到）→ 先不套、也不記帳
+            w = [max(_bars[k][4], 0.0) for k in ks]; sw = sum(w)
+            if not (sw > 0):
+                w = [1.0] * len(ks); sw = float(len(ks))
+            for k, wk in zip(ks, w):
+                _vfix[k] = _vfix.get(k, 0.0) + lack * wk / sw
+            done[bk] = lack; n += 1
+            hm = bk[8:12]; isday = "0845" <= hm < "1345"
+            cd = bk[:8] if (isday or hm >= "1500") else (t0 - dt.timedelta(days=1)).strftime("%Y%m%d")
+            for sk, st in _vq.items():
+                if "|" in sk and isinstance(st, dict) and st.get("v") == 2 and sk.split("|")[1] == cd and sk.split("|")[0].endswith("-F" if isday else "-M"):
+                    st["off"] = max(float(st.get("off", 0.0)) - lack, 0.0)
+        _state["vseed"] = len(done)
+        return n
+    except Exception as e:
+        _state["vseed_err"] = type(e).__name__
+        return 0
+
+
 def _load_json(f):
     with gzip.open(f, "rt", encoding="utf-8") as fh:
         return json.load(fh)
@@ -338,6 +376,10 @@ def _trim():
         _vfix.pop(k, None)
     for k in [k for k in _vq if "|" in k and k.split("|")[1] < cutv[:8]]:
         _vq.pop(k, None)
+    sd = _vq.get("seed")
+    if isinstance(sd, dict):
+        for k in [k for k in sd if k < cutv]:
+            sd.pop(k, None)
     futd = fut[:8]
     for d in _daily.values():
         for k in [k for k in d if k > futd]:
@@ -382,6 +424,7 @@ def update_data():
     if n["TX"] or n["TSE"]:
         _state["last_fetch"] = time.time()
     _state["fetch_err"] = "；".join(bad)      # 抓不到要顯示在網頁上，不可以默默拿舊資料當新的
+    _vseed_apply()                          # 期交所補不回來的少算，用種子檔補（每根只套一次）
     return n
 
 
@@ -1204,7 +1247,7 @@ def dash_chart(inst, tf, since=None):
             _lk = sorted(_SMZ_TV["lines"])
             meta["smz_tv"] = {"read_at": _SMZ_TV.get("read_at"), "last": _lk[-1] if _lk else None}
         if inst == "TX" and _state.get("vfix"):                 # 逐分量補量的對帳狀態（驗收用）
-            meta["vfix"] = _state.get("vfix"); meta["vfs"] = _state.get("vfs")
+            meta["vfix"] = _state.get("vfix"); meta["vfs"] = _state.get("vfs"); meta["vseed"] = _state.get("vseed")
         if inst == "TX" and tf == "15" and _SMG.get("TX"):     # 測穿版缺口框：右端還在圖表範圍內的
             meta["smg"] = [g for g in _SMG["TX"] if g[1] >= rows[0][0]]
         if since is not None:
